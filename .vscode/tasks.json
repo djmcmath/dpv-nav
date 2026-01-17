@@ -1,0 +1,27 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Arduino: Generate compile_commands.json",
+      "type": "shell",
+      "command": "d:\\Program Files\\Arduino IDE\\arduino-cli",
+      "args": [
+        "compile",
+        "-b",
+        "esp32:esp32:featheresp32",
+        "--only-compilation-database",
+        "--build-path",
+        "${workspaceFolder}/firmware/build",
+        "--clean"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}\\firmware"
+      },
+      "problemMatcher": [],
+      "group": {
+        "kind": "build",
+        "isDefault": false
+      }
+    }
+  ]
+}

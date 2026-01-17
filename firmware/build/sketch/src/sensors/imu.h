@@ -1,3 +1,4 @@
+#line 1 "D:\\Documents\\dpv-nav\\firmware\\src\\sensors\\imu.h"
 
 #pragma once
 #include <stdint.h>

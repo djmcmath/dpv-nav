@@ -1,0 +1,9 @@
+{
+  "additionalFiles": "..\\..\\..,..\\..\\..,..\\..\\..,..\\..\\..\\..,..\\..\\..\\..,..\\..\\..\\..,..\\..\\..\\..,..\\..\\..\\..,..\\..\\..\\..,..\\..\\..\\..,..\\..\\..\\..,..\\..\\..\\..,..\\..\\..\\..,..\\..\\..,..\\..\\..,..\\..\\..\\..,..\\..\\..\\..,..\\..\\..\\..,..\\..\\..\\..,..\\..\\..\\..,..\\..\\..\\..,..\\..\\..\\..,..\\..\\..\\..,..\\..\\..\\..,..\\..\\..\\..,..\\..\\..\\..,..\\..\\..\\..,..\\..\\..\\..,..\\..\\..\\..,..\\..\\..\\..,..\\..\\..\\..,..\\..\\..\\..,..\\..\\..\\..",
+  "compiler.optimization_flags": "-Os",
+  "customBuildProperties": "",
+  "fqbn": "esp32:esp32:featheresp32",
+  "hardwareFolders": "C:\\Users\\djmcm\\AppData\\Local\\Arduino15\\packages\\esp32\\hardware\\esp32\\3.1.1,C:\\Users\\djmcm\\AppData\\Local\\Arduino15\\packages\\esp32\\hardware\\esp32\\3.1.1",
+  "otherLibrariesFolders": "C:\\Users\\djmcm\\OneDrive\\Documents\\Arduino\\libraries",
+  "sketchLocation": "D:\\Documents\\dpv-nav\\firmware"
+}

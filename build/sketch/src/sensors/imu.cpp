@@ -1,3 +1,4 @@
+#line 1 "D:\\Documents\\dpv-nav\\firmware\\src\\sensors\\imu.cpp"
 #include <Wire.h>
 #include "../board_pins.h"
 #include "../drivers/lis3mdl.h"

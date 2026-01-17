@@ -1,3 +1,4 @@
+#line 1 "D:\\Documents\\dpv-nav\\firmware\\src\\sensors\\calib.cpp"
 struct Calib3 {
   Vec3 bias;     // subtract
   Vec3 scale;    // multiply (1,1,1 if unused)

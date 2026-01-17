@@ -1,3 +1,4 @@
+#line 1 "D:\\Documents\\dpv-nav\\firmware\\src\\main.cpp"
 #include <Wire.h>
 #include <math.h>
 #include <Arduino.h>

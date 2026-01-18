@@ -3,12 +3,11 @@
 #include <Arduino.h>
 #include "main.h"
 #include "board_pins.h"
-#include "sensors/imu.h"
-#include "nav/ui_controller.h"
-#include "types/types.h"
-#include "math/orientation.h"
-#include "math/mahony.h"
-
+#include "./sensors/imu.h"
+#include "./nav/ui_controller.h"
+#include "./types/types.h"
+#include "./math/orientation.h"
+#include "./math/mahony.h"
 
 MahonyState ahrs;
 MahonyParams params{ .kp = 2.0f, .ki = 0.0f, .useMag = true };

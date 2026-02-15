@@ -4,11 +4,12 @@
 #include "../types/types.h"
 #include <Arduino.h>
 #include <Wire.h>
+#include "calib.h"  // For MagCalib struct
 
 namespace imu {
 
-struct Vec3i16 { int16_t x, y, z; };
-struct Vec3f   { float   x, y, z; };
+//struct Vec3i16 { int16_t x, y, z; };
+//struct Vec3f   { float   x, y, z; };
 
 enum class ImuStatus : uint8_t {
   Ok = 0,
@@ -16,25 +17,12 @@ enum class ImuStatus : uint8_t {
   BusError,
   WhoAmIMismatch,
   DataNotReady,
+  Error,
 };
 
-struct ImuConfig {
-  // Full-scale ranges (you’ll map to sensor register values in .cpp)
-  float accel_g_fullscale;     // e.g. 2, 4, 8, 16
-  float gyro_dps_fullscale;    // e.g. 250, 500, 1000, 2000
-  float mag_uT_fullscale;      // depends on sensor; ok to ignore initially
-  uint16_t sample_hz;          // e.g. 100
-};
 
-struct AxisMap {
-  // maps logical X/Y/Z to sensor axes with sign
-  // Example: +X = sensor Y, +Y = -sensor X, +Z = sensor Z
-  int8_t x_axis; // +1=+X, -1=-X, +2=+Y, -2=-Y, +3=+Z, -3=-Z
-  int8_t y_axis;
-  int8_t z_axis;
-};
 
-bool init(const ImuConfig& cfg, const AxisMap& map);
+bool init(const ImuConfig& cfg, const AxisMap& accelGyroMap, const AxisMap& magMap);
 
 ImuStatus initAccelGyro(TwoWire& wire =  Wire);
 ImuStatus initMag(TwoWire& wire = Wire);
@@ -43,14 +31,37 @@ ImuStatus readAccelRaw(Vec3i16& out);
 ImuStatus readGyroRaw(Vec3i16& out);
 ImuStatus readMagRaw(Vec3i16& out);
 
-// Converted units:
+// Read sensors in their native/sensor frame (no axis mapping applied)
+// Use these for diagnostics to determine correct axis mapping
+ImuStatus readAccelRaw_SensorFrame(Vec3i16& out);
+ImuStatus readGyroRaw_SensorFrame(Vec3i16& out);
+ImuStatus readMagRaw_SensorFrame(Vec3i16& out);
+
+// Converted units (calibrated only):
 ImuStatus readAccel_g(Vec3f& out);        // g
 ImuStatus readGyro_rad_s(Vec3f& out);     // rad/s
-ImuStatus readMag_uT(Vec3f& out);         // µT (or “sensor units” if you don’t have scale yet)
+ImuStatus readMag_uT(Vec3f& out);         // µT (or "sensor units" if you don't have scale yet)
 
+// Converted units with both raw and calibrated outputs:
+ImuStatus readAccel_g_raw_cal(Vec3f& rawOut, Vec3f& calOut);  // g (raw = uncalibrated, cal = with bias/scale applied)
+ImuStatus readGyro_rad_s_raw_cal(Vec3f& rawOut, Vec3f& calOut);  // rad/s (raw = uncalibrated, cal = with bias applied)
+ImuStatus readMag_raw_cal(Vec3f& rawOut, Vec3f& calOut);  // calibrated mag with environmental + hard/soft-iron correction
 
-//    void init();
-//    void initMag();
-//    mag_reading readMagRaw(int16_t &mx, int16_t &my, int16_t &mz);
+// Calibrated magnetometer read:
+ImuStatus readMag(Vec3f& out);            // Mag with hard/soft-iron calibration applied
+
+// --- Calibration setters ---
+// Set the calibration data used by all read functions.
+// Call after loading from SPIFFS or after running a calibrate function.
+void setAccelCalibration(const Calib3& cal);
+void setGyroCalibration(const Calib3& cal);
+void setMagCalibration(const MagCalib& cal);
+
+// --- Calibration routines ---
+// Each writes result to `out` AND updates the internal calibration state,
+// so subsequent reads are immediately calibrated.
+void calibrateMagnetometer(MagCalib& out, uint32_t duration_ms = 30000);
+void calibrateGyroscope(Calib3& out, uint32_t duration_ms = 10000);
+void calibrateAccelerometer(Calib3& out, uint32_t sample_duration_ms = 1500);
 
 }

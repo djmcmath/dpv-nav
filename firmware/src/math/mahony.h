@@ -1,7 +1,6 @@
 #pragma once
 #include <stdint.h>
-
-struct Vec3 { float x, y, z; };
+#include "../types/types.h"
 
 struct Quaternion {
   float w, x, y, z;
@@ -15,16 +14,16 @@ struct MahonyParams {
 
 struct MahonyState {
   Quaternion q;      // orientation
-  Vec3 integralFB;   // integral feedback (gyro bias estimate-ish)
+  imu::Vec3f integralFB;   // integral feedback (gyro bias estimate-ish)
 };
 
 void mahonyInit(MahonyState& s);
 void mahonyUpdate(
   MahonyState& s,
   const MahonyParams& p,
-  const Vec3& gyroRad_s,     // rad/s
-  const Vec3& accel,         // any units; will be normalized internally
-  const Vec3& mag,           // any units; will be normalized internally
+  const imu::Vec3f& gyroRad_s,     // rad/s
+  const imu::Vec3f& accel,         // any units; will be normalized internally
+  const imu::Vec3f& mag,           // any units; will be normalized internally
   float dtSeconds
 );
 

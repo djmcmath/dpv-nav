@@ -7,12 +7,25 @@
 #include <math.h>
 //#include "i2c.h"
 
+// No more extern globals — each sensor keeps its own internal calibration state,
+// set via setXxxCalibration() for a consistent pattern across all three sensors.
+
 namespace imu {
 
+
+// ---------- I2C addresses (7-bit) ----------
+static constexpr uint8_t LSM6DS3_ADDR_SA0_0 = 0x6A; // SA0 low (derived from D4h/D5h patterns) :contentReference[oaicite:3]{index=3}
+static constexpr uint8_t LSM6DS3_ADDR_SA0_1 = 0x6B; // SA0 high (common alt; use if 0x6A fails)
+//static constexpr uint8_t LIS3MDL_ADDR_DEFAULT = 0x1C; // :contentReference[oaicite:4]{index=4} //May be 19 or 1E instead.
+static constexpr uint8_t LIS3MDL_ADDR_DEFAULT = 0x19; // :contentReference[oaicite:4]{index=4}
+
 // ----------- Internal state -----------
-static bool g_inited = false;
+static bool gyro_inited = false;
+static bool accel_inited = false;
+static bool mag_inited = false;
 static ImuConfig g_cfg{};
-static AxisMap g_map{};
+static AxisMap g_accelGyroMap{};  // Axis mapping for LSM6DS3 (accel/gyro)
+static AxisMap g_magMap{};        // Axis mapping for LIS3MDL (magnetometer)
 
 static float g_accel_lsb_per_g = 0.0f;     // counts per g
 static float g_gyro_lsb_per_dps = 0.0f;    // counts per deg/s
@@ -21,10 +34,13 @@ static float g_mag_lsb_per_uT = 0.0f;      // counts per µT (if known)
 static TwoWire* gWire = nullptr;
 static uint8_t  gLsmAddr = LSM6DS3_ADDR_SA0_0;
 
-// ---------- I2C addresses (7-bit) ----------
-static constexpr uint8_t LSM6DS3_ADDR_SA0_0 = 0x6A; // SA0 low (derived from D4h/D5h patterns) :contentReference[oaicite:3]{index=3}
-static constexpr uint8_t LSM6DS3_ADDR_SA0_1 = 0x6B; // SA0 high (common alt; use if 0x6A fails)
-static constexpr uint8_t LIS3MDL_ADDR_DEFAULT = 0x1C; // :contentReference[oaicite:4]{index=4}
+// Internal calibration data — set via setXxxCalibration(), used by read functions
+static Calib3 g_gyroCalibration = {{0, 0, 0}, {1, 1, 1}};
+static Calib3 g_accelCalibration = {{0, 0, 0}, {1, 1, 1}};
+static MagCalib g_magCalibration = {
+  {0, 0, 0},  // no offset by default
+  {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}  // identity soft-iron matrix
+};
 
 // ---------- LSM6DS3 registers ----------
 static constexpr uint8_t LSM6DS3_WHO_AM_I   = 0x0F; // returns 0x69 :contentReference[oaicite:5]{index=5}
@@ -70,10 +86,22 @@ static bool readN(uint8_t addr, uint8_t startReg, uint8_t* buf, size_t n) {
 static bool detectLsm6ds3Address() {
   uint8_t who = 0;
   gLsmAddr = LSM6DS3_ADDR_SA0_0;
-  if (read8(gLsmAddr, LSM6DS3_WHO_AM_I, who) && who == 0x69) return true; // :contentReference[oaicite:6]{index=6}
+  if (read8(gLsmAddr, LSM6DS3_WHO_AM_I, who) && who == 0x69) {
+    Serial.print("WHO_AM_I match at 0x6A: 0x");
+    Serial.println(who, HEX);
+    return true;
+  }
+  Serial.print("0x6A WHO_AM_I: 0x");
+  Serial.println(who, HEX);
 
   gLsmAddr = LSM6DS3_ADDR_SA0_1;
-  if (read8(gLsmAddr, LSM6DS3_WHO_AM_I, who) && who == 0x69) return true; // :contentReference[oaicite:7]{index=7}
+  if (read8(gLsmAddr, LSM6DS3_WHO_AM_I, who) && who == 0x69) {
+    Serial.print("WHO_AM_I match at 0x6B: 0x");
+    Serial.println(who, HEX);
+    return true;
+  }
+  Serial.print("0x6B WHO_AM_I: 0x");
+  Serial.println(who, HEX);
 
   return false;
 }
@@ -81,7 +109,7 @@ static bool detectLsm6ds3Address() {
 // ----------- Helpers -----------
 static inline float dpsToRad(float dps) { return dps * 0.017453292519943295f; }
 
-static Vec3i16 applyAxisMap(const Vec3i16& v) {
+static Vec3i16 applyAxisMap(const Vec3i16& v, const AxisMap& map) {
   auto pick = [&](int8_t code) -> int16_t {
     int sign = (code < 0) ? -1 : 1;
     int idx  = (code < 0) ? -code : code;
@@ -95,67 +123,470 @@ static Vec3i16 applyAxisMap(const Vec3i16& v) {
     return (int16_t)(sign * val);
   };
 
-  return { pick(g_map.x_axis), pick(g_map.y_axis), pick(g_map.z_axis) };
+  return { pick(map.x_axis), pick(map.y_axis), pick(map.z_axis) };
 }
 
 static Vec3f toFloat(const Vec3i16& v) { return {(float)v.x, (float)v.y, (float)v.z}; }
 
+// ----------- Magnetometer Calibration -----------
+// Performs a min/max sweep calibration over a specified duration.
+// User must rotate device through all orientations during this time.
+// Computes bias as (min + max) / 2 for each axis.
+// Sets softIron to identity (no soft iron correction).
+void calibrateMagnetometer(MagCalib& out, uint32_t duration_ms) {
+  if (!mag_inited) {
+    Serial.println("[CAL] Error: Magnetometer not initialized");
+    out.bias = {0, 0, 0};
+    // Identity matrix
+    out.softIron[0][0] = 1; out.softIron[0][1] = 0; out.softIron[0][2] = 0;
+    out.softIron[1][0] = 0; out.softIron[1][1] = 1; out.softIron[1][2] = 0;
+    out.softIron[2][0] = 0; out.softIron[2][1] = 0; out.softIron[2][2] = 1;
+    return;
+  }
 
-// -------------- Init --------------
-bool init(const ImuConfig& cfg, const AxisMap& map) {
-  g_cfg = cfg;
-  g_map = map;
+  Serial.println("[CAL] ========================================");
+  Serial.println("[CAL] MAGNETOMETER CALIBRATION");
+  Serial.println("[CAL] ========================================");
+  Serial.print("[CAL] Duration: ");
+  Serial.print(duration_ms / 1000);
+  Serial.println(" seconds");
+  Serial.println("[CAL] ");
+  Serial.println("[CAL] Rotate device SLOWLY through all orientations:");
+  Serial.println("[CAL]   - Tumble (rotate around all axes)");
+  Serial.println("[CAL]   - Figure-8 patterns");
+  Serial.println("[CAL]   - Hold each orientation for 1-2 seconds");
+  Serial.println("[CAL] ");
+  Serial.println("[CAL] Goal: X, Y, Z coverage all reach 100%");
+  Serial.println("[CAL] ----------------------------------------");
 
-  // You can call each init separately too, but this is convenient.
-  if (initAccel() != ImuStatus::Ok) return false;
-  if (initGyro()  != ImuStatus::Ok) return false;
-  if (initMag()   != ImuStatus::Ok) return false;
+  // Initialize min/max with first reading
+  Vec3i16 firstRead;
+  readMagRaw_SensorFrame(firstRead);  // Use sensor frame for calibration
 
-  g_inited = true;
-  return true;
+  int16_t minX = firstRead.x, maxX = firstRead.x;
+  int16_t minY = firstRead.y, maxY = firstRead.y;
+  int16_t minZ = firstRead.z, maxZ = firstRead.z;
 
+  uint32_t startTime = millis();
+  uint32_t sampleCount = 0;
+  uint32_t lastProgressUpdate = 0;
+
+  // Expected full-rotation range (approximate, for coverage estimation)
+  // For a typical magnetometer in Earth's field (~50 µT), rotating 360° gives:
+  // Range ≈ 2 * field_strength * LSB/µT ≈ 2 * 50 * 68.42 ≈ 6800 counts
+  const float EXPECTED_RANGE = 6800.0f;
+
+  // Sweep for specified duration
+  while (millis() - startTime < duration_ms) {
+    Vec3i16 reading;
+    if (readMagRaw_SensorFrame(reading) == ImuStatus::Ok) {  // Use sensor frame
+      minX = min(minX, reading.x);
+      maxX = max(maxX, reading.x);
+      minY = min(minY, reading.y);
+      maxY = max(maxY, reading.y);
+      minZ = min(minZ, reading.z);
+      maxZ = max(maxZ, reading.z);
+      sampleCount++;
+
+      // Update progress every second
+      uint32_t elapsed = millis() - startTime;
+      if (elapsed - lastProgressUpdate >= 1000) {
+        lastProgressUpdate = elapsed;
+        uint32_t remaining = (duration_ms - elapsed) / 1000;
+
+        // Calculate coverage percentages
+        float rangeX = maxX - minX;
+        float rangeY = maxY - minY;
+        float rangeZ = maxZ - minZ;
+
+        int coverageX = min(100, (int)((rangeX / EXPECTED_RANGE) * 100.0f));
+        int coverageY = min(100, (int)((rangeY / EXPECTED_RANGE) * 100.0f));
+        int coverageZ = min(100, (int)((rangeZ / EXPECTED_RANGE) * 100.0f));
+
+        // Print progress bar style output
+        Serial.print("[CAL] ");
+        Serial.print(remaining);
+        Serial.print("s | Samples: ");
+        Serial.print(sampleCount);
+        Serial.print(" | Coverage X:");
+        Serial.print(coverageX);
+        Serial.print("% Y:");
+        Serial.print(coverageY);
+        Serial.print("% Z:");
+        Serial.print(coverageZ);
+        Serial.print("%");
+
+        // Add quality indicator
+        int avgCoverage = (coverageX + coverageY + coverageZ) / 3;
+        if (avgCoverage >= 80) {
+          Serial.println(" [EXCELLENT]");
+        } else if (avgCoverage >= 60) {
+          Serial.println(" [GOOD]");
+        } else if (avgCoverage >= 40) {
+          Serial.println(" [OK - keep rotating]");
+        } else {
+          Serial.println(" [POOR - rotate more!]");
+        }
+      }
+    }
+    delay(10);  // ~100 Hz sampling
+  }
+
+  // Calculate bias as midpoint of min/max range (in sensor frame)
+  float biasX = ((float)(minX + maxX)) / 2.0f;
+  float biasY = ((float)(minY + maxY)) / 2.0f;
+  float biasZ = ((float)(minZ + maxZ)) / 2.0f;
+
+  // Apply axis mapping to convert bias from sensor frame to logical frame
+  // This is critical because readMag() applies axis mapping BEFORE calibration,
+  // so the bias must be in the same (logical) frame as the readings it corrects.
+  Vec3i16 biasSensorInt = {(int16_t)biasX, (int16_t)biasY, (int16_t)biasZ};
+  Vec3i16 biasLogical = applyAxisMap(biasSensorInt, g_magMap);
+
+  out.bias = {(float)biasLogical.x, (float)biasLogical.y, (float)biasLogical.z};
   
+  // Identity matrix for soft iron (no correction)
+  out.softIron[0][0] = 1; out.softIron[0][1] = 0; out.softIron[0][2] = 0;
+  out.softIron[1][0] = 0; out.softIron[1][1] = 1; out.softIron[1][2] = 0;
+  out.softIron[2][0] = 0; out.softIron[2][1] = 0; out.softIron[2][2] = 1;
+
+  g_magCalibration = out;  // Update internal calibration used by readMag()/readMag_raw_cal()
+
+  // Calculate final coverage statistics
+  float rangeX = maxX - minX;
+  float rangeY = maxY - minY;
+  float rangeZ = maxZ - minZ;
+  
+  int coverageX = min(100, (int)((rangeX / EXPECTED_RANGE) * 100.0f));
+  int coverageY = min(100, (int)((rangeY / EXPECTED_RANGE) * 100.0f));
+  int coverageZ = min(100, (int)((rangeZ / EXPECTED_RANGE) * 100.0f));
+  int avgCoverage = (coverageX + coverageY + coverageZ) / 3;
+
+  Serial.println("[CAL] ========================================");
+  Serial.println("[CAL] CALIBRATION COMPLETE!");
+  Serial.println("[CAL] ========================================");
+  Serial.print("[CAL] Samples collected: ");
+  Serial.println(sampleCount);
+  Serial.print("[CAL] Bias (sensor frame): X=");
+  Serial.print(biasX, 1);
+  Serial.print(" Y=");
+  Serial.print(biasY, 1);
+  Serial.print(" Z=");
+  Serial.println(biasZ, 1);
+  Serial.print("[CAL] Bias (logical frame): X=");
+  Serial.print(out.bias.x, 1);
+  Serial.print(" Y=");
+  Serial.print(out.bias.y, 1);
+  Serial.print(" Z=");
+  Serial.println(out.bias.z, 1);
+
+  Serial.println("[CAL] ");
+  Serial.print("[CAL] Final Coverage: X=");
+  Serial.print(coverageX);
+  Serial.print("% Y=");
+  Serial.print(coverageY);
+  Serial.print("% Z=");
+  Serial.print(coverageZ);
+  Serial.print("% (Avg: ");
+  Serial.print(avgCoverage);
+  Serial.println("%)");
+
+  if (avgCoverage >= 80) {
+    Serial.println("[CAL] ✓ EXCELLENT coverage - calibration should be accurate");
+  } else if (avgCoverage >= 60) {
+    Serial.println("[CAL] ✓ GOOD coverage - calibration acceptable");
+  } else if (avgCoverage >= 40) {
+    Serial.println("[CAL] ⚠ MODERATE coverage - may need recalibration");
+  } else {
+    Serial.println("[CAL] ✗ POOR coverage - recalibration recommended!");
+  }
+  Serial.println("[CAL] ========================================");
+  Serial.print("[CAL] Field range (sensor frame) - X:[");
+  Serial.print(minX); Serial.print(", ");
+  Serial.print(maxX); Serial.print("] Y:[");
+  Serial.print(minY); Serial.print(", ");
+  Serial.print(maxY); Serial.print("] Z:[");
+  Serial.print(minZ); Serial.print(", ");
+  Serial.print(maxZ); Serial.println("]");
+  Serial.println("[CAL] (Bias converted to logical frame for use with axis mapping)");
 }
 
-ImuStatus initAccelGyro() {
+
+// ----------- Gyroscope Calibration -----------
+// Calibrates gyroscope bias by sampling at rest
+void calibrateGyroscope(Calib3& out, uint32_t duration_ms) {
+  if (!gyro_inited) {
+    Serial.println("[CAL] Error: Gyroscope not initialized");
+    out.bias = {0, 0, 0};
+    out.scale = {1, 1, 1};
+    return;
+  }
+
+  Serial.println("[CAL] ========================================");
+  Serial.println("[CAL] GYROSCOPE CALIBRATION");
+  Serial.println("[CAL] ========================================");
+  Serial.println("[CAL] Place device on stable, level surface");
+  Serial.println("[CAL] Do NOT move or rotate the device");
+  Serial.print("[CAL] Starting in 5 seconds...");
+  delay(5000);
+  Serial.println(" Go!");
+
+  // Initialize accumulators
+  double sumX = 0, sumY = 0, sumZ = 0;
+  uint32_t sampleCount = 0;
+  uint32_t startTime = millis();
+
+  // Sample for specified duration
+  while (millis() - startTime < duration_ms) {
+    Vec3i16 reading;
+    if (readGyroRaw(reading) == ImuStatus::Ok) {
+      sumX += reading.x;
+      sumY += reading.y;
+      sumZ += reading.z;
+      sampleCount++;
+    }
+    delay(10);  // ~100 Hz sampling
+  }
+
+  // Calculate average (bias)
+  if (sampleCount > 0) {
+    out.bias.x = (float)(sumX / (double)sampleCount);
+    out.bias.y = (float)(sumY / (double)sampleCount);
+    out.bias.z = (float)(sumZ / (double)sampleCount);
+  } else {
+    out.bias = {0, 0, 0};
+  }
+
+  // Scale is identity (no scaling calibration for gyro currently)
+  out.scale = {1, 1, 1};
+
+  g_gyroCalibration = out;
+
+  Serial.println("[CAL] Gyroscope calibration complete!");
+  Serial.print("[CAL] Samples collected: ");
+  Serial.println(sampleCount);
+  Serial.print("[CAL] Gyro bias (raw counts): X=");
+  Serial.print(out.bias.x, 1);
+  Serial.print(" Y=");
+  Serial.print(out.bias.y, 1);
+  Serial.print(" Z=");
+  Serial.println(out.bias.z, 1);
+  Serial.print("[CAL] Gyro bias (rad/s): X=");
+  Serial.print((out.bias.x / g_gyro_lsb_per_dps) * 0.017453292519943295f, 6);
+  Serial.print(" Y=");
+  Serial.print((out.bias.y / g_gyro_lsb_per_dps) * 0.017453292519943295f, 6);
+  Serial.print(" Z=");
+  Serial.println((out.bias.z / g_gyro_lsb_per_dps) * 0.017453292519943295f, 6);
+}
+
+// ----------- Accelerometer Calibration -----------
+// Calibrates accelerometer by sampling at 6 orientations (±X, ±Y, ±Z)
+void calibrateAccelerometer(Calib3& out, uint32_t sample_duration_ms) {
+  if (!accel_inited) {
+    Serial.println("[CAL] Error: Accelerometer not initialized");
+    out.bias = {0, 0, 0};
+    out.scale = {1, 1, 1};
+    return;
+  }
+
+  Serial.println("[CAL] ========================================");
+  Serial.println("[CAL] ACCELEROMETER CALIBRATION");
+  Serial.println("[CAL] ========================================");
+  Serial.println("[CAL] You will be asked to orient the device in 6 directions.");
+  Serial.println("[CAL] For each direction: place device, wait for sampling, then proceed.");
+  delay(3000);
+
+  // Arrays to store average readings for each orientation
+  // Calibration measures LOGICAL (NED frame) axes after axis mapping
+  // NED frame: +X=forward/north, +Y=right/east, +Z=down
+  // Place device with each NED axis pointing UP (against gravity)
+  struct {
+    Vec3f avg;
+    const char* name;
+  } measurements[6] = {
+    { {0, 0, 0}, "Forward edge UP (NED +X up)" },
+    { {0, 0, 0}, "Back edge UP (NED -X up)" },
+    { {0, 0, 0}, "RIGHT edge UP (NED +Y up)" },
+    { {0, 0, 0}, "LEFT edge UP (NED -Y up)" },
+    { {0, 0, 0}, "BOTTOM side UP (NED +Z up - upside down)" },
+    { {0, 0, 0}, "TOP side UP (NED -Z up - normal)" }
+  };
+
+  // Calibrate each axis
+  for (int i = 0; i < 6; i++) {
+    Serial.println("[CAL] ----------------------------------------");
+    Serial.print("[CAL] Orientation ");
+    Serial.print(i + 1);
+    Serial.print(" of 6: ");
+    Serial.println(measurements[i].name);
+    Serial.print("[CAL] Place device with this axis UP, then press any key or wait 2 second...");
+    delay(2500);
+    Serial.println(" Sampling!");
+
+    // Sample for specified duration
+    double sumX = 0, sumY = 0, sumZ = 0;
+    uint32_t sampleCount = 0;
+    uint32_t startTime = millis();
+
+    while (millis() - startTime < sample_duration_ms) {
+      Vec3i16 reading;
+      if (readAccelRaw(reading) == ImuStatus::Ok) {
+        sumX += reading.x;
+        sumY += reading.y;
+        sumZ += reading.z;
+        sampleCount++;
+      }
+      delay(10);
+    }
+
+    // Store average
+    if (sampleCount > 0) {
+      measurements[i].avg.x = (float)(sumX / (double)sampleCount);
+      measurements[i].avg.y = (float)(sumY / (double)sampleCount);
+      measurements[i].avg.z = (float)(sumZ / (double)sampleCount);
+    }
+
+    Serial.print("[CAL] Samples: ");
+    Serial.print(sampleCount);
+    Serial.print(" | Raw avg: X=");
+    Serial.print(measurements[i].avg.x, 0);
+    Serial.print(" Y=");
+    Serial.print(measurements[i].avg.y, 0);
+    Serial.print(" Z=");
+    Serial.println(measurements[i].avg.z, 0);
+  }
+
+  // Calculate bias and scale from the 6 measurements
+  // Each axis should show +/-1g when pointing up/down
+  // bias = (max + min) / 2 (in raw counts)
+  // scale = g_accel_lsb_per_g / (max - bias) (dimensionless correction factor)
+  // Expected range is ±1g = ±g_accel_lsb_per_g counts
+
+  // X axis
+  float xMax = max(measurements[0].avg.x, measurements[1].avg.x);
+  float xMin = min(measurements[0].avg.x, measurements[1].avg.x);
+  out.bias.x = (xMax + xMin) / 2.0f;
+  out.scale.x = g_accel_lsb_per_g / ((xMax - xMin) / 2.0f);  // Dimensionless
+
+  // Y axis
+  float yMax = max(measurements[2].avg.y, measurements[3].avg.y);
+  float yMin = min(measurements[2].avg.y, measurements[3].avg.y);
+  out.bias.y = (yMax + yMin) / 2.0f;
+  out.scale.y = g_accel_lsb_per_g / ((yMax - yMin) / 2.0f);  // Dimensionless
+
+  // Z axis
+  float zMax = max(measurements[4].avg.z, measurements[5].avg.z);
+  float zMin = min(measurements[4].avg.z, measurements[5].avg.z);
+  out.bias.z = (zMax + zMin) / 2.0f;
+  out.scale.z = g_accel_lsb_per_g / ((zMax - zMin) / 2.0f);  // Dimensionless
+
+  g_accelCalibration = out;
+
+  Serial.println("[CAL] ========================================");
+  Serial.println("[CAL] ACCELEROMETER CALIBRATION COMPLETE");
+  Serial.println("[CAL] ========================================");
+  Serial.print("[CAL] Bias (raw counts): X=");
+  Serial.print(out.bias.x, 1);
+  Serial.print(" Y=");
+  Serial.print(out.bias.y, 1);
+  Serial.print(" Z=");
+  Serial.println(out.bias.z, 1);
+  Serial.print("[CAL] Bias (m/s²): X=");
+  Serial.print(out.bias.x, 6);
+  Serial.print(" Y=");
+  Serial.print(out.bias.y, 6);
+  Serial.print(" Z=");
+  Serial.println(out.bias.z, 6);
+  Serial.print("[CAL] Scale: X=");
+  Serial.print(out.scale.x, 6);
+  Serial.print(" Y=");
+  Serial.print(out.scale.y, 6);
+  Serial.print(" Z=");
+  Serial.println(out.scale.z, 6);
+}
+
+
+// -------------- Init --------------
+bool init(const ImuConfig& cfg, const AxisMap& accelGyroMap, const AxisMap& magMap) {
+  g_cfg = cfg;
+  g_accelGyroMap = accelGyroMap;
+  g_magMap = magMap;
+
+  Serial.println("Initializing IMU ...");
+
+  // You can call each init separately too, but this is convenient.
+  ImuStatus ag_return_val = initAccelGyro();
+  if (ag_return_val != ImuStatus::Ok) {
+    Serial.print("Error initializing IMU accel/gyro: ");
+    Serial.println((int)ag_return_val);
+    return false;
+  }
+  ImuStatus mag_return_val = initMag();
+  if (mag_return_val != ImuStatus::Ok) {
+    Serial.print("Error initializing IMU magnetometer: ");
+    Serial.println((int)mag_return_val);
+    return false;
+  }
+  
+  //inited = true;
+  return true;
+}
+
+ImuStatus initAccelGyro(TwoWire& wire) {
   gWire = &wire;
 
-  if (!detectLsm6ds3Address()) return false;
+  // Initialize I2C bus with correct pins
+  gWire->begin(SDA_PIN, SCL_PIN);
+  delay(50);
+
+  Serial.print("Scanning for LSM6DS3 at 0x6A or 0x6B...");
+  if (!detectLsm6ds3Address()) {
+    Serial.println(" FAILED");
+    return ImuStatus::WhoAmIMismatch;
+  }
+  Serial.print(" Found at 0x");
+  Serial.println(gLsmAddr, HEX);
 
   // Soft reset
-  if (!write8(gLsmAddr, LSM6DS3_CTRL3_C, CTRL3_SW_RESET)) return false;
+  if (!write8(gLsmAddr, LSM6DS3_CTRL3_C, CTRL3_SW_RESET)) return ImuStatus::BusError;
   delay(50);
 
   // Enable register auto-increment + block data update
   // (Read-modify-write is safer than blasting a constant)
   uint8_t ctrl3 = 0;
-  if (!read8(gLsmAddr, LSM6DS3_CTRL3_C, ctrl3)) return false;
+  if (!read8(gLsmAddr, LSM6DS3_CTRL3_C, ctrl3)) return ImuStatus::BusError;
   ctrl3 |= (CTRL3_IF_INC | CTRL3_BDU);
-  if (!write8(gLsmAddr, LSM6DS3_CTRL3_C, ctrl3)) return false;
+  if (!write8(gLsmAddr, LSM6DS3_CTRL3_C, ctrl3)) return ImuStatus::BusError;
 
   // --- Set accel config (CTRL1_XL) ---
   // ODR_XL=104 Hz (0100), FS_XL=±4g (10), BW_XL=100 Hz (10)
   // => 0b0100_10_10 = 0x4A
-  if (!write8(gLsmAddr, LSM6DS3_CTRL1_XL, 0x4A)) return false;
+  if (!write8(gLsmAddr, LSM6DS3_CTRL1_XL, 0x4A)) return ImuStatus::BusError;
+  
+  // Set accel sensitivity: ±4g range = 122 LSB/g (from datasheet)
+  g_accel_lsb_per_g = 8192.0f;
 
   // --- Set gyro config (CTRL2_G) ---
   // ODR_G=104 Hz (0100), FS_G=±500 dps (01), FS_125=0
   // => 0b0100_01_00 = 0x44
-  if (!write8(gLsmAddr, LSM6DS3_CTRL2_G, 0x44)) return false;
+  if (!write8(gLsmAddr, LSM6DS3_CTRL2_G, 0x44)) return ImuStatus::BusError;
+  
+  // Set gyro sensitivity: ±500 dps range = 65.5 LSB/dps (from datasheet)
+  g_gyro_lsb_per_dps = 65.5f;
 
-  return true;
+  accel_inited = true;
+  gyro_inited = true;
   return ImuStatus::Ok;
 }
 
-ImuStatus initMag() {
+ImuStatus initMag(TwoWire& wire) {
   // Optional: sanity check WHO_AM_I
-  Wire.begin(SDA_PIN, SCL_PIN);
-  Wire.beginTransmission(LIS3MDL_ADDR);
-  Wire.write(LIS3MDL_REG_WHO_AM_I);
-  Wire.endTransmission(false);
-  Wire.requestFrom((int)LIS3MDL_ADDR, 1);
-  uint8_t who = Wire.available() ? Wire.read() : 0xFF;
-
+  wire.begin(SDA_PIN, SCL_PIN);
+  wire.beginTransmission(LIS3MDL_ADDR);
+  wire.write(LIS3MDL_REG_WHO_AM_I);
+  wire.endTransmission(false);
+  wire.requestFrom((int)LIS3MDL_ADDR, 1);
+  uint8_t who = wire.available() ? wire.read() : 0xFF;
   //Serial.print("LIS3MDL WHO_AM_I (expect 0x3D): 0x");
   //Serial.println(who, HEX);
 
@@ -176,52 +607,78 @@ ImuStatus initMag() {
 
   delay(20); // give it a moment
 
-  g_mag_lsb_per_uT = 1.0f; // placeholder
+  g_mag_lsb_per_uT = 6842.0f / 100.0f; // 6842 LSB/gauss = 6842/100 LSB/µT for ±4 gauss FS in UHP mode
+  mag_inited = true;
   return ImuStatus::Ok;
 }
 
-// ----------- Raw reads -----------
-ImuStatus readAccelRaw(Vec3i16& out) {
-  if (!g_inited) return ImuStatus::NotInitialized;
+// ----------- Raw reads (sensor frame, NO axis mapping) -----------
+// These return data in the sensor's native coordinate frame for diagnostics
+ImuStatus readAccelRaw_SensorFrame(Vec3i16& vecOut) {
+  if (!accel_inited) return ImuStatus::NotInitialized;
   uint8_t b[6];
-  if (!readN(gLsmAddr, LSM6DS3_OUTX_L_XL, b, 6)) return false;
+  if (!readN(gLsmAddr, LSM6DS3_OUTX_L_XL, b, 6)) return ImuStatus::BusError;
 
-  out.x = (int16_t)((uint16_t)b[1] << 8 | b[0]);
-  out.y = (int16_t)((uint16_t)b[3] << 8 | b[2]);
-  out.z = (int16_t)((uint16_t)b[5] << 8 | b[4]);
+  vecOut.x = (int16_t)((uint16_t)b[1] << 8 | b[0]);
+  vecOut.y = (int16_t)((uint16_t)b[3] << 8 | b[2]);
+  vecOut.z = (int16_t)((uint16_t)b[5] << 8 | b[4]);
+
   return ImuStatus::Ok;
 }
 
-ImuStatus readGyroRaw(Vec3i16& out) {
-  if (!g_inited) return ImuStatus::NotInitialized;
+ImuStatus readGyroRaw_SensorFrame(Vec3i16& vecOut) {
+  if (!gyro_inited) return ImuStatus::NotInitialized;
   uint8_t b[6];
-  if (!readN(gLsmAddr, LSM6DS3_OUTX_L_G, b, 6)) return false;
+  if (!readN(gLsmAddr, LSM6DS3_OUTX_L_G, b, 6)) return ImuStatus::BusError;
 
-  out.x = (int16_t)((uint16_t)b[1] << 8 | b[0]);
-  out.y = (int16_t)((uint16_t)b[3] << 8 | b[2]);
-  out.z = (int16_t)((uint16_t)b[5] << 8 | b[4]);
+  vecOut.x = (int16_t)((uint16_t)b[1] << 8 | b[0]);
+  vecOut.y = (int16_t)((uint16_t)b[3] << 8 | b[2]);
+  vecOut.z = (int16_t)((uint16_t)b[5] << 8 | b[4]);
+
   return ImuStatus::Ok;
 }
 
-ImuStatus readMagRaw(int16_t &mx, int16_t &my, int16_t &mz) {
+ImuStatus readMagRaw_SensorFrame(Vec3i16& vecOut) {
+  if (!mag_inited) return ImuStatus::NotInitialized;
   uint8_t buffer[6];
   magRead(LIS3MDL_REG_OUT_X_L | 0x80, buffer, 6); // 0x80 for auto-increment
 
   // Little-endian: low byte first
-  mx = (int16_t)(buffer[1] << 8 | buffer[0]);
-  my = (int16_t)(buffer[3] << 8 | buffer[2]);
-  mz = (int16_t)(buffer[5] << 8 | buffer[4]);
+  vecOut.x = (int16_t)(buffer[1] << 8 | buffer[0]);
+  vecOut.y = (int16_t)(buffer[3] << 8 | buffer[2]);
+  vecOut.z = (int16_t)(buffer[5] << 8 | buffer[4]);
 
-  // Create the return object
-  mag_reading reading;
-  reading.x = mx;
-  reading.y = my;
-  reading.z = mz;
-  return reading;
+  return ImuStatus::Ok;
+}
 
-    if (!g_inited) return ImuStatus::NotInitialized;
-  out = {0,0,0}; // TODO (or call your existing code)
-  out = applyAxisMap(out);
+// ----------- Raw reads (WITH axis mapping) -----------
+ImuStatus readAccelRaw(Vec3i16& vecOut) {
+  Vec3i16 sensorFrame;
+  ImuStatus s = readAccelRaw_SensorFrame(sensorFrame);
+  if (s != ImuStatus::Ok) return s;
+
+  // Apply axis mapping to convert from sensor frame to logical frame (NED)
+  vecOut = applyAxisMap(sensorFrame, g_accelGyroMap);
+  return ImuStatus::Ok;
+}
+
+ImuStatus readGyroRaw(Vec3i16& vecOut) {
+  Vec3i16 sensorFrame;
+  ImuStatus s = readGyroRaw_SensorFrame(sensorFrame);
+  if (s != ImuStatus::Ok) return s;
+
+  // Apply axis mapping to convert from sensor frame to logical frame (NED)
+  vecOut = applyAxisMap(sensorFrame, g_accelGyroMap);
+  return ImuStatus::Ok;
+}
+
+ImuStatus readMagRaw(Vec3i16& vecOut) {
+  Vec3i16 sensorFrame;
+  ImuStatus s = readMagRaw_SensorFrame(sensorFrame);
+  if (s != ImuStatus::Ok) return s;
+
+  // Apply axis mapping to convert from sensor frame to logical frame (NED)
+  vecOut = applyAxisMap(sensorFrame, g_magMap);
   return ImuStatus::Ok;
 }
 
@@ -232,7 +689,44 @@ ImuStatus readAccel_g(Vec3f& out) {
   if (s != ImuStatus::Ok) return s;
 
   Vec3f f = toFloat(raw);
-  out = { f.x / g_accel_lsb_per_g, f.y / g_accel_lsb_per_g, f.z / g_accel_lsb_per_g };
+
+  // Apply calibration in raw counts domain, then convert to g
+  // Formula: ((raw - bias) * scale) / g_accel_lsb_per_g
+  // Where bias is in counts, scale is dimensionless, result is in g
+  out.x = ((f.x - g_accelCalibration.bias.x) * g_accelCalibration.scale.x) / g_accel_lsb_per_g;
+  out.y = ((f.y - g_accelCalibration.bias.y) * g_accelCalibration.scale.y) / g_accel_lsb_per_g;
+  out.z = ((f.z - g_accelCalibration.bias.z) * g_accelCalibration.scale.z) / g_accel_lsb_per_g;
+
+  return ImuStatus::Ok;
+}
+
+// Read accelerometer with both raw (uncalibrated) and calibrated outputs
+ImuStatus readAccel_g_raw_cal(Vec3f& rawOut, Vec3f& calOut) {
+  Vec3i16 raw;
+  ImuStatus s = readAccelRaw(raw);
+  if (s != ImuStatus::Ok) return s;
+
+  Vec3f f = toFloat(raw);
+
+  // Raw (uncalibrated, just converted to g)
+  rawOut = { f.x / g_accel_lsb_per_g, f.y / g_accel_lsb_per_g, f.z / g_accel_lsb_per_g };
+
+  // Calibrated: ((raw - bias) * scale) / g_accel_lsb_per_g (result in g)
+  calOut.x = ((f.x - g_accelCalibration.bias.x) * g_accelCalibration.scale.x) / g_accel_lsb_per_g;
+  calOut.y = ((f.y - g_accelCalibration.bias.y) * g_accelCalibration.scale.y) / g_accel_lsb_per_g;
+  calOut.z = ((f.z - g_accelCalibration.bias.z) * g_accelCalibration.scale.z) / g_accel_lsb_per_g;
+
+  return ImuStatus::Ok;
+}
+
+ImuStatus readAccel_mps2(Vec3f& out) {
+  Vec3f gVals;
+  ImuStatus s = readAccel_g(gVals);
+  if (s != ImuStatus::Ok) return s;
+
+  const float GRAVITY = 9.81f;  // m/s²
+
+  out = { gVals.x * GRAVITY, gVals.y * GRAVITY, gVals.z * GRAVITY };
   return ImuStatus::Ok;
 }
 
@@ -242,11 +736,35 @@ ImuStatus readGyro_rad_s(Vec3f& out) {
   if (s != ImuStatus::Ok) return s;
 
   Vec3f f = toFloat(raw);
+  // Apply bias subtraction in raw counts, then convert to dps then rad/s
+  float dps_x = (f.x - g_gyroCalibration.bias.x) / g_gyro_lsb_per_dps;
+  float dps_y = (f.y - g_gyroCalibration.bias.y) / g_gyro_lsb_per_dps;
+  float dps_z = (f.z - g_gyroCalibration.bias.z) / g_gyro_lsb_per_dps;
+
+  out = { dpsToRad(dps_x), dpsToRad(dps_y), dpsToRad(dps_z) };
+  return ImuStatus::Ok;
+}
+
+// Read gyroscope with both raw (uncalibrated) and calibrated outputs
+ImuStatus readGyro_rad_s_raw_cal(Vec3f& rawOut, Vec3f& calOut) {
+  Vec3i16 raw;
+  ImuStatus s = readGyroRaw(raw);
+  if (s != ImuStatus::Ok) return s;
+
+  Vec3f f = toFloat(raw);
   float dps_x = f.x / g_gyro_lsb_per_dps;
   float dps_y = f.y / g_gyro_lsb_per_dps;
   float dps_z = f.z / g_gyro_lsb_per_dps;
 
-  out = { dpsToRad(dps_x), dpsToRad(dps_y), dpsToRad(dps_z) };
+  // Raw (uncalibrated, just converted to rad/s)
+  rawOut = { dpsToRad(dps_x), dpsToRad(dps_y), dpsToRad(dps_z) };
+  
+  // Calibrated: apply bias subtraction
+  float cal_dps_x = dps_x - (g_gyroCalibration.bias.x / g_gyro_lsb_per_dps);
+  float cal_dps_y = dps_y - (g_gyroCalibration.bias.y / g_gyro_lsb_per_dps);
+  float cal_dps_z = dps_z - (g_gyroCalibration.bias.z / g_gyro_lsb_per_dps);
+  calOut = { dpsToRad(cal_dps_x), dpsToRad(cal_dps_y), dpsToRad(cal_dps_z) };
+
   return ImuStatus::Ok;
 }
 
@@ -257,6 +775,97 @@ ImuStatus readMag_uT(Vec3f& out) {
 
   Vec3f f = toFloat(raw);
   out = { f.x / g_mag_lsb_per_uT, f.y / g_mag_lsb_per_uT, f.z / g_mag_lsb_per_uT };
+  return ImuStatus::Ok;
+}
+
+// ----------- Calibration setters -----------
+// Set the calibration data used by all read functions.
+// Call these after loading from SPIFFS or after running a calibrate function.
+void setAccelCalibration(const Calib3& cal) {
+  g_accelCalibration = cal;
+}
+
+void setGyroCalibration(const Calib3& cal) {
+  g_gyroCalibration = cal;
+}
+
+void setMagCalibration(const MagCalib& cal) {
+  g_magCalibration = cal;
+}
+
+// Read magnetometer with both raw (uncalibrated) and calibrated outputs
+// rawOut: raw sensor values converted to µT (no calibration applied)
+// calOut: with environmental offset (hard-iron) + soft-iron correction applied
+ImuStatus readMag_raw_cal(Vec3f& rawOut, Vec3f& calOut) {
+  Vec3i16 rawSensor;
+  ImuStatus s = readMagRaw(rawSensor);
+  if (s != ImuStatus::Ok) return s;
+
+  // Convert raw to float in µT (uncalibrated)
+  Vec3f rawFloat = toFloat(rawSensor);
+  rawOut = { rawFloat.x / g_mag_lsb_per_uT, rawFloat.y / g_mag_lsb_per_uT, rawFloat.z / g_mag_lsb_per_uT };
+  //rawOut = { rawFloat.x / g_mag_lsb_per_uT, rawFloat.y / g_mag_lsb_per_uT, rawFloat.z / g_mag_lsb_per_uT };
+
+  // Apply hard-iron offset (bias subtraction)
+  Vec3f hardIronCorrected = {
+    rawFloat.x - g_magCalibration.bias.x,
+    rawFloat.y - g_magCalibration.bias.y,
+    rawFloat.z - g_magCalibration.bias.z
+  };
+
+  // Apply soft-iron correction (3x3 matrix multiplication)
+  Vec3f corrected = {
+    g_magCalibration.softIron[0][0] * hardIronCorrected.x +
+    g_magCalibration.softIron[0][1] * hardIronCorrected.y +
+    g_magCalibration.softIron[0][2] * hardIronCorrected.z,
+
+    g_magCalibration.softIron[1][0] * hardIronCorrected.x +
+    g_magCalibration.softIron[1][1] * hardIronCorrected.y +
+    g_magCalibration.softIron[1][2] * hardIronCorrected.z,
+
+    g_magCalibration.softIron[2][0] * hardIronCorrected.x +
+    g_magCalibration.softIron[2][1] * hardIronCorrected.y +
+    g_magCalibration.softIron[2][2] * hardIronCorrected.z
+  };
+  
+  // Convert corrected magnetic field to µT
+  calOut = { corrected.x / g_mag_lsb_per_uT, corrected.y / g_mag_lsb_per_uT, corrected.z / g_mag_lsb_per_uT };
+
+  return ImuStatus::Ok;
+}
+
+// Read magnetometer with calibration applied (environmental offsets + soft-iron correction)
+// Returns calibrated magnetic field as Vec3f
+ImuStatus readMag(Vec3f& out) {
+  Vec3i16 raw;
+  ImuStatus s = readMagRaw(raw);
+  if (s != ImuStatus::Ok) return s;
+
+  // Convert raw to float
+  Vec3f rawFloat = toFloat(raw);
+
+  // Apply hard-iron offset (bias subtraction)
+  Vec3f hardIronCorrected = {
+    rawFloat.x - g_magCalibration.bias.x,
+    rawFloat.y - g_magCalibration.bias.y,
+    rawFloat.z - g_magCalibration.bias.z
+  };
+
+  // Apply soft-iron correction (3x3 matrix multiplication)
+  out = {
+    g_magCalibration.softIron[0][0] * hardIronCorrected.x +
+    g_magCalibration.softIron[0][1] * hardIronCorrected.y +
+    g_magCalibration.softIron[0][2] * hardIronCorrected.z,
+
+    g_magCalibration.softIron[1][0] * hardIronCorrected.x +
+    g_magCalibration.softIron[1][1] * hardIronCorrected.y +
+    g_magCalibration.softIron[1][2] * hardIronCorrected.z,
+
+    g_magCalibration.softIron[2][0] * hardIronCorrected.x +
+    g_magCalibration.softIron[2][1] * hardIronCorrected.y +
+    g_magCalibration.softIron[2][2] * hardIronCorrected.z
+  };
+
   return ImuStatus::Ok;
 }
 

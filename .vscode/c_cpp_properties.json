@@ -12,6 +12,12 @@
             "cStandard": "c17",
             "cppStandard": "c++17",
             "intelliSenseMode": "macos-clang-arm64"
+        },
+        {
+            "name": "ESP32-Feather",
+            "compileCommands": "${workspaceFolder}/build/compile_commands.json",
+            "intelliSenseMode": "gcc-x64",
+            "configurationProvider": "ms-vscode.cpptools"
         }
     ],
     "version": 4

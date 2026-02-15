@@ -1,5 +1,5 @@
 
-
+#include <cstdint>
 
 // LIS3MDL I2C address on AltIMU-10 v5
 const uint8_t LIS3MDL_ADDR = 0x1E;

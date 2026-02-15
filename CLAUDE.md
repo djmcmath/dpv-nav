@@ -118,6 +118,17 @@ The system supports automatic calibration with persistence to SPIFFS (flash stor
 
 To force recalibration, delete JSON files from SPIFFS or hold a button at boot (TODO: [main.cpp:54](firmware/src/main.cpp#L54)).
 
+**Advanced Field Calibration (Soft-Iron):**
+
+The built-in `calibrateMagnetometer()` function only computes hard-iron offset (bias), setting soft-iron matrix to identity. For ±5° heading accuracy on a DPV with variable magnetic signature, proper soft-iron calibration is required using ellipsoid fitting:
+
+1. **Data Collection** ([util/mag_cal_collect.cpp](firmware/src/util/mag_cal_collect.cpp)): Collect raw mag samples to CSV on SPIFFS during field rotation
+2. **Export Data**: Dump CSV to serial terminal and copy to PC
+3. **Ellipsoid Fitting** ([tools/mag_calibration.py](tools/mag_calibration.py)): Python script computes hard-iron + soft-iron matrix using least-squares
+4. **Import Calibration**: Upload generated `calib_mag_cal.json` to SPIFFS or hardcode in `main.cpp`
+
+See [docs/mag-calibration-workflow.md](docs/mag-calibration-workflow.md) for complete procedure. This workflow is essential for real-world DPV deployment where the magnetometer is mounted on the DPV with motors, batteries, and other magnetic sources.
+
 ### I2C / Wire Usage
 
 All sensor I2C operations use a shared global `TwoWire` reference (`gWire`). The LSM6DS33 supports two addresses (0x6A or 0x6B, depending on SA0 pin); code auto-detects in [imu.cpp:77](firmware/src/sensors/imu.cpp#L77).

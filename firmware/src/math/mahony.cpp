@@ -5,19 +5,19 @@ static inline float invSqrt(float x) {
   return 1.0f / sqrtf(x);
 }
 
-static inline Vec3 cross(const Vec3& a, const Vec3& b) {
+static inline imu::Vec3f cross(const imu::Vec3f& a, const imu::Vec3f& b) {
   return { a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x };
 }
-static inline float dot(const Vec3& a, const Vec3& b) {
+static inline float dot(const imu::Vec3f& a, const imu::Vec3f& b) {
   return a.x*b.x + a.y*b.y + a.z*b.z;
 }
-static inline Vec3 add(const Vec3& a, const Vec3& b) {
+static inline imu::Vec3f add(const imu::Vec3f& a, const imu::Vec3f& b) {
   return {a.x+b.x, a.y+b.y, a.z+b.z};
 }
-static inline Vec3 sub(const Vec3& a, const Vec3& b) {
+static inline imu::Vec3f sub(const imu::Vec3f& a, const imu::Vec3f& b) {
   return {a.x-b.x, a.y-b.y, a.z-b.z};
 }
-static inline Vec3 mul(const Vec3& a, float k) {
+static inline imu::Vec3f mul(const imu::Vec3f& a, float k) {
   return {a.x*k, a.y*k, a.z*k};
 }
 
@@ -40,71 +40,97 @@ static inline Quaternion quatMul(const Quaternion& a, const Quaternion& b) {
   };
 }
 
-static inline Vec3 quatRotate(const Quaternion& q, const Vec3& v) {
-  // v' = q * (0,v) * q_conj
+// Body-to-world rotation: v_world = q * v_body * q_conj
+static inline imu::Vec3f quatRotate(const Quaternion& q, const imu::Vec3f& v) {
   Quaternion qv{0, v.x, v.y, v.z};
   Quaternion qc{q.w, -q.x, -q.y, -q.z};
   Quaternion r = quatMul(quatMul(q, qv), qc);
   return {r.x, r.y, r.z};
 }
 
+// World-to-body rotation: v_body = q_conj * v_world * q
+static inline imu::Vec3f quatRotateWorldToBody(const Quaternion& q, const imu::Vec3f& v) {
+  Quaternion qc{q.w, -q.x, -q.y, -q.z};
+  Quaternion qv{0, v.x, v.y, v.z};
+  Quaternion r = quatMul(quatMul(qc, qv), q);
+  return {r.x, r.y, r.z};
+}
+
 void mahonyUpdate(
   MahonyState& s,
   const MahonyParams& p,
-  const Vec3& gyro,
-  const Vec3& accelIn,
-  const Vec3& magIn,
+  const imu::Vec3f& gyro,
+  const imu::Vec3f& accelIn,
+  const imu::Vec3f& magIn,
   float dt
 ) {
-  // 1) Normalize accel (gravity direction)
-  Vec3 a = accelIn;
+  // Reference frame: NED (North-East-Down)
+  //   Body frame X = North, Y = East, Z = Down
+  //   Body Z-axis (down) should align with gravity vector
+  //   Body X-axis (north) should align with magnetic north
+
+  // 1) Normalize accel (gravity direction in body frame)
+  imu::Vec3f a = accelIn;
   float an2 = a.x*a.x + a.y*a.y + a.z*a.z;
   if (an2 < 1e-12f) return; // invalid accel
   float invAn = invSqrt(an2);
   a = mul(a, invAn);
 
-  // 2) Estimate gravity direction from quaternion (what "down" should be)
-  // In body frame, gravity points approximately (0,0,1) if using NED vs ENU conventions.
-  // We'll derive expected gravity by rotating world "down" into body frame.
-  // Choose worldDown = (0,0,1) for a common IMU body frame where +Z points up; adjust if needed.
-  const Vec3 worldDown = {0, 0, 1};
-  Vec3 vDown = quatRotate(s.q, worldDown); // expected accel direction in body frame
+  // 2) Expected accelerometer direction in body frame from current quaternion estimate
+  //    Accel measures specific force (reaction to gravity) = {0,0,-1g} when level in NED
+  const imu::Vec3f accelRef = {0, 0, -1};
+  imu::Vec3f expectedGravity = quatRotateWorldToBody(s.q, accelRef);
 
-  // Error is cross between measured and expected gravity
-  Vec3 e = cross(a, vDown);
+  // Roll/pitch error: cross product between measured and expected gravity
+  imu::Vec3f eAccel = cross(a, expectedGravity);
 
-  // 3) Optional magnetometer correction (yaw)
+  imu::Vec3f e = eAccel;
+
+  // 3) Magnetometer correction for yaw (only if enabled and valid and not in gimbal lock region)
   if (p.useMag) {
-    Vec3 m = magIn;
-    float mn2 = m.x*m.x + m.y*m.y + m.z*m.z;
-    if (mn2 > 1e-12f) {
-      float invMn = invSqrt(mn2);
-      m = mul(m, invMn);
+    // Disable mag near gimbal lock (pitch > 60°) to avoid destabilization
+    // compute sin(pitch) from quaternion to detect gimbal lock
+    float sinp = 2.0f * (s.q.w * s.q.y - s.q.z * s.q.x);
+    float absSinp = fabsf(sinp);
+    if (absSinp < 0.866f) {  // 0.866 ≈ sin(60°), allows ±60° pitch range
+      imu::Vec3f m = magIn;
+      float mn2 = m.x*m.x + m.y*m.y + m.z*m.z;
+      if (mn2 > 1e-12f) {
+        float invMn = invSqrt(mn2);
+        m = mul(m, invMn);
 
-      // Project mag into horizontal plane using measured "down" (a)
-      // mh = m - (m·a)a
-      Vec3 mh = sub(m, mul(a, dot(m, a)));
-      float mhn2 = dot(mh, mh);
-      if (mhn2 > 1e-12f) {
-        mh = mul(mh, invSqrt(mhn2));
+        // Remove gravity component from mag reading: project to horizontal plane
+        // mh_body = m - (m·a)a
+        float mDotA = dot(m, a);
+        imu::Vec3f mhBody = sub(m, mul(a, mDotA));
+        float mh2 = dot(mhBody, mhBody);
 
-        // Expected magnetic direction: take worldNorth = (1,0,0) and rotate into body,
-        // then project to horizontal plane similarly.
-        const Vec3 worldNorth = {1, 0, 0};
-        Vec3 vN = quatRotate(s.q, worldNorth);
-        vN = sub(vN, mul(a, dot(vN, a)));
-        float vNn2 = dot(vN, vN);
-        if (vNn2 > 1e-12f) {
-          vN = mul(vN, invSqrt(vNn2));
-          Vec3 eMag = cross(mh, vN);
-          e = add(e, eMag);
+        if (mh2 > 1e-12f) {
+          mhBody = mul(mhBody, invSqrt(mh2));  // normalize to unit horizontal component
+
+          // Expected magnetic north direction in body frame from current quaternion
+          const imu::Vec3f worldNorth = {1, 0, 0};  // NED: north is +X
+          imu::Vec3f expectedMagBody = quatRotateWorldToBody(s.q, worldNorth);
+
+          // Project expected field to horizontal plane
+          float eMagDotA = dot(expectedMagBody, a);
+          imu::Vec3f expectedMhBody = sub(expectedMagBody, mul(a, eMagDotA));
+          float expectedMh2 = dot(expectedMhBody, expectedMhBody);
+
+          if (expectedMh2 > 1e-12f) {
+            expectedMhBody = mul(expectedMhBody, invSqrt(expectedMh2));  // normalize
+
+            // Yaw error: cross product in horizontal plane
+            imu::Vec3f eMag = cross(mhBody, expectedMhBody);
+            e = add(e, eMag);
+          }
         }
       }
     }
   }
 
-  // 4) Apply feedback to gyro
-  Vec3 gyroCorrected = gyro;
+  // 4) Apply proportional feedback and integral feedback to gyro
+  imu::Vec3f gyroCorrected = gyro;
 
   if (p.ki > 0.0f) {
     s.integralFB = add(s.integralFB, mul(e, p.ki * dt));
@@ -113,7 +139,7 @@ void mahonyUpdate(
 
   gyroCorrected = add(gyroCorrected, mul(e, p.kp));
 
-  // 5) Integrate quaternion rate: q_dot = 0.5 * q * omegaQuat
+  // 5) Integrate quaternion rate: q_dot = 0.5 * q * omega_quat
   Quaternion omega{0, gyroCorrected.x, gyroCorrected.y, gyroCorrected.z};
   Quaternion qDot = quatMul(s.q, omega);
   s.q.w += 0.5f * qDot.w * dt;

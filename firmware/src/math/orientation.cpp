@@ -1,4 +1,5 @@
 #include "orientation.h"
+#include "mahony.h"
 #include <math.h>
 
 Euler quatToEulerRad(const Quaternion& q) {
@@ -26,3 +27,19 @@ float headingDegFromYawRad(float yawRad, float declinationDeg) {
   while (deg >= 360.0f) deg -= 360.0f;
   return deg;
 }
+
+// Forward declarations of global AHRS state (defined in main.cpp)
+extern MahonyState ahrs;
+extern MahonyParams params;
+
+
+namespace math {
+
+// Update AHRS orientation using calibrated sensor data
+// Integrates gyro/accel/mag readings into quaternion via Mahony filter
+void updateOrientation(const imu::Vec3f& gyro_rad_s, const imu::Vec3f& accel_mss, const imu::Vec3f& mag, float dt) {
+  // Call the Mahony filter with calibrated sensor data
+  mahonyUpdate(ahrs, params, gyro_rad_s, accel_mss, mag, dt);
+}
+
+}  // namespace math

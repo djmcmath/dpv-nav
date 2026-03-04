@@ -1,0 +1,90 @@
+// Example integration of mag_cal_collect into main.cpp
+// Add these sections to your existing main.cpp
+
+// ===== ADD TO INCLUDES =====
+#include "./util/mag_cal_collect.h"
+
+// ===== ADD TO setup() FUNCTION =====
+void setup() {
+  // ... existing setup code ...
+
+  Serial.println("\n=== DPV-Nav Ready ===");
+  Serial.println("Serial commands:");
+  Serial.println("  start_cal  - Start magnetometer calibration data collection (30 sec)");
+  Serial.println("  dump_cal   - Dump collected calibration data to serial (copy to PC)");
+  Serial.println("  clear_cal  - Clear calibration data from SPIFFS");
+  Serial.println("  help       - Show this message");
+  Serial.println("===================\n");
+}
+
+// ===== ADD TO loop() FUNCTION (at the beginning) =====
+void loop() {
+  // Handle serial commands for calibration
+  if (Serial.available()) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    cmd.toLowerCase();
+
+    if (cmd == "start_cal") {
+      Serial.println("[CMD] Starting magnetometer calibration data collection...");
+      if (!mag_cal::startCollection(30000)) {  // 30 seconds
+        Serial.println("[CMD] Failed to start collection!");
+      }
+    }
+    else if (cmd == "dump_cal") {
+      Serial.println("[CMD] Dumping calibration data...");
+      mag_cal::dumpToSerial();
+    }
+    else if (cmd == "clear_cal") {
+      Serial.println("[CMD] Clearing calibration data...");
+      mag_cal::clearData();
+    }
+    else if (cmd == "help") {
+      Serial.println("\nAvailable commands:");
+      Serial.println("  start_cal  - Collect mag calibration data (30 sec)");
+      Serial.println("  dump_cal   - Export data via serial");
+      Serial.println("  clear_cal  - Delete calibration data");
+      Serial.println("  help       - Show this message\n");
+    }
+    else if (cmd.length() > 0) {
+      Serial.print("[CMD] Unknown command: '");
+      Serial.print(cmd);
+      Serial.println("' (type 'help' for commands)");
+    }
+  }
+
+  // If actively collecting calibration data, log samples at high rate
+  if (mag_cal::isCollecting()) {
+    // Don't declare logSample() in header - call it via namespace
+    // This is a quick hack; ideally logSample() should be public in mag_cal_collect.h
+    extern bool mag_cal::logSample();  // Forward declaration
+    mag_cal::logSample();
+    delay(10);  // ~100 Hz sampling rate
+    return;     // Skip normal processing during calibration
+  }
+
+  // ===== REST OF YOUR NORMAL LOOP CODE GOES HERE =====
+
+  static uint32_t lastMicros = micros();
+  uint32_t now = micros();
+  float dt = (now - lastMicros) / 1e6f;
+  lastMicros = now;
+
+  // ... (existing sensor reads, AHRS update, logging, etc.) ...
+}
+
+// ===== USAGE WORKFLOW =====
+/*
+1. Upload firmware with mag_cal_collect integrated
+2. Open serial terminal (115200 baud)
+3. Type: start_cal
+4. Rotate DPV through all orientations for 30 seconds
+5. Type: dump_cal
+6. Copy CSV output between START/END markers
+7. Save to mag_samples.csv on PC
+8. Run: python tools/mag_calibration.py mag_samples.csv
+9. Upload generated calib_mag_cal.json to ESP32 SPIFFS
+10. Reboot - new calibration loads automatically
+
+See docs/mag-calibration-workflow.md for detailed instructions.
+*/

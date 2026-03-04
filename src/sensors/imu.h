@@ -52,7 +52,7 @@ ImuStatus readMag(Vec3f& out);            // Mag with hard/soft-iron calibration
 
 // --- Calibration setters ---
 // Set the calibration data used by all read functions.
-// Call after loading from SPIFFS or after running a calibrate function.
+// Call after loading from LittleFS or after running a calibrate function.
 void setAccelCalibration(const Calib3& cal);
 void setGyroCalibration(const Calib3& cal);
 void setMagCalibration(const MagCalib& cal);

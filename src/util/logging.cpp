@@ -1,6 +1,6 @@
 #include "logging.h"
 #include <Arduino.h>
-#include <SPIFFS.h>
+#include <LittleFS.h>
 #include <cstdio>
 #include <time.h>
 
@@ -31,25 +31,25 @@ bool init() {
     return true;
   }
 
-  // Initialize SPIFFS
-  if (!SPIFFS.begin(false)) {  // true = format if mount fails
-    Serial.println("[LOG] Warning: SPIFFS mount failed, attempting format...");
-    SPIFFS.format();
-    if (!SPIFFS.begin(false)) {
-        Serial.println("[LOG] Error: SPIFFS mount failed after format");
+  // Initialize LittleFS
+  if (!LittleFS.begin(false)) {  // true = format if mount fails
+    Serial.println("[LOG] Warning: LittleFS mount failed, attempting format...");
+    LittleFS.format();
+    if (!LittleFS.begin(false)) {
+        Serial.println("[LOG] Error: LittleFS mount failed after format");
         return false;
     } else {
-        Serial.println("[LOG] SPIFFS mounted successfully after format");
+        Serial.println("[LOG] LittleFS mounted successfully after format");
     }
   } else {
-    Serial.println("[LOG] SPIFFS mounted successfully");
+    Serial.println("[LOG] LittleFS mounted successfully");
   }
 
-  // Report remaining space on SPIFFS
-    size_t totalBytes = SPIFFS.totalBytes();
-    size_t usedBytes = SPIFFS.usedBytes();
+  // Report remaining space on LittleFS
+    size_t totalBytes = LittleFS.totalBytes();
+    size_t usedBytes = LittleFS.usedBytes();
     size_t freeBytes = totalBytes - usedBytes;
-    Serial.print("[LOG] SPIFFS bytes free: ");
+    Serial.print("[LOG] LittleFS bytes free: ");
     //Serial.print(totalBytes);
     //Serial.print(" bytes, used: ");
     //Serial.print(usedBytes);
@@ -58,7 +58,7 @@ bool init() {
     Serial.println(" bytes");
 
   // Clear existing log files to free up space
-  File root = SPIFFS.open("/");
+  File root = LittleFS.open("/");
   File file = root.openNextFile();
   uint32_t filesDeleted = 0;
   while (file) {
@@ -76,7 +76,7 @@ bool init() {
         if (!path.startsWith("/")) {
             path = "/" + path;
         }
-        if (SPIFFS.remove(path)) {
+        if (LittleFS.remove(path)) {
             filesDeleted++;
             Serial.print("[LOG] Deleted old log file: ");
             Serial.println(path);
@@ -98,11 +98,11 @@ bool init() {
   gStartTime = millis();
   generateLogFilename(gLogPath, sizeof(gLogPath));
   
-  gLogFile = SPIFFS.open(gLogPath, FILE_WRITE);
+  gLogFile = LittleFS.open(gLogPath, FILE_WRITE);
   if (!gLogFile) {
     Serial.print("[LOG] Error: Could not open log file: ");
     Serial.println(gLogPath);
-    SPIFFS.end();
+    LittleFS.end();
     return false;
   }
 
@@ -138,7 +138,7 @@ void shutdown() {
     //gLogFile = nullptr;
   }
 
-  SPIFFS.end();
+  LittleFS.end();
   gInitialized = false;
   gBytesWritten = 0;
 
@@ -151,11 +151,12 @@ bool logEntry(const LogEntry& entry) {
   }
 
   // Write CSV line: timestamp, raw values, calibrated values, processed data
+  // Note: all Vec3f fields are float, so use %.3f (not %d) for raw values too
   uint32_t written = gLogFile.printf(
     "%lu,"
-    "%d,%d,%d,"
-    "%d,%d,%d,"
-    "%d,%d,%d,"
+    "%.3f,%.3f,%.3f,"
+    "%.3f,%.3f,%.3f,"
+    "%.3f,%.3f,%.3f,"
     "%.3f,%.3f,%.3f,"
     "%.3f,%.3f,%.3f,"
     "%.3f,%.3f,%.3f,"
@@ -172,8 +173,13 @@ bool logEntry(const LogEntry& entry) {
 
   if (written > 0) {
     gBytesWritten += written;
-    // Periodically flush to avoid data loss
-    if (gBytesWritten % 1024 < (size_t)written) {
+    // Flush on a time basis (~30s) instead of byte count.
+    // Frequent flush() triggers flash page erases that stall the CPU cache
+    // for 1-3ms, corrupting concurrent SPI transactions (e.g. OLED display).
+    static uint32_t lastFlushMs = 0;
+    uint32_t now = millis();
+    if (now - lastFlushMs >= 30000) {
+      lastFlushMs = now;
       gLogFile.flush();
     }
     return true;
@@ -209,7 +215,7 @@ bool rotateLog() {
   // Generate new filename and open new file
   generateLogFilename(gLogPath, sizeof(gLogPath));
   
-  gLogFile = SPIFFS.open(gLogPath, FILE_WRITE);
+  gLogFile = LittleFS.open(gLogPath, FILE_WRITE);
   if (!gLogFile) {
     Serial.print("[LOG] Error: Could not open new log file: ");
     Serial.println(gLogPath);

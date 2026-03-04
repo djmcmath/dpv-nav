@@ -1,41 +1,43 @@
 #include "storage.h"
-#include <SPIFFS.h>
+#include <LittleFS.h>
 #include <Arduino.h>
 #include <cstdio>
 
 namespace storage {
 
-// Helper: Ensure SPIFFS is mounted
-static bool ensureSPIFFS() {
-  if (!SPIFFS.begin(true)) {  // true = format if mount fails
-    Serial.println("[STORAGE] Error: SPIFFS mount failed");
+// Helper: Ensure LittleFS is mounted
+static bool ensureLittleFS() {
+  if (!LittleFS.begin(true)) {  // true = format if mount fails
+    Serial.println("[STORAGE] Error: LittleFS mount failed");
     return false;
   }
   return true;
 }
 
-// Helper: Create directory structure if needed (SPIFFS doesn't have true dirs, but we use path prefixes)
-static void ensureDir(const char* dirPath) {
-  // SPIFFS doesn't require directory creation, just use path prefixes
-  // Verify a known file in the directory exists or will be created
-  (void)dirPath;  // Suppress unused warning
+// Helper: Create parent directory for a given file path
+static void ensureParentDir(const char* filePath) {
+  char dir[64];
+  strncpy(dir, filePath, sizeof(dir) - 1);
+  dir[sizeof(dir) - 1] = '\0';
+  // Find last '/' to isolate directory portion
+  char* lastSlash = strrchr(dir, '/');
+  if (lastSlash && lastSlash != dir) {
+    *lastSlash = '\0';
+    LittleFS.mkdir(dir);
+  }
 }
 
 bool saveMagCalibration(const char* filename, const MagCalib& cal) {
-  if (!ensureSPIFFS()) {
+  if (!ensureLittleFS()) {
     return false;
   }
 
-  // Build full path
-  char fullPath[64] = "/";
-  strncat(fullPath, filename, sizeof(fullPath) - strlen(fullPath) - 1);
-
-  // Open file for writing
-  File f = SPIFFS.open(fullPath, FILE_WRITE);
-  //FILE* f = fopen(fullPath, "w");
+  // Ensure parent directory exists and open file for writing
+  ensureParentDir(filename);
+  File f = LittleFS.open(filename, FILE_WRITE);
   if (!f) {
     Serial.print("[STORAGE] Error: Could not open ");
-    Serial.println(fullPath);
+    Serial.println(filename);
     return false;
   }
 
@@ -59,39 +61,29 @@ bool saveMagCalibration(const char* filename, const MagCalib& cal) {
   f.close();
 
   Serial.print("[STORAGE] Saved magnetometer calibration to ");
-  Serial.println(fullPath);
+  Serial.println(filename);
   return true;
 }
 
 bool loadMagCalibration(const char* filename, MagCalib& cal) {
     Serial.print("[STORAGE] Loading magnetometer calibration from ");
     Serial.println(filename);
-  if (!ensureSPIFFS()) {
+  if (!ensureLittleFS()) {
     return false;
   }
 
-  // Build full path
-  char fullPath[64] = "/";
-  strncat(fullPath, filename, sizeof(fullPath) - strlen(fullPath) - 1);
-
-  //Serial.print("[STORAGE] Full path: ");
-  //Serial.println(fullPath);
-
   // Check if file exists
-  if (!SPIFFS.exists(fullPath)) {
+  if (!LittleFS.exists(filename)) {
     Serial.print("[STORAGE] File not found: ");
-    Serial.println(fullPath);
+    Serial.println(filename);
     return false;
-  } //else {
-    //Serial.print("[STORAGE] File found: ");
-    //Serial.println(fullPath);
-  //}
+  }
 
   // Open file for reading
-  File f = SPIFFS.open(fullPath, FILE_READ);
+  File f = LittleFS.open(filename, FILE_READ);
   if (!f) {
     Serial.print("[STORAGE] Error: Could not open ");
-    Serial.println(fullPath);
+    Serial.println(filename);
     return false;
   } //else {
    // Serial.print("[STORAGE] Successfully opened ");
@@ -136,10 +128,10 @@ bool loadMagCalibration(const char* filename, MagCalib& cal) {
 
   if (success) {
     Serial.print("[STORAGE] Loaded magnetometer calibration from ");
-    Serial.println(fullPath);
+    Serial.println(filename);
   } else {
     Serial.print("[STORAGE] Error parsing JSON from ");
-    Serial.println(fullPath);
+    Serial.println(filename);
   }
 
   return success;
@@ -321,19 +313,16 @@ static bool parseJsonMagCalib(const char* json, MagCalib& cal) {
 }
 
 bool saveCalib3(const char* filename, const Calib3& cal) {
-  if (!ensureSPIFFS()) {
+  if (!ensureLittleFS()) {
     return false;
   }
 
-  // Build full path
-  char fullPath[64] = "/";
-  strncat(fullPath, filename, sizeof(fullPath) - strlen(fullPath) - 1);
-
-  // Open file for writing
-  File f = SPIFFS.open(fullPath, FILE_WRITE);
+  // Ensure parent directory exists and open file for writing
+  ensureParentDir(filename);
+  File f = LittleFS.open(filename, FILE_WRITE);
   if (!f) {
     Serial.print("[STORAGE] Error: Could not open ");
-    Serial.println(fullPath);
+    Serial.println(filename);
     return false;
   }
 
@@ -355,31 +344,27 @@ bool saveCalib3(const char* filename, const Calib3& cal) {
   f.close();
 
   Serial.print("[STORAGE] Saved Calib3 to ");
-  Serial.println(fullPath);
+  Serial.println(filename);
   return true;
 }
 
 bool loadCalib3(const char* filename, Calib3& cal) {
-  if (!ensureSPIFFS()) {
+  if (!ensureLittleFS()) {
     return false;
   }
 
-  // Build full path
-  char fullPath[64] = "/";
-  strncat(fullPath, filename, sizeof(fullPath) - strlen(fullPath) - 1);
-
   // Check if file exists
-  if (!SPIFFS.exists(fullPath)) {
+  if (!LittleFS.exists(filename)) {
     Serial.print("[STORAGE] File not found: ");
-    Serial.println(fullPath);
+    Serial.println(filename);
     return false;
   }
 
   // Open file for reading
-  File f = SPIFFS.open(fullPath, FILE_READ);
+  File f = LittleFS.open(filename, FILE_READ);
   if (!f) {
     Serial.print("[STORAGE] Error: Could not open ");
-    Serial.println(fullPath);
+    Serial.println(filename);
     return false;
   }
 
@@ -412,10 +397,10 @@ bool loadCalib3(const char* filename, Calib3& cal) {
 
   if (success) {
     Serial.print("[STORAGE] Loaded Calib3 from ");
-    Serial.println(fullPath);
+    Serial.println(filename);
   } else {
     Serial.print("[STORAGE] Error parsing JSON from ");
-    Serial.println(fullPath);
+    Serial.println(filename);
   }
 
   return success;

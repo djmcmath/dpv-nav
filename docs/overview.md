@@ -4,13 +4,25 @@ Big picture:
 - A second iteration can track range and bearing to some target (e.g. Harpoon or Bomber)
 - Datalogging, of course -> allows later reconstruction of the dive
 - From the hardware side: it's just a flow sensor and an IMU with an ESP32.  Display is out to a tiny OLED mounted in a GoPro housing.  There's a 3D printed stand-off that gives the IMU module some space between the DPV tube and the magnetic sensor.
-- Display shows:
-    - Current heading / speed
-    - Range / Bearing to home
+- Display has two modes (compile-time selectable via `DISPLAY_MODE` in config.h):
+    - **Navigation Mode** (default): Status bar (system state, GPS, home) + 2×2 grid showing heading, bearing, range, speed
+    - **Debug Mode**: Calibrated sensor data (mag/accel/gyro XYZ), fused heading, raw magnetic heading, pitch/roll
 
+Architecture:
+- Two-device system connected via Serial1 (JSON packets at 10 Hz):
+  - **Nav device**: ESP32 running sensors (LSM6DS33 + LIS3MDL IMU, Adafruit GPS, hall-effect flow sensor), Mahony AHRS filter, dead-reckoning position model
+  - **Display device**: ESP32 running SSD1351 OLED (128×96), buttons, MCP23017 backlight control
+- Build with PlatformIO: `pio run -e nav` and `pio run -e display`
 
-So v1 features:
-- Battery powered ESP32 + IMU + flow sensor
-- Tilt-compensated heading
-- DR position in local frame (meters from home, not lat/lon)
-- "Home" is just wherever you were when you powered it on
+v1 features (implemented):
+- Battery powered ESP32 + IMU + flow sensor + GPS
+- Tilt-compensated heading (Mahony AHRS filter, quaternion-based)
+- Speed from flowmeter (hall-effect pulse) or GPS (when fix available)
+- DR position in local frame (flat-earth XY meters from baseline)
+- GPS position truth override (optional, configurable — can disable for surface testing)
+- "Home" waypoint set via button press; display shows distance + bearing back to home
+- Default baseline position (42°N, 122°W) until GPS provides a fix
+- Calibration persistence (mag, gyro, accel) to LittleFS with auto-load on boot
+- Two display modes: Navigation (status bar + 2×2 grid) and Debug (raw sensor data)
+- Separate DebugPacket protocol for sensor data inspection (opt-in via `ENABLE_DEBUG_PACKET`)
+- Configurable units: metric (m, m/min) or imperial (ft, ft/min) via `DISPLAY_UNITS_IMPERIAL`

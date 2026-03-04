@@ -1,6 +1,6 @@
 #include "mag_cal_collect.h"
 #include "../sensors/imu.h"
-#include <SPIFFS.h>
+#include <LittleFS.h>
 #include <Arduino.h>
 
 namespace mag_cal {
@@ -18,14 +18,14 @@ bool startCollection(uint32_t duration_ms) {
     return false;
   }
 
-  // Ensure SPIFFS mounted
-  if (!SPIFFS.begin(true)) {
-    Serial.println("[MAG_CAL] Error: SPIFFS mount failed");
+  // Ensure LittleFS mounted
+  if (!LittleFS.begin(true)) {
+    Serial.println("[MAG_CAL] Error: LittleFS mount failed");
     return false;
   }
 
   // Open file for writing
-  cal_file = SPIFFS.open(CAL_DATA_PATH, FILE_WRITE);
+  cal_file = LittleFS.open(CAL_DATA_PATH, FILE_WRITE);
   if (!cal_file) {
     Serial.println("[MAG_CAL] Error: Could not open calibration file");
     return false;
@@ -87,7 +87,7 @@ bool isCollecting() {
 
 void dumpToSerial() {
   // Open file for reading
-  File f = SPIFFS.open(CAL_DATA_PATH, FILE_READ);
+  File f = LittleFS.open(CAL_DATA_PATH, FILE_READ);
   if (!f) {
     Serial.println("[MAG_CAL] Error: Could not open calibration file");
     Serial.print("[MAG_CAL] Path: ");
@@ -116,7 +116,7 @@ void dumpToSerial() {
 }
 
 void clearData() {
-  if (SPIFFS.remove(CAL_DATA_PATH)) {
+  if (LittleFS.remove(CAL_DATA_PATH)) {
     Serial.println("[MAG_CAL] Calibration data cleared");
   } else {
     Serial.println("[MAG_CAL] Error: Could not delete calibration data");

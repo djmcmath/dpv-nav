@@ -605,6 +605,10 @@ ImuStatus initMag(TwoWire& wire) {
   // CTRL_REG4: ultra-high-performance on Z
   magWrite(LIS3MDL_REG_CTRL_REG4, 0x0C);
 
+  // CTRL_REG5: enable BDU (block data update) — prevents reading partial
+  // register updates mid-conversion, which causes byte tearing
+  magWrite(LIS3MDL_REG_CTRL_REG5, 0x40);
+
   delay(20); // give it a moment
 
   g_mag_lsb_per_uT = 6842.0f / 100.0f; // 6842 LSB/gauss = 6842/100 LSB/µT for ±4 gauss FS in UHP mode
@@ -780,7 +784,7 @@ ImuStatus readMag_uT(Vec3f& out) {
 
 // ----------- Calibration setters -----------
 // Set the calibration data used by all read functions.
-// Call these after loading from SPIFFS or after running a calibrate function.
+// Call these after loading from LittleFS or after running a calibrate function.
 void setAccelCalibration(const Calib3& cal) {
   g_accelCalibration = cal;
 }

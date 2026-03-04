@@ -1,11 +1,32 @@
-#include "../types/types.h"
 #include "ui_controller.h"
+#include "../drivers/display.h"
+#include <dpvlink.h>
 #include <Arduino.h>
-
 
 namespace ui {
 
-    const bool PRINT_RAW = false;
+const bool PRINT_RAW = false;
+const bool PRINT_FREE_HEAP = true;
+
+bool init() {
+    return display::init();
+}
+
+void selfTest() {
+    display::selfTest();
+}
+
+void bootStatus(const char* label, bool ok) {
+    display::statusLine(label, ok);
+}
+
+void showNav(const NavPacket& pkt) {
+    display::showNav(pkt);
+}
+
+void showDebug(const DebugPacket& pkt) {
+    display::showDebug(pkt);
+}
 
 void console_update(
     imu::Vec3f magRaw, imu::Vec3f magCal,
@@ -44,7 +65,7 @@ void console_update(
     Serial.print(accelCal.y, 3);
     Serial.print(", ");
     Serial.print(accelCal.z, 3);
-    
+
     if (PRINT_RAW) {
         Serial.print("  | Gyro-Raw(X/Y/Z):");
         Serial.print(gyroRaw.x, 3);
@@ -64,6 +85,12 @@ void console_update(
     Serial.print("\t| Heading: ");
     Serial.print(headingDeg, 1);
     Serial.println(" deg");
+
+    if (PRINT_FREE_HEAP) {
+        Serial.print("Free heap: ");
+        Serial.print(ESP.getFreeHeap());
+        Serial.println(" bytes");
+    }
 }
 
 } //namespace ui

@@ -46,3 +46,16 @@ struct MagCalib {
   imu::Vec3f bias;       // hard-iron offset
   float softIron[3][3]; // 3x3 (identity if unused)
 };
+
+struct GpsFix {
+  float lat;            // degrees (negative = South)
+  float lon;            // degrees (negative = West)
+  float altitude_m;     // meters above MSL
+  float speed_knots;    // ground speed
+  float course_deg;     // course over ground (degrees)
+  float hdop;           // horizontal dilution of precision
+  uint8_t satellites;   // number of satellites tracked
+  uint8_t fix_quality;  // 0=none, 1=GPS, 2=DGPS
+  bool has_fix;         // convenience flag
+  uint32_t fix_age_ms;  // millis() at last valid fix
+};

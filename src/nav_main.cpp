@@ -80,8 +80,20 @@ void setup() {
         .mag_uT_fullscale   = 4.0f,
         .sample_hz          = 100
     };
-    imu::AxisMap accelGyroMap{ .x_axis = +1, .y_axis = +2, .z_axis = +3 }; //Everything is like you'd expect on the gyro and accel.
-    imu::AxisMap magMap{ .x_axis = +1, .y_axis = -2, .z_axis = +3 }; // Mag Y is flipped on this board.
+    // AXIS MAPPING — TWO COORDINATE FRAMES
+    // The LSM6DS33 (accel/gyro) and LIS3MDL (mag) have different physical Y-axis
+    // directions on this board. The accelGyroMap defines the NED reference frame.
+    // The magMap's -2 corrects the LIS3MDL's physical Y to match the LSM6DS33 Y.
+    //
+    // HOWEVER: after this mapping + calibration, the mag output uses atan2(my, mx)
+    // for heading (not the NED formula atan2(-my, mx)). This means the mag Y as
+    // delivered by imu::readMag*() is actually -NED_Y (left-handed for Y axis).
+    // The Mahony filter requires all sensors in the SAME NED frame, so nav_main
+    // negates mag.y before passing to mahonyUpdate(). See the magNED variable below.
+    // DO NOT REMOVE the mag.y negation without also changing this axis map and
+    // recomputing all magnetometer calibration data.
+    imu::AxisMap accelGyroMap{ .x_axis = +1, .y_axis = +2, .z_axis = +3 };
+    imu::AxisMap magMap{ .x_axis = +1, .y_axis = -2, .z_axis = +3 };
 
     sysState = SystemState::SELF_TEST;
 

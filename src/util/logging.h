@@ -27,11 +27,11 @@ struct LogEntry {
   float pitch_deg;          // pitch angle
 };
 
-// Initialize logging system (mounts SPIFFS, creates log file)
+// Initialize logging system (mounts LittleFS, creates log file)
 // Returns true if successful
 bool init();
 
-// Shutdown logging system (closes file, unmounts SPIFFS)
+// Shutdown logging system (closes file, unmounts LittleFS)
 void shutdown();
 
 // Log a data entry to file

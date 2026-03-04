@@ -1,190 +1,159 @@
-# Magnetometer Calibration Guide
+# Sensor Calibration Guide
 
 ## Overview
 
-The DPV-Nav system now includes automatic magnetometer calibration during initialization. This calibration compensates for the local magnetic field environment and orientation-dependent offsets in the magnetometer.
+DPV-Nav calibrates three sensors: magnetometer, gyroscope, and accelerometer. Calibration data is persisted to LittleFS as JSON files, so calibration only runs on first boot (or when files are deleted). On subsequent boots, saved calibration loads in under a second.
 
-## Calibration Method: Min/Max Sweep
+## Calibration Files
 
-The calibration uses a simple but effective **min/max sweep** approach:
-
-1. **Sample Duration**: Device rotates through all orientations for 30 seconds
-2. **Tracking**: For each axis, track the minimum and maximum raw readings
-3. **Offset Calculation**: Bias = (min + max) / 2
-4. **Result**: Stores bias offset in `MagCalib` struct
-
-### Why This Works
-
-- The magnetometer reads the vector sum of Earth's field + local distortions
-- By sampling all orientations, you capture the full range of these distortions
-- The midpoint of the range gives the best offset for centering the data
-- This removes **hard-iron offsets** (static field distortions from nearby metal)
-
-## Usage
-
-### Automatic Calibration (Recommended)
-
-The system automatically calibrates on startup:
-
-```cpp
-// In firmware/src/main.cpp setup():
-imu::calibrateMagnetometer(magCal, 30000);  // 30 second calibration
+```
+/calib/mag_cal.json     — Magnetometer (hard-iron bias + soft-iron 3×3 matrix)
+/calib/gyro_cal.json    — Gyroscope (bias + scale)
+/calib/accel_cal.json   — Accelerometer (bias + scale)
 ```
 
-**During calibration:**
-1. Device will print: `[CAL] Rotate device through all orientations for 30 seconds...`
-2. Slowly rotate the device in all directions (figure-8 patterns work well)
-3. After 30 seconds, calibration completes and offsets are displayed
-4. Example output:
-   ```
-   [CAL] Starting magnetometer calibration...
-   [CAL] Rotate device through all orientations for 30 seconds...
-   [CAL] Calibration complete!
-   [CAL] Samples collected: 3000
-   [CAL] Magnetic field offsets: X=45.2 Y=-32.1 Z=18.5
-   [CAL] Field range - X:[-150, 240] Y:[-180, 90] Z:[-50, 130]
-   ```
+### JSON Formats
 
-### Manual Calibration (For Testing)
-
-You can call calibration anytime after IMU initialization:
-
-```cpp
-MagCalib newCal;
-imu::calibrateMagnetometer(newCal, 15000);  // 15 second calibration
-```
-
-## What Gets Calibrated
-
-### ✓ Corrected For:
-- **Hard-iron distortions** - Fixed magnetic sources (magnets in device, nearby metal)
-- **Local field variations** - Regional magnetic field anomalies
-- **Temperature effects** - Bias shifts due to sensor temperature
-- **Manufacturing offset** - Inherent sensor biases
-
-### ✗ Not Corrected For (Future):
-- **Soft-iron distortions** - Ferromagnetic materials that distort field (cross-axis coupling)
-- **Inclination effects** - Depending on latitude (Earth's field tilts with latitude)
-- **Time-varying fields** - Moving metal objects
-
-## Calibration Quality Indicators
-
-Good calibration produces:
-- **Range spread**: 300-500 counts typical (larger range = better sensitivity)
-- **Sample count**: ~3000 samples for 30 seconds @ ~100 Hz
-- **Offset symmetry**: min/max should be relatively balanced around zero after offset applied
-- **Reproducibility**: Re-running should give similar offsets (±5 counts)
-
-**Warning signs:**
-- Very small range (<100 counts) - weak/no rotation during calibration
-- Asymmetric ranges (e.g., X: [-300, 50]) - rotation not thorough
-- No change between runs - sensor may be stuck or not reading
-
-## Rotation Technique
-
-For best results:
-
-1. **Hold device steady** - Avoid translational motion, only rotate
-2. **Slow, deliberate rotation** - ~1 rotation per 2 seconds
-3. **Cover all axes**: 
-   - Roll (rotate around long axis)
-   - Pitch (rotate forward/back)
-   - Yaw (rotate left/right)
-   - Diagonal (corner to corner through space)
-4. **8-figure pattern**: Figure-8 patterns in 3D space are effective
-5. **Keep away from metals**: Move away from ferrous objects during calibration
-
-**Poor calibration technique:**
-- ❌ Fast jerky movements
-- ❌ Only rotating one axis
-- ❌ Holding near metallic objects
-- ❌ Calibrating in high EM noise area (near motors, WiFi routers)
-
-## Using Calibration Results
-
-After calibration, the `magCal` struct contains:
-
-```cpp
-MagCalib magCal;
-// .bias = {X_offset, Y_offset, Z_offset}
-// .softIron = identity matrix (3x3)
-```
-
-Apply calibration to raw readings:
-
-```cpp
-imu::Vec3f magRaw = {(float)raw.x, (float)raw.y, (float)raw.z};
-imu::Vec3f magCalibrated = {
-  magRaw.x - magCal.bias.x,
-  magRaw.y - magCal.bias.y,
-  magRaw.z - magCal.bias.z
-};
-```
-
-Or use the helper function in [calib.cpp](../firmware/src/sensors/calib.cpp):
-
-```cpp
-#include "./sensors/calib.h"
-imu::Vec3f magFloat = {(float)magRawRead.x, (float)magRawRead.y, (float)magRawRead.z};
-imu::Vec3f magCal_out = applyMagCalib(magFloat, magCal);
-```
-
-## Saving Calibration
-
-Currently, calibration is recomputed on every startup. For production use, save to flash:
-
-```cpp
-// TODO: Implement in storage.cpp
-void saveCalibration(const MagCalib& cal);
-void loadCalibration(MagCalib& cal);
-```
-
-Then in setup():
-```cpp
-MagCalib magCal;
-if (!loadCalibration(magCal)) {
-  // First time or corrupted: do fresh calibration
-  imu::calibrateMagnetometer(magCal, 30000);
-  saveCalibration(magCal);
+**MagCalib:**
+```json
+{
+  "type": "MagCalib",
+  "bias": { "x": 45.2, "y": -28.7, "z": 15.4 },
+  "softIron": [
+    [1.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0],
+    [0.0, 0.0, 1.0]
+  ]
 }
 ```
 
+**Calib3 (gyro/accel):**
+```json
+{
+  "type": "Calib3",
+  "bias": { "x": 0.1, "y": -0.05, "z": 0.03 },
+  "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+}
+```
+
+## Boot Sequence
+
+The calibration load/run logic is in [nav_main.cpp](../src/nav_main.cpp):
+
+```
+For each sensor (mag, gyro, accel):
+  1. Try loading from LittleFS
+  2. If found → apply immediately, skip calibration
+  3. If not found → run interactive calibration, save to LittleFS
+```
+
+## Magnetometer Calibration
+
+**Method:** Min/max sweep (hard-iron only)
+
+**Procedure:**
+1. System prints: "Rotate device through all orientations for 30 seconds..."
+2. Slowly rotate the device in all directions (figure-8 patterns work well)
+3. Cover all axes: roll, pitch, yaw, and diagonal orientations
+4. After 30 seconds, bias is computed as midpoint: `bias = (min + max) / 2`
+
+**What it corrects:**
+- Hard-iron distortions (fixed magnetic sources in/near device)
+- Sensor manufacturing offset
+- Local field variations
+
+**What it does NOT correct:**
+- Soft-iron distortions (cross-axis coupling from ferromagnetic materials) — see [mag-calibration-workflow.md](mag-calibration-workflow.md) for full soft-iron calibration
+
+**Triggering recalibration:**
+- Delete `/calib/mag_cal.json` from LittleFS and reboot
+- Long-press BTN2 (2 seconds) on the display device
+
+**Rotation tips:**
+- Slow, deliberate rotation (~1 rotation per 2 seconds)
+- Cover all 3 axes plus diagonals
+- Keep away from ferrous objects during calibration
+- Avoid fast jerky movements
+
+### Calibrated Magnetometer Reading
+
+After calibration, `imu::readMag(out)` returns fully calibrated data:
+
+```
+readMagRaw() → Vec3i16 (raw counts)
+    → convert to float
+    → subtract hard-iron bias
+    → multiply by soft-iron 3×3 matrix
+    → readMag() result (calibrated Vec3f)
+```
+
+If `setMagCalibration()` was never called, `readMag()` returns raw float conversion (bias=0, softIron=identity).
+
+## Gyroscope Calibration
+
+**Method:** Stationary bias sampling
+
+**Procedure:**
+1. Place device on a stable, level surface
+2. Keep completely still — no movement or vibration
+3. System samples for 10 seconds at ~100 Hz
+4. Average of all samples = bias offset
+5. Scale set to 1.0 (no scaling correction)
+
+**Typical bias values:**
+- Good: ±10 raw counts (±0.0002 rad/s)
+- Acceptable: ±50 raw counts (±0.0008 rad/s)
+- Bad (device moved): >200 raw counts
+
+## Accelerometer Calibration
+
+**Method:** 6-point orientation sequence
+
+**Procedure:**
+1. System prompts for 6 orientations in sequence: X+, X-, Y+, Y-, Z+, Z- pointing up
+2. For each orientation: hold device steady for 2.5 seconds while system samples
+3. System computes: `bias = (max + min) / 2`, `scale = 9.81 / (max - bias)` per axis
+
+**Typical values:**
+- Bias: ±50 raw counts (±0.004 m/s²)
+- Scale: 0.98 – 1.02 per axis
+
+## Storage API
+
+```cpp
+#include "util/storage.h"
+
+// Magnetometer
+storage::saveMagCalibration("/calib/mag_cal.json", magCal);  // returns bool
+storage::loadMagCalibration("/calib/mag_cal.json", magCal);  // returns bool
+
+// Gyro / Accel
+storage::saveCalib3("/calib/gyro_cal.json", gyroCal);
+storage::loadCalib3("/calib/gyro_cal.json", gyroCal);
+```
+
+Files are stored on LittleFS (ESP32 internal flash). Total calibration data is <1 KB.
+
+## Forcing Recalibration
+
+1. **Delete files from LittleFS** — reboot triggers fresh calibration
+2. **BTN2 long press** — triggers mag recalibration from display device
+3. **Serial commands** — use `LittleFS.remove("/calib/mag_cal.json")` etc.
+
 ## Troubleshooting
 
-### Issue: Inconsistent Calibration Values
-**Cause**: Rotation pattern incomplete
-**Fix**: Ensure figure-8 pattern that covers all orientations
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| Heading drifts after cal | Soft-iron not corrected | Run full soft-iron workflow ([mag-calibration-workflow.md](mag-calibration-workflow.md)) |
+| Very large mag offsets (>500) | Strong local magnetic source | Move away from motors/magnets during cal |
+| Gyro bias very large (>500) | Device moved during cal | Repeat on stable surface, no vibration |
+| Accel scale way off (>1.1) | Wrong orientation or sensor issue | Verify axis labeling, check sensor |
+| Inconsistent cal values | Poor rotation coverage | Use figure-8 pattern, cover all axes |
+| "LittleFS mount failed" | Flash partition not configured | Check `board_build.filesystem = littlefs` in platformio.ini |
 
-### Issue: Very Large Offsets (>500 counts)
-**Cause**: Strong local magnetic distortion (magnetized object, electric motor nearby)
-**Fix**: 
-- Move away from magnetic sources
-- Check for stray magnets in housing
-- Verify sensor isn't magnetized from ESD
+## Speed Calibration (Flow Sensor)
 
-### Issue: Calibration Never Completes
-**Cause**: Magnetometer not initialized
-**Fix**: Ensure `imu::init()` completes successfully before calling `calibrateMagnetometer()`
-
-### Issue: Heading Still Drifts After Calibration
-**Cause**: Soft-iron distortions not corrected
-**Fix**: 
-- Implementation of soft-iron matrix correction (future feature)
-- Manual rotation adjustment (currently must be done in code)
-
-## Next Steps
-
-1. **Implement persistence**: Save/load calibration from flash
-2. **Soft-iron correction**: Compute full 3×3 correction matrix
-3. **Automated detection**: Detect inadequate rotation and prompt user
-4. **Multi-location calibration**: Store multiple calibrations for different environments
-5. **Gyroscope calibration**: Implement similar min/max for gyro bias
-
-
-2 - Speed calibration
-
-- Shallow runs with known distance marked on the bottom.  I prefer a run of pre-measured line. 
-
-- Drive 100–200 m straight at typical cruising speed.
-
-- Tune flow_factor such that integrated distance matches GPS.
+Not automated. Requires field testing:
+1. Mark a known distance on the bottom (100–200 m of pre-measured line)
+2. Drive straight at typical cruising speed
+3. Tune `FLOW_K_FACTOR` and `FLOW_CROSS_SECTION_M2` in [config.h](../src/config.h) until integrated distance matches GPS or known distance

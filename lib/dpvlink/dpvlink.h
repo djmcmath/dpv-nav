@@ -1,0 +1,88 @@
+#pragma once
+
+#include <stdint.h>
+#include <stddef.h>
+
+// ---------------------------------------------------------------------------
+// Wire format selector: set to 1 for JSON (human-readable, easy debug),
+// set to 0 for packed binary (lower overhead, future).
+// ---------------------------------------------------------------------------
+#ifndef DPVLINK_USE_JSON
+#define DPVLINK_USE_JSON 1
+#endif
+
+// ---------------------------------------------------------------------------
+// Nav -> Display packet  (sent at ~10 Hz)
+// ---------------------------------------------------------------------------
+struct NavPacket {
+    float    heading_deg;       // 0-360
+    float    pitch_deg;         // -90 to +90
+    float    roll_deg;          // -180 to +180
+    float    speed_ms;          // m/s (flow or GPS)
+    float    distance_home_m;   // dead-reckoning distance to home
+    float    bearing_home_deg;  // bearing to home (0-360)
+    float    pos_x_m;           // meters east of home (or start)
+    float    pos_y_m;           // meters north of home (or start)
+    uint8_t  system_state;      // SystemState enum value
+    uint8_t  flags;             // see FLAG_* constants below
+    uint8_t  gps_fix_quality;   // 0=none, 1=GPS, 2=DGPS
+    uint8_t  gps_satellites;    // number of satellites in fix
+    uint32_t uptime_ms;
+};
+
+// NavPacket.flags bit definitions
+constexpr uint8_t FLAG_TRUE_HEADING = 0x01;  // 1 = true heading, 0 = magnetic
+constexpr uint8_t FLAG_GPS_SPEED    = 0x02;  // 1 = GPS speed, 0 = flow sensor
+constexpr uint8_t FLAG_HAS_HOME     = 0x04;  // 1 = home position set
+
+// ---------------------------------------------------------------------------
+// Debug packet  (sent alongside NavPacket when debug mode enabled)
+// ---------------------------------------------------------------------------
+struct DebugPacket {
+    float mag_x, mag_y, mag_z;         // calibrated magnetometer (uT)
+    float accel_x, accel_y, accel_z;   // calibrated accelerometer (g)
+    float gyro_x, gyro_y, gyro_z;      // calibrated gyroscope (rad/s)
+    float fused_heading_deg;            // AHRS heading (0-360)
+    float raw_mag_heading_deg;          // atan2(mag_y, mag_x), no tilt comp
+    float pitch_deg;                    // AHRS pitch
+    float roll_deg;                     // AHRS roll
+};
+
+// ---------------------------------------------------------------------------
+// Packet type discriminator (JSON "t" field)
+// ---------------------------------------------------------------------------
+enum class PacketType : uint8_t { UNKNOWN = 0, NAV, DEBUG };
+
+PacketType identifyPacket(const char* buf, size_t len);
+
+// ---------------------------------------------------------------------------
+// Display -> Nav commands
+// ---------------------------------------------------------------------------
+enum class DisplayCmd : uint8_t {
+    NONE = 0,
+    SET_HOME,
+    CLEAR_HOME,
+    START_MAG_CAL,
+    START_GYRO_CAL,
+    RESET,
+};
+
+// ---------------------------------------------------------------------------
+// Serialize / parse API
+//
+// All functions write into caller-provided buffers.
+// JSON mode: output is a single line terminated by '\n'.
+// Binary mode: output is raw bytes with a 2-byte sync header + CRC (future).
+//
+// Returns number of bytes written, or 0 on error.
+// Parse functions return true on success.
+// ---------------------------------------------------------------------------
+
+size_t navPacketToBytes(const NavPacket& pkt, char* buf, size_t bufLen);
+bool   bytesToNavPacket(const char* buf, size_t len, NavPacket& out);
+
+size_t debugPacketToBytes(const DebugPacket& pkt, char* buf, size_t bufLen);
+bool   bytesToDebugPacket(const char* buf, size_t len, DebugPacket& out);
+
+size_t displayCmdToBytes(DisplayCmd cmd, char* buf, size_t bufLen);
+bool   bytesToDisplayCmd(const char* buf, size_t len, DisplayCmd& out);

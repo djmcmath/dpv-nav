@@ -10,6 +10,7 @@ const uint8_t LIS3MDL_REG_CTRL_REG1 = 0x20;
 const uint8_t LIS3MDL_REG_CTRL_REG2 = 0x21;
 const uint8_t LIS3MDL_REG_CTRL_REG3 = 0x22;
 const uint8_t LIS3MDL_REG_CTRL_REG4 = 0x23;
+const uint8_t LIS3MDL_REG_CTRL_REG5 = 0x24;
 const uint8_t LIS3MDL_REG_OUT_X_L   = 0x28; // X_L, X_H, Y_L, Y_H, Z_L, Z_H
 
 void magWrite(uint8_t reg, uint8_t value);

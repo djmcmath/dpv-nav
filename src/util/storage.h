@@ -3,24 +3,22 @@
 #include "../sensors/calib.h"
 #include "../types/types.h"
 
-// SPIFFS / flash storage for calibration, config, and data logging
+// LittleFS / flash storage for calibration, config, and data logging
 // 
 // ESP32 Flash Layout:
-//   - SPIFFS is used for both persistent config/calibration data and runtime logging
-//   - Data logs are CSV files stored in /logs/ directory
-//   - Calibration files stored as JSON in /calib/ directory
-//   - Config is typically stored as individual files or via Preferences library
+//   - LittleFS is used for both persistent config/calibration data and runtime logging
+//   - All files (logs, calibration JSON, config) stored in LittleFS root directory
 //
 // Future: Consider using NVS (Non-Volatile Storage) for calibration persistence
 // and EEPROM emulation for fast config reads.
 
 namespace storage {
 
-// Save magnetometer calibration to JSON file on SPIFFS
+// Save magnetometer calibration to JSON file on LittleFS
 // Returns true if successful, false on error
 bool saveMagCalibration(const char* filename, const MagCalib& cal);
 
-// Load magnetometer calibration from JSON file on SPIFFS
+// Load magnetometer calibration from JSON file on LittleFS
 // Returns true if successful, false on error (file not found or parse error)
 bool loadMagCalibration(const char* filename, MagCalib& cal);
 

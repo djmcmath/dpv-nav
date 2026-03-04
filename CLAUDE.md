@@ -186,20 +186,52 @@ Many functions return `imu::ImuStatus` (`Ok`, `NotInitialized`, `BusError`, `Who
 
 ### Mahony Filter Integration
 
-See [nav_main.cpp:23-24](src/nav_main.cpp#L23-L24):
+See [nav_main.cpp](src/nav_main.cpp):
 
 ```cpp
-MahonyState ahrs;  // Holds quaternion + integral feedback
-MahonyParams params{ .kp = 1.0f, .ki = 0.005f, .useMag = true };
+MahonyState ahrs;
+MahonyParams mahonyParams{ .kp = 1.0f, .ki = 0.002f, .useMag = true };
 ```
 
-- **`kp`**: Proportional gain (correction strength from accel/mag)
-- **`ki`**: Integral gain (bias correction over time; 0 = disabled)
+- **`kp`**: Proportional gain (0.5–2.0 range). Higher = faster correction from accel/mag, lower = smoother gyro-dominated response
+- **`ki`**: Integral gain (0.0–0.01 range). Builds gyro bias estimate over time. Too high causes windup/oscillation
 - **`useMag`**: Enable magnetometer fusion (set to `true` once mag is calibrated)
 
-Update in main loop: `mahonyUpdate(ahrs, params, gyro_rad_s, accel, mag, dt)`
+**CRITICAL:** All three sensor inputs must be in the **same right-handed NED body frame**. The mag reading requires Y-axis negation before passing to the filter — see "Magnetometer Coordinate Frame" section above. Update in main loop:
+
+```cpp
+imu::Vec3f magNED = { mag.x, -mag.y, mag.z };  // Fix mag to NED frame
+mahonyUpdate(ahrs, mahonyParams, gyro, accel, magNED, dt);
+```
 
 ## Critical Conventions
+
+### Magnetometer Coordinate Frame (IMPORTANT — Read Before Touching Axis Maps or Mahony)
+
+The LSM6DS33 (accel/gyro) and LIS3MDL (magnetometer) have **different physical Y-axis directions** on this board. The axis maps in [nav_main.cpp](src/nav_main.cpp) correct for this:
+
+```cpp
+imu::AxisMap accelGyroMap{ .x_axis = +1, .y_axis = +2, .z_axis = +3 };  // NED reference
+imu::AxisMap magMap{ .x_axis = +1, .y_axis = -2, .z_axis = +3 };        // LIS3MDL Y flipped
+```
+
+**The subtle trap:** After axis mapping + calibration, the mag output is in a **left-handed** frame for Y (positive Y = Left, not Right). This is why `atan2(mag_y, mag_x)` directly gives correct heading in `debug_axes` and diagnostics — the standard NED formula `atan2(-mag_y, mag_x)` is NOT needed because mag Y is already sign-flipped.
+
+**But the Mahony AHRS filter requires all sensors in the same right-handed NED frame.** If mag and accel Y axes disagree, the filter's cross-product correction drives heading to `360° - true_heading` instead of `true_heading`, and rotation sense reverses. This manifests as a **stable but wrong heading** (not drift) with a consistent offset that varies by orientation.
+
+**The fix** (in `nav_main.cpp` loop): mag.y is negated before passing to `mahonyUpdate()`:
+
+```cpp
+imu::Vec3f magNED = { mag.x, -mag.y, mag.z };
+mahonyUpdate(ahrs, mahonyParams, gyro, accel, magNED, dt);
+```
+
+**Rules to prevent re-breaking this:**
+1. **Never change `magMap` without also updating the `magNED` negation** — they are a matched pair
+2. **Never pass `mag` directly to `mahonyUpdate()`** — always use `magNED`
+3. **If you change the axis map, all mag calibration data must be re-collected** — the soft-iron matrix is frame-dependent
+4. **Diagnostics and `debug_axes` use `mag` (not `magNED`)** — they use `atan2(my, mx)` which works in the left-handed frame
+5. **The LIS3MDL BDU (Block Data Update) must be enabled** (CTRL_REG5 = 0x40) or mag readings will byte-tear and fluctuate wildly
 
 ### Struct-Based Configuration
 All configuration uses struct initialization with named fields (not function params). Keeps init calls readable and decouples config from init logic.

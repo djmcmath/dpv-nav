@@ -17,22 +17,29 @@ Configured in [nav_main.cpp](../src/nav_main.cpp):
 
 ```cpp
 MahonyState ahrs;
-MahonyParams params{ .kp = 1.0f, .ki = 0.005f, .useMag = true };
+MahonyParams mahonyParams{ .kp = 1.0f, .ki = 0.002f, .useMag = true };
 ```
 
-| Parameter | Default | Effect |
-|-----------|---------|--------|
-| `kp` | 1.0 | Proportional gain — higher = faster correction, more oscillation |
-| `ki` | 0.005 | Integral gain — corrects persistent gyro bias over time |
-| `useMag` | true | Enable magnetometer for yaw/heading correction |
+| Parameter | Default | Range | Effect |
+|-----------|---------|-------|--------|
+| `kp` | 1.0 | 0.5–2.0 | Proportional gain — higher = faster correction from accel/mag, lower = smoother gyro-dominated response |
+| `ki` | 0.002 | 0.0–0.01 | Integral gain — builds gyro bias estimate over time. Too high causes windup/oscillation |
+| `useMag` | true | — | Enable magnetometer for yaw/heading correction |
 
 ### Update Loop
 
 Called every iteration in the nav device main loop (~100 Hz):
 
 ```cpp
-mahonyUpdate(ahrs, params, gyro_rad_s, accel, mag, dt);
+imu::Vec3f magNED = { mag.x, -mag.y, mag.z };  // Fix mag Y to NED frame
+mahonyUpdate(ahrs, mahonyParams, gyro, accel, magNED, dt);
 ```
+
+> **CRITICAL — Sensor Frame Consistency:** All three sensor inputs must be in the **same right-handed NED body frame**. On this board, the LIS3MDL magnetometer has an inverted Y-axis relative to the LSM6DS33 accel/gyro. After axis mapping and calibration, the mag output has Y in a left-handed convention (positive = Left). The `mag.y` negation above corrects this before passing to the filter.
+>
+> **If the frames don't match, the filter converges to `360° - true_heading` instead of `true_heading`**, and rotating right will decrease indicated heading. This is a stable but wrong heading (not drift), making it hard to diagnose. The cross-product error term inside the filter drives the quaternion to a mirror-image equilibrium when mag and accel Y axes have opposite sign conventions.
+>
+> See the "Magnetometer Coordinate Frame" section in [CLAUDE.md](../CLAUDE.md) for full details and rules to prevent re-breaking this.
 
 ## Euler Angle Extraction
 
@@ -97,3 +104,7 @@ The quaternion representation is singularity-free (no gimbal lock), unlike Euler
 | Slow response to motion | kp too low | Increase `kp` (try 2.0) |
 | Roll/pitch unstable when still | Accel noise or poor cal | Re-calibrate accelerometer |
 | Yaw doesn't respond | Mag disabled or uncalibrated | Enable `useMag`, run mag calibration |
+| **Stable but wrong heading** (consistent offset, not drift) | Mag/accel Y-axis sign mismatch — filter converges to `360°-true` | Ensure `magNED` negates mag.y before `mahonyUpdate()`. See CLAUDE.md "Magnetometer Coordinate Frame" |
+| **Rotating right decreases heading** | Same cause as above — mag Y flipped vs accel Y | Same fix: negate mag.y before filter input |
+| Wildly fluctuating mag at rest | LIS3MDL BDU not enabled (byte tearing) | Ensure CTRL_REG5 = 0x40 is written during mag init |
+| ki > 0 causes heading to overshoot and oscillate | Integral windup from sustained error | Reduce ki (try 0.001), or set to 0 while debugging other issues |

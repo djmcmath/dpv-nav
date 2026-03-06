@@ -54,7 +54,8 @@ Code is organized into namespaces by subsystem:
 - `nav::` - Position estimation (dead reckoning, GPS truth, home waypoint)
 - `gps::` - GPS driver (Adafruit Ultimate GPS, NMEA parsing)
 - `flow::` - Flow sensor driver (hall-effect pulse, speed calculation)
-- `display::` - OLED display driver (SSD1351, nav + debug screen rendering)
+- `display::` - OLED display driver (SSD1351, GFXcanvas16 framebuffer, nav + debug screen rendering)
+- `menu::` - Hierarchical menu system (JSON-configurable, button-driven, on display device)
 - `ui::` - Display output (console_update for OLED/serial)
 - `logging::` - Data logging system (LittleFS-based)
 - `storage::` - Calibration persistence (JSON files in LittleFS)
@@ -82,6 +83,8 @@ src/
 │   ├── nav_model.cpp/h        # Position estimation (dead reckoning + GPS truth + home)
 │   ├── ui_controller.cpp/h    # Display updates and user interface
 │   └── state.h                # State machine definitions (BOOT/CAL/NAV/ERROR)
+├── menu/                      # Menu system (display device only)
+│   ├── menu.cpp/h             # Hierarchical menu: state machine, rendering, JSON load, actions
 ├── util/                      # Utilities
 │   ├── logging.cpp/h          # Data logging to LittleFS
 │   └── storage.cpp/h          # Calibration save/load (JSON)
@@ -90,6 +93,8 @@ src/
 lib/
 └── dpvlink/
     └── dpvlink.h/cpp          # Inter-device packet format (NavPacket, DebugPacket, DisplayCmd, JSON wire format)
+data/
+└── menu.json                  # Menu definition (uploaded to LittleFS on display device)
 ```
 
 ### Data Flow Pipeline (Nav Device)
@@ -102,7 +107,7 @@ lib/
 4. **AHRS fusion** ([math/mahony.h](src/math/mahony.h)): Normalized sensor vectors → `Quaternion` (orientation)
 5. **Euler extraction** ([math/orientation.h](src/math/orientation.h)): Quaternion → Roll/Pitch/Yaw (rad)
 6. **Heading calculation**: Yaw → Heading (0-360°)
-7. **Speed selection**: GPS speed (when fix fresh <3s) or flowmeter speed
+7. **Speed selection**: GPS speed is filtered through a two-stage gate before use. First, a SOG (Speed Over Ground) deadband rejects speeds below 0.5 kn as position jitter noise and trusts speeds above 2.0 kn unconditionally. Speeds in the middle zone must also pass a COG (Course Over Ground) coherence check — an EMA of sin/cos(COG) whose resultant length measures heading consistency (0=random, 1=steady). If GPS speed fails either check, flowmeter speed is used instead. See `GPS_SOG_NOISE_FLOOR_KN`, `GPS_SOG_TRUST_FLOOR_KN`, and `GPS_COG_COHERENCE_THRESH` in [config.h](src/config.h).
 8. **Position estimation** ([nav/nav_model.h](src/nav/nav_model.h)): Dead-reckoning integration (speed × heading × dt) with optional GPS truth override
 9. **Serial link**: `NavPacket` sent to display device at 10 Hz via JSON over Serial1. Optional `DebugPacket` at 5 Hz when `ENABLE_DEBUG_PACKET` is set.
 
@@ -204,6 +209,67 @@ imu::Vec3f magNED = { mag.x, -mag.y, mag.z };  // Fix mag to NED frame
 mahonyUpdate(ahrs, mahonyParams, gyro, accel, magNED, dt);
 ```
 
+## Menu System
+
+The display device includes a hierarchical menu system ([src/menu/menu.h](src/menu/menu.h), [src/menu/menu.cpp](src/menu/menu.cpp)) for runtime configuration and actions.
+
+### Button Mapping
+- **BTN1 short press**: Open menu (when closed) or cycle to next item (when open)
+- **BTN2 short press**: Select highlighted item (enter submenu, execute action, or go back)
+- **BTN1 + BTN2 held 2s**: Reset display device (sends `DisplayCmd::RESET`)
+- **15-second idle timeout**: Menu auto-closes
+
+### Menu Structure
+```
+MENU (root)
+├── NAV:     Outbound, Home, Mark, Op Mode
+├── CAL:     Quick cal, Full cal, Speed cal
+├── INPUT:   GPS Pos, GPS Spd, WiFi, Logging
+└── DISPLAY: Mode, Spd/ETA, Units, Heading
+```
+
+Each submenu has an auto-generated ".." (back) item. Toggle items (GPS Pos, Units, Mode, Op Mode, etc.) show current state inline and stay open after toggle.
+
+**Op Mode (Dive/Surface):** Toggles operational mode. Surface mode (default at boot) keeps GPS and WiFi active. Dive mode disables both GPS processing and WiFi radio — suitable for underwater use where neither is available. Toggling back to surface re-initializes WiFi and GPS.
+
+### Display Layout When Menu Is Open (128×96 OLED)
+- **y=0–11**: Status bar (unchanged, live-updating)
+- **y=12–53**: Nav data (bearing/range to target, live-updating)
+- **y=54–95**: Menu area (separator line, title, up to 3 visible items with scroll)
+
+### Menu Definition
+Menu structure is loaded from `/menu.json` on LittleFS at boot. If the file is missing, a hardcoded default is used. The JSON maps action IDs to `menu::Action` enum values. To customize the menu, edit [data/menu.json](data/menu.json) and upload with `pio run -e display -t uploadfs`.
+
+### Adding New Menu Actions
+1. Add a new `menu::Action` enum value in [src/menu/menu.h](src/menu/menu.h)
+2. Add a corresponding `DisplayCmd` value in [lib/dpvlink/dpvlink.h](lib/dpvlink/dpvlink.h) (for nav-device actions)
+3. Wire the action in `executeAction()` in [src/menu/menu.cpp](src/menu/menu.cpp)
+4. Handle the command in `handleDisplayCmd()` in [src/nav_main.cpp](src/nav_main.cpp)
+5. Add the item to the hardcoded default menu and to [data/menu.json](data/menu.json)
+
+## Display Rendering Architecture (GFXcanvas16 Framebuffer)
+
+The display driver uses an offscreen `GFXcanvas16(128, 96)` framebuffer (24KB RAM). All drawing operations target the canvas (pure RAM writes), and the complete framebuffer is pushed to the SSD1351 OLED in a single SPI bulk transfer via `oled.drawRGBBitmap()`.
+
+**Why framebuffer:** Direct SPI draw calls to the SSD1351 caused display blanking and crashes due to SPI timing sensitivity. The previous workaround was 50ms delays after every SPI call, making rendering slow and fragile. The framebuffer approach eliminates all per-draw SPI traffic — canvas operations are microsecond RAM writes, and the single bulk transfer is more robust than many small transactions.
+
+**Rendering flow:**
+1. `showNav()` / `showDebug()`: Clear canvas → draw everything → `flush()` (full frame, self-contained)
+2. `showNavTop()`: Draw top half to canvas → **does NOT flush** (caller adds menu content via `drawText()`/`drawHLine()`, then calls `flush()`)
+3. Drawing primitives (`drawText`, `fillRect`, `drawHLine`, `drawPixel`): Write to canvas only. Caller must call `flush()` to make changes visible.
+4. Boot functions (`selfTest`, `statusLine`): Draw directly to `oled` hardware for immediate visibility during boot sequence.
+
+**Key design decisions:**
+- No caching/dirty tracking — every frame redraws from scratch since canvas writes are free
+- `flush()` is the only function that touches SPI during normal operation
+- `reinit()` calls `oled.begin()` then re-pushes the canvas to restore display contents
+- A `reinit()` at end of `setup()` ensures display works after I2C/MCP init (which can disrupt SPI state)
+- Periodic `reinit()` every 10s in `display_main.cpp` as a watchdog for SPI brown-out recovery
+
+**Serial self-test commands** (via USB serial on display device):
+- `selftest_rect_start [coverage%]` / `selftest_rect_stop` — random colored rectangles at 1 Hz
+- `selftest_text_start [coverage%]` / `selftest_text_stop` — random text strings at 1 Hz
+
 ## Critical Conventions
 
 ### Magnetometer Coordinate Frame (IMPORTANT — Read Before Touching Axis Maps or Mahony)
@@ -275,14 +341,17 @@ To force recalibration, manually delete the JSON files from LittleFS via serial 
 ## Key Files Reference
 
 - [src/nav_main.cpp](src/nav_main.cpp) — Nav device entry point: sensor init, AHRS, GPS, flow, position estimation, serial link
-- [src/display_main.cpp](src/display_main.cpp) — Display device entry point: OLED rendering, buttons, serial link receive
+- [src/display_main.cpp](src/display_main.cpp) — Display device entry point: OLED rendering, buttons, menu integration, serial link receive
+- [src/menu/menu.h](src/menu/menu.h) — Menu system API: data structures, state machine, display settings
+- [src/menu/menu.cpp](src/menu/menu.cpp) — Menu implementation: rendering, navigation, JSON loading, action dispatch
+- [data/menu.json](data/menu.json) — Menu definition file (uploaded to display device LittleFS)
 - [src/nav/nav_model.h](src/nav/nav_model.h) — Position estimation API (dead reckoning + GPS truth + home waypoint)
 - [src/nav/nav_model.cpp](src/nav/nav_model.cpp) — Position estimation implementation (flat-earth local XY)
 - [src/sensors/imu.cpp](src/sensors/imu.cpp) — Unified IMU driver (LSM6DS33 + LIS3MDL), I2C read/write, calibration routines
 - [src/sensors/imu.h](src/sensors/imu.h) — Public IMU API (ImuConfig, ImuStatus, read functions)
 - [src/drivers/gps.cpp](src/drivers/gps.cpp) — GPS driver (Adafruit Ultimate GPS, NMEA parsing)
 - [src/drivers/flow_sensor.cpp](src/drivers/flow_sensor.cpp) — Flow sensor driver (speed from hall-effect pulses)
-- [src/drivers/display.cpp](src/drivers/display.cpp) — OLED display driver (nav mode: status bar + 2×2 grid; debug mode: sensor data)
+- [src/drivers/display.cpp](src/drivers/display.cpp) — OLED display driver (GFXcanvas16 framebuffer; nav mode: status bar + 2×2 grid; debug mode: sensor data)
 - [src/math/mahony.h](src/math/mahony.h) — AHRS filter (quaternion update from gyro/accel/mag)
 - [src/math/orientation.h](src/math/orientation.h) — Quaternion ↔ Euler conversions, heading calculation
 - [src/types/types.h](src/types/types.h) — Core data types (Vec3i16, Vec3f, Calib3, MagCalib, ImuConfig, AxisMap)

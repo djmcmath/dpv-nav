@@ -44,6 +44,7 @@ static constexpr uint32_t SEND_INTERVAL_MS = 100;  // 10 Hz link rate
 static constexpr uint32_t LOOP_INTERVAL_US = 10000; // 100 Hz loop rate gate
 static constexpr uint32_t DIAG_INTERVAL_MS = 1000;  // 0.2 Hz sensor diagnostics
 static constexpr bool FULL_DIAG_ENABLE = false;  // set to false to disable periodic diagnostic prints
+static constexpr bool GPS_DIAG_ENABLE  = true;   // GPS position/speed/COG coherence diagnostics
 
 // ---- Serial link buffer ----------------------------------------------------
 static char linkBuf[256];
@@ -180,15 +181,55 @@ void loop() {
     // --- Peripheral sensors -------------------------------------------------
     gps::update();
     flow::update();
-    // Select speed source: prefer GPS when fix is fresh, fall back to flowmeter
+
+    // --- GPS COG coherence filter -------------------------------------------
+    // Track consistency of Course Over Ground to distinguish real motion from
+    // position jitter.  EMA of sin/cos avoids 0°/360° wrapping issues.
+    // Coherence (resultant length) near 1.0 = consistent heading = real motion;
+    // near 0.0 = random headings = stationary GPS wander.
+    static float cogSinEma = 0.0f, cogCosEma = 0.0f;
+    static bool  cogPrimed = false;
+
+    GpsFix fix = gps::getFix();
+    bool gpsFresh = fix.has_fix && (millis() - fix.fix_age_ms) < GPS_FIX_STALE_MS;
+
+    if (gpsFresh) {
+        float cogRad = fix.course_deg * (M_PI / 180.0f);
+        float s = sinf(cogRad);
+        float c = cosf(cogRad);
+        if (!cogPrimed) {
+            cogSinEma = s;
+            cogCosEma = c;
+            cogPrimed = true;
+        } else {
+            cogSinEma += GPS_COG_EMA_ALPHA * (s - cogSinEma);
+            cogCosEma += GPS_COG_EMA_ALPHA * (c - cogCosEma);
+        }
+    }
+
+    float cogCoherence = sqrtf(cogSinEma * cogSinEma + cogCosEma * cogCosEma);
+
+    // Select speed source: GPS speed must pass both SOG deadband and COG coherence.
+    //  - SOG < NOISE_FLOOR: always noise (position jitter at rest)
+    //  - SOG > TRUST_FLOOR: always trust (clearly moving, COG drifts slowly at low speed)
+    //  - In between: require COG coherence to confirm real motion
     float speed;
     bool useGpsSpeed = false;
-    GpsFix fix = gps::getFix();
-    if (fix.has_fix && (millis() - fix.fix_age_ms) < GPS_FIX_STALE_MS) {
-        speed = fix.speed_knots * KNOTS_TO_MS;
-        useGpsSpeed = true;
-        // Update position from GPS when available and enabled
+    if (gpsFresh) {
         nav::updateGPS(fix.lat, fix.lon);
+        bool sogTrusted = false;
+        if (fix.speed_knots >= GPS_SOG_TRUST_FLOOR_KN) {
+            sogTrusted = true;
+        } else if (fix.speed_knots >= GPS_SOG_NOISE_FLOOR_KN
+                   && cogCoherence >= GPS_COG_COHERENCE_THRESH) {
+            sogTrusted = true;
+        }
+        if (sogTrusted) {
+            speed = fix.speed_knots * KNOTS_TO_MS;
+            useGpsSpeed = true;
+        } else {
+            speed = flow::getSpeed_ms();
+        }
     } else {
         speed = flow::getSpeed_ms();
     }
@@ -274,6 +315,21 @@ void loop() {
             //if (spreadX > 3.0f || spreadY > 3.0f || spreadZ > 3.0f)
             //    Serial.printf("[MAG ] WARNING: Noisy at rest (spread X=%.1f Y=%.1f Z=%.1f uT)\n",
             //                  spreadX, spreadY, spreadZ);
+        }
+
+        if (GPS_DIAG_ENABLE) {
+            Serial.printf("[GPS ] fix=%d  sat=%d  hdop=%.1f\t",
+                          fix.has_fix, fix.satellites, fix.hdop);
+            Serial.printf("pos=(%.6f, %.6f)  alt=%.1f m\n",
+                          fix.lat, fix.lon, fix.altitude_m);
+            Serial.printf("[GPS ] SOG=%.2f kn (%.2f m/s)  COG=%.1f deg\t",
+                          fix.speed_knots, fix.speed_knots * KNOTS_TO_MS,
+                          fix.course_deg);
+            Serial.printf("coherence=%.3f [%s]  speed_used=%.2f m/s (%s)\n",
+                          cogCoherence,
+                          cogCoherence >= GPS_COG_COHERENCE_THRESH ? "PASS" : "FAIL",
+                          speed,
+                          useGpsSpeed ? "GPS" : "FLOW");
         }
 
         mStatN = 0;  // reset for next window
@@ -436,6 +492,72 @@ static void handleDisplayCmd() {
                     case DisplayCmd::RESET:
                         Serial.println("CMD: RESET");
                         ESP.restart();
+                        break;
+                    case DisplayCmd::NAV_OUTBOUND:
+                        Serial.println("CMD: NAV_OUTBOUND (stub)");
+                        // TODO: set outbound waypoint as destination
+                        break;
+                    case DisplayCmd::NAV_HOME:
+                        Serial.println("CMD: NAV_HOME");
+                        nav::setHome();
+                        sysState = SystemState::NAVIGATING;
+                        break;
+                    case DisplayCmd::MARK_POSITION: {
+                        nav::Position pos = nav::getPosition();
+                        Serial.print("CMD: MARK_POSITION x=");
+                        Serial.print(pos.x_m, 1);
+                        Serial.print(" y=");
+                        Serial.println(pos.y_m, 1);
+                        // TODO: write to log file
+                        break;
+                    }
+                    case DisplayCmd::START_FULL_CAL:
+                        Serial.println("CMD: START_FULL_CAL (120s)");
+                        sysState = SystemState::CALIBRATION;
+                        mag_cal::startCollection(120000);
+                        break;
+                    case DisplayCmd::START_SPEED_CAL:
+                        Serial.println("CMD: START_SPEED_CAL (stub)");
+                        // TODO: implement flow meter speed calibration
+                        break;
+                    case DisplayCmd::TOGGLE_GPS_POS:
+                        // Toggle GPS position usage (no getter, so just toggle via setUseGps)
+                        Serial.println("CMD: TOGGLE_GPS_POS");
+                        {
+                            static bool gpsPos = DEFAULT_USE_GPS_POSITION;
+                            gpsPos = !gpsPos;
+                            nav::setUseGps(gpsPos);
+                            Serial.print("  GPS position: ");
+                            Serial.println(gpsPos ? "ON" : "OFF");
+                        }
+                        break;
+                    case DisplayCmd::TOGGLE_GPS_SPD:
+                        Serial.println("CMD: TOGGLE_GPS_SPD (stub)");
+                        // TODO: implement GPS speed toggle
+                        break;
+                    case DisplayCmd::TOGGLE_WIFI:
+                        Serial.println("CMD: TOGGLE_WIFI (stub)");
+                        // TODO: implement WiFi toggle
+                        break;
+                    case DisplayCmd::CYCLE_LOG_LEVEL:
+                        Serial.println("CMD: CYCLE_LOG_LEVEL (stub)");
+                        // TODO: implement log level cycling
+                        break;
+                    case DisplayCmd::TOGGLE_OP_MODE:
+                    {
+                        static bool diveMode = false;
+                        diveMode = !diveMode;
+                        if (diveMode) {
+                            gps::setEnabled(false);
+                            wifi::stop();
+                            Serial.println("CMD: OP_MODE -> DIVE (GPS+WiFi off)");
+                        } else {
+                            gps::setEnabled(true);
+                            wifi::init();
+                            web::init();
+                            Serial.println("CMD: OP_MODE -> SURFACE (GPS+WiFi on)");
+                        }
+                    }
                         break;
                     default:
                         break;

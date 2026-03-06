@@ -1,0 +1,48 @@
+{
+  "menus": [
+    {
+      "title": "MENU",
+      "items": [
+        {"label": "NAV", "sub": 1},
+        {"label": "CAL", "sub": 2},
+        {"label": "INPUT", "sub": 3},
+        {"label": "DISPLAY", "sub": 4}
+      ]
+    },
+    {
+      "title": "NAV",
+      "items": [
+        {"label": "Outbound", "act": 2},
+        {"label": "Home", "act": 3},
+        {"label": "Mark", "act": 4},
+        {"label": "Op Mode", "act": 16}
+      ]
+    },
+    {
+      "title": "CAL",
+      "items": [
+        {"label": "Quick cal", "act": 5},
+        {"label": "Full cal", "act": 6},
+        {"label": "Speed cal", "act": 7}
+      ]
+    },
+    {
+      "title": "INPUT",
+      "items": [
+        {"label": "GPS Pos", "act": 8},
+        {"label": "GPS Spd", "act": 9},
+        {"label": "WiFi", "act": 10},
+        {"label": "Logging", "act": 11}
+      ]
+    },
+    {
+      "title": "DISPLAY",
+      "items": [
+        {"label": "Mode", "act": 12},
+        {"label": "Spd/ETA", "act": 13},
+        {"label": "Units", "act": 14},
+        {"label": "Heading", "act": 15}
+      ]
+    }
+  ]
+}

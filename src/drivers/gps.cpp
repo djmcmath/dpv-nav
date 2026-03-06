@@ -5,6 +5,7 @@
 
 static Adafruit_GPS adaGps(&Serial2);
 static bool initialized = false;
+static bool enabled = true;
 
 namespace gps {
 
@@ -24,8 +25,13 @@ bool init() {
   return true;
 }
 
+void setEnabled(bool enable) {
+  enabled = enable;
+  Serial.print("[GPS] "); Serial.println(enabled ? "Enabled" : "Disabled");
+}
+
 bool update() {
-  if (!initialized) return false;
+  if (!initialized || !enabled) return false;
 
   // Read all available bytes from GPS serial (non-blocking)
   while (Serial2.available()) {
@@ -43,7 +49,7 @@ bool update() {
 GpsFix getFix() {
   GpsFix fix{};
 
-  if (!initialized) return fix;
+  if (!initialized || !enabled) return fix;
 
   fix.has_fix = adaGps.fix;
   fix.fix_quality = adaGps.fixquality;
@@ -65,7 +71,7 @@ GpsFix getFix() {
 }
 
 bool hasFix() {
-  return initialized && adaGps.fix;
+  return initialized && enabled && adaGps.fix;
 }
 
 }

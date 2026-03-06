@@ -19,18 +19,59 @@
 
 3. **Quick heading sanity check**: Compare displayed heading against a phone compass or known bearing.
 
-4. **If recalibration needed**: Long-press BTN2 (2 seconds) to trigger magnetometer recalibration. Rotate device through all orientations for 10 seconds.
+4. **If recalibration needed**: Open menu (BTN1) → **CAL > Quick cal** (BTN2) to trigger magnetometer recalibration. Rotate device through all orientations for 10 seconds.
 
 ## Setting Home
 
-- At the descent line or planned return point, **short-press BTN1** → "SET HOME"
+- Open the menu (BTN1), navigate to **NAV > Home**, press BTN2 to set home
 - This snapshots your current position as the home waypoint
-- Position resets to show distance/bearing relative to home
-- Display bottom row changes from `X:+0 Y:+0` to `H:   0m 000°`
+- Display shows distance/bearing relative to home
+
+## Menu System
+
+Press **BTN1** to open the on-screen menu. The menu appears in the bottom third of the display while the status bar and bearing/range continue updating above.
+
+### Menu Navigation
+| Button | Action |
+|--------|--------|
+| BTN1 short press | Open menu / cycle to next item |
+| BTN2 short press | Select item (enter submenu, execute action, or go back) |
+| BTN1 + BTN2 held 2s | Reset display device |
+| No button for 15s | Menu auto-closes |
+
+### Menu Structure
+```
+MENU
+├── NAV
+│   ├── Outbound   — select outbound waypoint as destination
+│   ├── Home       — set current position as home waypoint
+│   ├── Mark       — mark current position in logs
+│   └── Op Mode    — toggle dive/surface mode (shows DIVE or SURF)
+├── CAL
+│   ├── Quick cal  — run 10-second magnetometer offset calibration
+│   ├── Full cal   — collect 120s of raw mag data for offline calibration
+│   └── Speed cal  — flow meter speed calibration (stub)
+├── INPUT
+│   ├── GPS Pos    — toggle GPS position on/off (shows current state)
+│   ├── GPS Spd    — toggle GPS speed on/off
+│   ├── WiFi       — toggle WiFi on/off
+│   └── Logging    — cycle log level: high / med / off
+└── DISPLAY
+    ├── Mode       — toggle debug vs navigate display
+    ├── Spd/ETA    — toggle speed vs ETA readout
+    ├── Units      — toggle meters vs feet
+    └── Heading    — toggle magnetic vs true heading
+```
+
+Toggle items show their current state (e.g., "Units: m", "Op Mode: SURF") and stay open after toggling. Non-toggle items (Home, Mark, Quick cal) execute and close the menu.
+
+**Op Mode (Dive/Surface):** The device boots in **surface mode** with GPS and WiFi active. Before entering the water, toggle to **dive mode** via NAV > Op Mode — this disables GPS processing and turns off the WiFi radio. On surfacing, toggle back to surface mode to re-enable both.
+
+The menu definition is stored in `/menu.json` on LittleFS. To customize, edit `data/menu.json` and upload with `pio run -e display -t uploadfs`.
 
 ## Display Modes
 
-The display mode is set at compile time via `DISPLAY_MODE` in [src/config.h](../src/config.h): `0` = Navigation (default), `1` = Debug.
+The display mode can be toggled at runtime via the **DISPLAY > Mode** menu item (or set at compile time via `DISPLAY_MODE` in [src/config.h](../src/config.h)).
 
 ### Navigation Mode (`DISPLAY_MODE 0`)
 
@@ -83,21 +124,25 @@ Requires `ENABLE_DEBUG_PACKET 1` on the nav device to send sensor data. All text
 
 ## Dive Navigation Workflow
 
-1. Descend with DPV, unit active.
-2. Device runs dead-reckoning integration at ~100 Hz:
-    - Flow sensor updates speed (or GPS speed if fix available and <3s old)
+1. At the surface: set home (NAV > Home), then switch to dive mode (NAV > Op Mode → DIVE) to disable GPS and WiFi.
+2. Descend with DPV, unit active.
+3. Device runs dead-reckoning integration at ~100 Hz:
+    - Flow sensor updates speed (or GPS speed, if fix is fresh and passes SOG deadband + COG coherence filter — see Configuration)
     - AHRS updates heading from gyro/accel/mag fusion
     - Nav model integrates position: `x += speed × sin(heading) × dt`, `y += speed × cos(heading) × dt`
-3. Display updates at 10 Hz, showing heading, speed, and position.
-4. If GPS has a fix and GPS position is enabled (`DEFAULT_USE_GPS_POSITION = true` in config.h), position snaps to GPS truth. This is useful for surface testing but GPS is typically unavailable underwater.
-5. To return home: follow the bearing shown on the bottom row.
+4. Display updates at 10 Hz, showing heading, speed, and position.
+5. If in surface mode and GPS has a fix and GPS position is enabled, position snaps to GPS truth. In dive mode, GPS is disabled and position relies entirely on dead reckoning.
+6. To return home: follow the bearing shown on the bottom row.
+7. On surfacing: switch back to surface mode (NAV > Op Mode → SURF) to re-enable GPS and WiFi.
 
 ## Button Reference
 
 | Button | Action | Effect |
 |--------|--------|--------|
-| BTN1 short press | Toggle home | SET_HOME (if no home) or CLEAR_HOME (if home set) |
-| BTN2 long press (2s) | Mag calibration | Triggers 10-second magnetometer recalibration |
+| BTN1 short press | Open / cycle menu | Opens menu (if closed) or moves to next item (if open) |
+| BTN2 short press | Select menu item | Enters submenu, executes action, or goes back |
+| BTN1 + BTN2 held 2s | Reset | Resets the display device |
+| No button for 15s | Auto-close | Menu closes, returns to full nav display |
 
 ## Configuration
 
@@ -109,6 +154,10 @@ Key settings in [src/config.h](../src/config.h):
 | `DEFAULT_BASELINE_LON` | -122.0 | Baseline longitude (°W) for local XY conversion |
 | `DEFAULT_USE_GPS_POSITION` | true | Use GPS lat/lon as position truth when available |
 | `GPS_FIX_STALE_MS` | 3000 | Fall back to flowmeter speed if GPS fix older than 3s |
+| `GPS_SOG_NOISE_FLOOR_KN` | 0.5 | SOG below this (knots) is always treated as noise |
+| `GPS_SOG_TRUST_FLOOR_KN` | 2.0 | SOG above this (knots) is always trusted |
+| `GPS_COG_COHERENCE_THRESH` | 0.85 | COG consistency required to trust mid-range SOG (0–1) |
+| `GPS_COG_EMA_ALPHA` | 0.3 | COG EMA smoothing factor (~3–4 sample window at 1 Hz) |
 | `FLOW_K_FACTOR` | 1.0 | Flow sensor pulses per L/min (calibrate to match sensor) |
 | `FLOW_CROSS_SECTION_M2` | 0.002 | Intake cross-section area in m² (calibrate to match DPV) |
 | `DISPLAY_MODE` | 0 | Display mode: 0 = Navigation, 1 = Debug |
@@ -121,4 +170,5 @@ Key settings in [src/config.h](../src/config.h):
 - **"NO LINK" on display**: Check Serial1 wiring between devices. Nav device should be sending packets.
 - **Heading wrong**: Verify axis mapping in nav_main.cpp. Ensure IMU is oriented correctly.
 - **Position drifts without moving**: Check gyro calibration (should be done at rest). Flow sensor may be noisy — increase `FLOW_AVG_PERIOD_S`.
+- **GPS shows speed when stationary**: GPS position jitter creates phantom speed. The SOG deadband + COG coherence filter should reject this. Enable `GPS_DIAG_ENABLE` in nav_main.cpp to see raw SOG/COG and filter decisions. Raise `GPS_SOG_NOISE_FLOOR_KN` if jitter SOG is higher than 0.5 kn.
 - **GPS not used for position**: Ensure `DEFAULT_USE_GPS_POSITION = true` in config.h. GPS needs clear sky view (not available underwater).

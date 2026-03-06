@@ -60,11 +60,22 @@ PacketType identifyPacket(const char* buf, size_t len);
 // ---------------------------------------------------------------------------
 enum class DisplayCmd : uint8_t {
     NONE = 0,
-    SET_HOME,
-    CLEAR_HOME,
-    START_MAG_CAL,
-    START_GYRO_CAL,
-    RESET,
+    SET_HOME,           // 1
+    CLEAR_HOME,         // 2
+    START_MAG_CAL,      // 3
+    START_GYRO_CAL,     // 4
+    RESET,              // 5
+    // Menu-driven commands (10+)
+    NAV_OUTBOUND   = 10,  // select outbound waypoint as destination
+    NAV_HOME       = 11,  // select power-on position as home/destination
+    MARK_POSITION  = 12,  // mark current position in logs
+    START_FULL_CAL = 13,  // start 120s mag cal data collection
+    START_SPEED_CAL = 14, // start speed calibration (stub)
+    TOGGLE_GPS_POS = 15,  // toggle GPS position usage
+    TOGGLE_GPS_SPD = 16,  // toggle GPS speed usage
+    TOGGLE_WIFI    = 17,  // toggle WiFi on/off
+    CYCLE_LOG_LEVEL = 18, // cycle logging level
+    TOGGLE_OP_MODE  = 19, // toggle dive/surface mode (GPS + WiFi)
 };
 
 // ---------------------------------------------------------------------------

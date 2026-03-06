@@ -20,6 +20,14 @@ constexpr float FLOW_AVG_PERIOD_S = 3.0f;    // EMA time constant (seconds) — 
 constexpr uint32_t GPS_FIX_STALE_MS = 3000;      // Fall back to flowmeter if GPS fix older than this
 constexpr float    KNOTS_TO_MS      = 0.514444f;  // knots → m/s conversion factor
 
+// GPS COG (Course Over Ground) coherence filter
+// GPS speed is only trusted when recent COG readings are consistent.
+// Coherence is the resultant length of unit-vector EMA of COG (0=random, 1=identical).
+constexpr float GPS_COG_EMA_ALPHA       = 0.3f;   // EMA smoothing factor (at 1 Hz: ~3-4 sample window)
+constexpr float GPS_COG_COHERENCE_THRESH = 0.85f;  // Below this, GPS speed is treated as noise
+constexpr float GPS_SOG_NOISE_FLOOR_KN  = 0.5f;   // SOG below this is certainly noise (knots)
+constexpr float GPS_SOG_TRUST_FLOOR_KN  = 2.0f;   // SOG above this is trusted regardless of COG (knots)
+
 // Position estimation
 constexpr float DEFAULT_BASELINE_LAT     = 42.0f;   // degrees N (assumed until GPS fix)
 constexpr float DEFAULT_BASELINE_LON     = -122.0f;  // degrees W (assumed until GPS fix)

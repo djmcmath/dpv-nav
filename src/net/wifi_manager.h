@@ -5,6 +5,7 @@
 namespace wifi {
 
 void init();
+void stop();
 void update();
 bool isAP();
 IPAddress ip();

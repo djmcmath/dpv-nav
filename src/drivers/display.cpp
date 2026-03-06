@@ -22,11 +22,15 @@ static constexpr uint16_t COLOR_CYAN   = 0x07FF;
 static constexpr uint16_t COLOR_YELLOW = 0xFFE0;
 static constexpr uint16_t COLOR_GRAY   = 0x7BEF;
 
-#define SPI_CLOCK_HZ 250000  // 1 MHz SPI clock (default 8 MHz causes glitches)
+#define SPI_CLOCK_HZ 1000000  // 2 MHz SPI clock
 
 // Hardware SPI — uses ESP32 VSPI peripheral
 static Adafruit_SSD1351 oled(SCREEN_WIDTH, SCREEN_HEIGHT,
                              &SPI, OLED_CS, OLED_DC, OLED_RST);
+
+// Offscreen framebuffer — all drawing targets this, single SPI push per frame
+static GFXcanvas16 canvas(SCREEN_WIDTH, SCREEN_HEIGHT);  // 24,576 bytes
+static bool canvasReady = false;
 
 // Boot status line Y cursor
 static int bootLineY = 0;
@@ -44,36 +48,6 @@ static constexpr int CELL_UR_Y     = 13;
 static constexpr int CELL_LL_Y     = 56;
 static constexpr int CELL_LR_Y     = 56;
 
-// ---------------------------------------------------------------------------
-// Nav mode cache
-// ---------------------------------------------------------------------------
-static bool    nav_static_drawn = false;
-static uint8_t nav_frame = 0;
-static char    prev_hdg_buf[8]    = "";   // "063M" fixed 4 chars
-static char    prev_brg_buf[8]    = "";   // "180M" or "---" fixed 4 chars
-static char    prev_rng_buf[8]    = "";   // fixed-width padded
-static char    prev_spd_buf[8]    = "";   // fixed-width padded
-static char    prev_spd_meta[8]   = "";   // "m/m GPS" or "ft/m FLW"
-// Status bar: cache each indicator separately
-static uint8_t prev_st_state = 0xFF;
-static uint8_t prev_st_gps   = 0xFF;
-static uint8_t prev_st_home  = 0xFF;
-
-// ---------------------------------------------------------------------------
-// Debug mode cache
-// ---------------------------------------------------------------------------
-static bool    debug_static_drawn = false;
-static uint8_t debug_frame = 0;
-static char    prev_dbg_mag[24]   = "";
-static char    prev_dbg_magm[24]  = "";
-static char    prev_dbg_acc[24]   = "";
-static char    prev_dbg_accm[24]  = "";
-static char    prev_dbg_gyr[24]   = "";
-static char    prev_dbg_fhdg[24]  = "";
-static char    prev_dbg_mhdg[24]  = "";
-static char    prev_dbg_pit[12]   = "";
-static char    prev_dbg_rol[12]   = "";
-
 namespace display {
 
 // ===========================================================================
@@ -81,15 +55,41 @@ namespace display {
 // ===========================================================================
 
 bool init() {
+    // Hardware reset pulse
+    pinMode(OLED_RST, OUTPUT);
+    digitalWrite(OLED_RST, LOW);
+    delay(10);
+    digitalWrite(OLED_RST, HIGH);
+    delay(10);
+
+    // Initialize SPI and OLED controller
     SPI.begin(DISP_SCK, DISP_MISO, DISP_MOSI);
     Serial.println("Initializing OLED display (hardware SPI)...");
     oled.begin(SPI_CLOCK_HZ);
+    delay(50);
     oled.fillScreen(COLOR_BLACK);
-    Serial.println("OLED display initialized (hardware SPI)");
+    delay(50);
+
+    // Verify canvas allocation
+    if (canvas.getBuffer() == nullptr) {
+        Serial.println("ERROR: GFXcanvas16 allocation failed (24KB)");
+        canvasReady = false;
+        return false;
+    }
+    canvasReady = true;
+    canvas.fillScreen(COLOR_BLACK);
+
+    Serial.println("OLED display initialized (hardware SPI, canvas framebuffer)");
     return true;
 }
 
+void flush() {
+    if (!canvasReady) return;
+    oled.drawRGBBitmap(0, 0, canvas.getBuffer(), SCREEN_WIDTH, SCREEN_HEIGHT);
+}
+
 void selfTest() {
+    // Boot-time self-test draws directly to oled for immediate visibility
     Serial.println("Display self-test: color cycle...");
     oled.fillScreen(COLOR_RED);   delay(1000);
     oled.fillScreen(COLOR_GREEN); delay(1000);
@@ -100,58 +100,48 @@ void selfTest() {
     oled.setTextSize(2);
     oled.setCursor(10, 20);
     oled.println("DPV-Nav");
+    delay(50);
 
     oled.setTextSize(1);
     oled.setTextColor(COLOR_CYAN);
     oled.setCursor(10, 50);
     oled.println("Display OK");
+    delay(50);
     Serial.println("Display self-test complete");
 }
 
 void invalidateCache() {
-    nav_static_drawn = false;
-    nav_frame = 0;
-    prev_hdg_buf[0] = '\0';
-    prev_brg_buf[0] = '\0';
-    prev_rng_buf[0] = '\0';
-    prev_spd_buf[0] = '\0';
-    prev_spd_meta[0] = '\0';
-    prev_st_state = 0xFF;
-    prev_st_gps   = 0xFF;
-    prev_st_home  = 0xFF;
-
-    debug_static_drawn = false;
-    debug_frame = 0;
-    prev_dbg_mag[0]  = '\0';
-    prev_dbg_magm[0] = '\0';
-    prev_dbg_acc[0]  = '\0';
-    prev_dbg_accm[0] = '\0';
-    prev_dbg_gyr[0]  = '\0';
-    prev_dbg_fhdg[0] = '\0';
-    prev_dbg_mhdg[0] = '\0';
-    prev_dbg_pit[0]  = '\0';
-    prev_dbg_rol[0]  = '\0';
+    // No-op: canvas is redrawn from scratch every frame
 }
 
 void clear() {
+    if (canvasReady) {
+        canvas.fillScreen(COLOR_BLACK);
+    }
     oled.fillScreen(COLOR_BLACK);
+    delay(50);
     bootLineY = 0;
-    invalidateCache();
 }
 
 void reinit() {
     oled.begin(SPI_CLOCK_HZ);
-    invalidateCache();
+    delay(50);
+    // Re-push existing canvas content to restore display
+    if (canvasReady) {
+        flush();
+    }
     Serial.println("[DISP] reinit complete");
 }
 
 void statusLine(const char* label, bool ok) {
+    // Boot-time function — draws directly to oled
     oled.setTextSize(1);
     oled.setCursor(0, bootLineY);
     oled.setTextColor(COLOR_WHITE, COLOR_BLACK);
     oled.print(label);
+    delay(50);
     int labelLen = strlen(label);
-    for (int i = labelLen; i < 17; i++) oled.print('.');
+    for (int i = labelLen; i < 17; i++) { oled.print('.'); delay(50); }
     if (ok) {
         oled.setTextColor(COLOR_GREEN, COLOR_BLACK);
         oled.print("ok");
@@ -159,178 +149,127 @@ void statusLine(const char* label, bool ok) {
         oled.setTextColor(COLOR_RED, COLOR_BLACK);
         oled.print("FAIL");
     }
+    delay(50);
     bootLineY += 9;
 }
 
+// ---------------------------------------------------------------------------
+// Drawing primitives — target canvas (RAM), no SPI, no delays
+// ---------------------------------------------------------------------------
+
 void drawPixel(int x, int y, uint16_t color) {
-    oled.drawPixel(x, y, color);
+    canvas.drawPixel(x, y, color);
 }
 
 void drawText(int x, int y, const char* text, uint16_t color, uint8_t size) {
-    oled.setTextSize(size);
-    oled.setTextColor(color, COLOR_BLACK);
-    oled.setCursor(x, y);
-    oled.print(text);
+    canvas.setTextSize(size);
+    canvas.setTextColor(color, COLOR_BLACK);
+    canvas.setCursor(x, y);
+    canvas.print(text);
+}
+
+void fillRect(int x, int y, int w, int h, uint16_t color) {
+    canvas.fillRect(x, y, w, h, color);
+}
+
+void drawHLine(int x, int y, int w, uint16_t color) {
+    canvas.drawFastHLine(x, y, w, color);
 }
 
 // ===========================================================================
-// Nav mode internals
-//
-// KEY PRINCIPLE: Never use fillRect to clear areas before drawing text.
-// Instead, use opaque text (setTextColor with bg=BLACK) and pad all strings
-// to fixed width.  This means the GFX library only pushes pixels for the
-// character bounding boxes — far fewer SPI bytes than a fillRect.
+// Nav mode internals — full-frame redraw to canvas each call
 // ===========================================================================
 
-// Draw the static grid lines and cell labels (called once after clear/reinit)
-static void drawNavStatic() {
-    // Horizontal dividers
-    oled.drawFastHLine(0, DIV_Y_TOP, SCREEN_WIDTH, COLOR_CYAN);
-    oled.drawFastHLine(0, DIV_Y_MID, SCREEN_WIDTH, COLOR_CYAN);
-
-    // Vertical divider
-    oled.drawFastVLine(DIV_X, DIV_Y_TOP + 1, SCREEN_HEIGHT - DIV_Y_TOP - 1, COLOR_CYAN);
-
-    // Cell labels (size 1, cyan, opaque)
-    oled.setTextSize(1);
-    oled.setTextColor(COLOR_CYAN, COLOR_BLACK);
-
-    oled.setCursor(1, CELL_UL_Y + 1);  oled.print("HDG");
-    oled.setCursor(65, CELL_UR_Y + 1); oled.print("RNG");
-    oled.setCursor(1, CELL_LL_Y + 1);  oled.print("BRG");
-    oled.setCursor(65, CELL_LR_Y + 1); oled.print("SPD");
-
-    nav_static_drawn = true;
-}
-
-// Status bar: draw each indicator independently, skip unchanged ones.
-// Each indicator is a small fixed-width opaque text — no fillRect needed.
-static void updateStatusBar(const NavPacket& pkt) {
-    oled.setTextSize(1);
+static void drawStatusBar(const NavPacket& pkt) {
+    canvas.setTextSize(1);
 
     // System state (3 chars at x=0)
-    if (pkt.system_state != prev_st_state) {
-        prev_st_state = pkt.system_state;
-        const char* s;
-        uint16_t c;
-        switch (pkt.system_state) {
-            case 2: s = "RDY"; c = COLOR_CYAN;   break;
-            case 3: s = "NAV"; c = COLOR_GREEN;  break;
-            case 4: s = "CAL"; c = COLOR_YELLOW; break;
-            case 5: s = "ERR"; c = COLOR_RED;    break;
-            default: s = "..."; c = COLOR_GRAY;  break;
-        }
-        oled.setTextColor(c, COLOR_BLACK);
-        oled.setCursor(0, 2);
-        oled.print(s);
+    const char* s;
+    uint16_t c;
+    switch (pkt.system_state) {
+        case 2: s = "RDY"; c = COLOR_CYAN;   break;
+        case 3: s = "NAV"; c = COLOR_GREEN;  break;
+        case 4: s = "CAL"; c = COLOR_YELLOW; break;
+        case 5: s = "ERR"; c = COLOR_RED;    break;
+        default: s = "..."; c = COLOR_GRAY;  break;
     }
+    canvas.setTextColor(c, COLOR_BLACK);
+    canvas.setCursor(0, 2);
+    canvas.print(s);
 
     // GPS (5 chars at x=30)
-    if (pkt.gps_fix_quality != prev_st_gps) {
-        prev_st_gps = pkt.gps_fix_quality;
-        const char* s;
-        uint16_t c;
-        if (pkt.gps_fix_quality >= 2) {
-            s = "GP:DG"; c = COLOR_GREEN;
-        } else if (pkt.gps_fix_quality == 1) {
-            s = "GP:OK"; c = COLOR_GREEN;
-        } else {
-            s = "GP:--"; c = COLOR_RED;
-        }
-        oled.setTextColor(c, COLOR_BLACK);
-        oled.setCursor(30, 2);
-        oled.print(s);
+    if (pkt.gps_fix_quality >= 2) {
+        s = "GP:DG"; c = COLOR_GREEN;
+    } else if (pkt.gps_fix_quality == 1) {
+        s = "GP:OK"; c = COLOR_GREEN;
+    } else {
+        s = "GP:--"; c = COLOR_RED;
     }
+    canvas.setTextColor(c, COLOR_BLACK);
+    canvas.setCursor(30, 2);
+    canvas.print(s);
 
     // Home (6 chars at x=72)
-    uint8_t homeFlag = (pkt.flags & FLAG_HAS_HOME) ? 1 : 0;
-    if (homeFlag != prev_st_home) {
-        prev_st_home = homeFlag;
-        if (homeFlag) {
-            oled.setTextColor(COLOR_GREEN, COLOR_BLACK);
-            oled.setCursor(72, 2);
-            oled.print("HM:SET");
-        } else {
-            oled.setTextColor(COLOR_GRAY, COLOR_BLACK);
-            oled.setCursor(72, 2);
-            oled.print("HM:---");
-        }
+    if (pkt.flags & FLAG_HAS_HOME) {
+        canvas.setTextColor(COLOR_GREEN, COLOR_BLACK);
+        canvas.setCursor(72, 2);
+        canvas.print("HM:SET");
+    } else {
+        canvas.setTextColor(COLOR_GRAY, COLOR_BLACK);
+        canvas.setCursor(72, 2);
+        canvas.print("HM:---");
     }
 }
 
-// Heading cell (upper-left).  "063M" as fixed-width string.
-// Size 3 heading (3 chars = 54px) + size 2 suffix (1 char = 12px) = 66px.
-// To keep SPI minimal, combine heading+suffix into one cached string and
-// only issue draws when the formatted result changes.
-static void updateHeading(const NavPacket& pkt) {
-    int hdg_int = (int)(pkt.heading_deg + 0.5f) % 360;
-    char suffix = (pkt.flags & FLAG_TRUE_HEADING) ? 'T' : 'M';
-    char buf[8];
-    snprintf(buf, sizeof(buf), "%03d%c", hdg_int, suffix);
-
-    if (strcmp(buf, prev_hdg_buf) == 0) return;
-
-    // Only redraw the digits if they changed (first 3 chars)
-    if (prev_hdg_buf[0] == '\0' ||
-        buf[0] != prev_hdg_buf[0] || buf[1] != prev_hdg_buf[1] || buf[2] != prev_hdg_buf[2]) {
-        char digits[4] = { buf[0], buf[1], buf[2], '\0' };
-        oled.setTextSize(3);
-        oled.setTextColor(COLOR_WHITE, COLOR_BLACK);
-        oled.setCursor(1, 25);
-        oled.print(digits);
-    }
-
-    // Only redraw suffix if it changed
-    if (prev_hdg_buf[0] == '\0' || buf[3] != prev_hdg_buf[3]) {
-        oled.setTextSize(2);
-        oled.setTextColor(COLOR_CYAN, COLOR_BLACK);
-        oled.setCursor(55, 27);
-        char s[2] = { buf[3], '\0' };
-        oled.print(s);
-    }
-
-    strncpy(prev_hdg_buf, buf, sizeof(prev_hdg_buf));
+static void drawNavGrid() {
+    // Horizontal dividers
+    canvas.drawFastHLine(0, DIV_Y_TOP, SCREEN_WIDTH, COLOR_CYAN);
+    canvas.drawFastHLine(0, DIV_Y_MID, SCREEN_WIDTH, COLOR_CYAN);
+    // Vertical divider
+    canvas.drawFastVLine(DIV_X, DIV_Y_TOP + 1, SCREEN_HEIGHT - DIV_Y_TOP - 1, COLOR_CYAN);
+    // Cell labels
+    canvas.setTextSize(1);
+    canvas.setTextColor(COLOR_CYAN, COLOR_BLACK);
+    canvas.setCursor(1, CELL_UL_Y + 1);  canvas.print("BRG");
+    canvas.setCursor(65, CELL_UR_Y + 1); canvas.print("RNG");
+    canvas.setCursor(1, CELL_LL_Y + 1);  canvas.print("HDG");
+    canvas.setCursor(65, CELL_LR_Y + 1); canvas.print("SPD");
 }
 
-// Bearing cell (lower-left).  "180M" or "---" padded to 4 chars.
-static void updateBearing(const NavPacket& pkt) {
-    char buf[8];
+static void drawBearing(const NavPacket& pkt) {
     if (pkt.flags & FLAG_HAS_HOME) {
         int brg_int = (int)(pkt.bearing_home_deg + 0.5f) % 360;
         char suffix = (pkt.flags & FLAG_TRUE_HEADING) ? 'T' : 'M';
-        snprintf(buf, sizeof(buf), "%03d%c", brg_int, suffix);
+
+        // Digits (size 3)
+        char digits[4];
+        snprintf(digits, sizeof(digits), "%03d", brg_int);
+        canvas.setTextSize(3);
+        canvas.setTextColor(COLOR_WHITE, COLOR_BLACK);
+        canvas.setCursor(1, 25);
+        canvas.print(digits);
+
+        // Suffix (size 2)
+        char s[2] = { suffix, '\0' };
+        canvas.setTextSize(2);
+        canvas.setTextColor(COLOR_CYAN, COLOR_BLACK);
+        canvas.setCursor(55, 27);
+        canvas.print(s);
     } else {
-        snprintf(buf, sizeof(buf), "--- ");
+        canvas.setTextSize(3);
+        canvas.setTextColor(COLOR_WHITE, COLOR_BLACK);
+        canvas.setCursor(1, 25);
+        canvas.print("---");
+
+        canvas.setTextSize(2);
+        canvas.setTextColor(COLOR_CYAN, COLOR_BLACK);
+        canvas.setCursor(55, 27);
+        canvas.print(" ");
     }
-
-    if (strcmp(buf, prev_brg_buf) == 0) return;
-
-    // Digits (size 2, 3 chars)
-    if (prev_brg_buf[0] == '\0' ||
-        buf[0] != prev_brg_buf[0] || buf[1] != prev_brg_buf[1] || buf[2] != prev_brg_buf[2]) {
-        char digits[4] = { buf[0], buf[1], buf[2], '\0' };
-        oled.setTextSize(2);
-        oled.setTextColor(COLOR_WHITE, COLOR_BLACK);
-        oled.setCursor(1, 68);
-        oled.print(digits);
-    }
-
-    // Suffix (size 1, 1 char)
-    if (prev_brg_buf[0] == '\0' || buf[3] != prev_brg_buf[3]) {
-        char s[2] = { buf[3], '\0' };
-        oled.setTextSize(1);
-        oled.setTextColor(COLOR_CYAN, COLOR_BLACK);
-        oled.setCursor(38, 72);
-        oled.print(s);
-    }
-
-    strncpy(prev_brg_buf, buf, sizeof(prev_brg_buf));
 }
 
-// Range cell (upper-right).  Fixed-width padded string, opaque text.
-static void updateRange(const NavPacket& pkt) {
+static void drawRange(const NavPacket& pkt) {
     char buf[8];
-
     if (pkt.flags & FLAG_HAS_HOME) {
         float dist = pkt.distance_home_m;
 #if DISPLAY_UNITS_IMPERIAL
@@ -351,19 +290,34 @@ static void updateRange(const NavPacket& pkt) {
         snprintf(buf, sizeof(buf), " --- ");
     }
 
-    if (strcmp(buf, prev_rng_buf) == 0) return;
-    strncpy(prev_rng_buf, buf, sizeof(prev_rng_buf));
-
-    // Opaque text overwrites old characters — no fillRect needed
-    oled.setTextSize(2);
-    oled.setTextColor(COLOR_WHITE, COLOR_BLACK);
-    oled.setCursor(65, 25);
-    oled.print(buf);
+    canvas.setTextSize(2);
+    canvas.setTextColor(COLOR_WHITE, COLOR_BLACK);
+    canvas.setCursor(65, 25);
+    canvas.print(buf);
 }
 
-// Speed cell (lower-right).  Value + meta line.
-static void updateSpeed(const NavPacket& pkt) {
-    // Speed value — padded to 4 chars at size 2
+static void drawHeading(const NavPacket& pkt) {
+    int hdg_int = (int)(pkt.heading_deg + 0.5f) % 360;
+    char suffix = (pkt.flags & FLAG_TRUE_HEADING) ? 'T' : 'M';
+
+    // Digits (size 2)
+    char digits[4];
+    snprintf(digits, sizeof(digits), "%03d", hdg_int);
+    canvas.setTextSize(2);
+    canvas.setTextColor(COLOR_WHITE, COLOR_BLACK);
+    canvas.setCursor(1, 68);
+    canvas.print(digits);
+
+    // Suffix (size 1)
+    char s[2] = { suffix, '\0' };
+    canvas.setTextSize(1);
+    canvas.setTextColor(COLOR_CYAN, COLOR_BLACK);
+    canvas.setCursor(38, 72);
+    canvas.print(s);
+}
+
+static void drawSpeed(const NavPacket& pkt) {
+    // Speed value
     char buf[8];
 #if DISPLAY_UNITS_IMPERIAL
     int spd_display = (int)(pkt.speed_ms * 60.0f * 3.28084f + 0.5f);
@@ -372,16 +326,12 @@ static void updateSpeed(const NavPacket& pkt) {
     int spd_display = (int)(pkt.speed_ms * 60.0f + 0.5f);
     snprintf(buf, sizeof(buf), "%4d", spd_display);
 #endif
+    canvas.setTextSize(2);
+    canvas.setTextColor(COLOR_WHITE, COLOR_BLACK);
+    canvas.setCursor(65, 68);
+    canvas.print(buf);
 
-    if (strcmp(buf, prev_spd_buf) != 0) {
-        strncpy(prev_spd_buf, buf, sizeof(prev_spd_buf));
-        oled.setTextSize(2);
-        oled.setTextColor(COLOR_WHITE, COLOR_BLACK);
-        oled.setCursor(65, 68);
-        oled.print(buf);
-    }
-
-    // Meta line: "m/m GPS" or "ft/m FLW" — fixed 7 chars at size 1
+    // Meta line: "m/m GPS" or "ft/m FLW"
     const char* src = (pkt.flags & FLAG_GPS_SPEED) ? "GPS" : "FLW";
 #if DISPLAY_UNITS_IMPERIAL
     char meta[8];
@@ -390,124 +340,228 @@ static void updateSpeed(const NavPacket& pkt) {
     char meta[8];
     snprintf(meta, sizeof(meta), "m/m %s", src);
 #endif
-
-    if (strcmp(meta, prev_spd_meta) != 0) {
-        strncpy(prev_spd_meta, meta, sizeof(prev_spd_meta));
-        oled.setTextSize(1);
-        oled.setTextColor(COLOR_CYAN, COLOR_BLACK);
-        oled.setCursor(65, 87);
-        oled.print(meta);
-    }
+    canvas.setTextSize(1);
+    canvas.setTextColor(COLOR_CYAN, COLOR_BLACK);
+    canvas.setCursor(65, 87);
+    canvas.print(meta);
 }
 
 void showNav(const NavPacket& pkt) {
-    if (!nav_static_drawn) {
-        drawNavStatic();
-        return;
-    }
+    if (!canvasReady) return;
 
-    // 5-slot frame rotation — only ONE region per call
-    uint8_t slot = nav_frame % 5;
-    switch (slot) {
-        case 0: updateHeading(pkt); break;
-        case 1: updateBearing(pkt); break;
-        case 2: updateRange(pkt);   break;
-        case 3: updateSpeed(pkt);   break;
-        case 4: updateStatusBar(pkt); break;
-    }
-    nav_frame++;
+    canvas.fillScreen(COLOR_BLACK);
+    drawStatusBar(pkt);
+    drawNavGrid();
+    drawBearing(pkt);
+    drawRange(pkt);
+    drawHeading(pkt);
+    drawSpeed(pkt);
+    flush();
+}
+
+void showNavTop(const NavPacket& pkt) {
+    if (!canvasReady) return;
+
+    // Clear top portion only (status bar + top cells)
+    canvas.fillRect(0, 0, SCREEN_WIDTH, DIV_Y_MID, COLOR_BLACK);
+
+    drawStatusBar(pkt);
+    canvas.drawFastHLine(0, DIV_Y_TOP, SCREEN_WIDTH, COLOR_CYAN);
+
+    // Top row labels
+    canvas.setTextSize(1);
+    canvas.setTextColor(COLOR_CYAN, COLOR_BLACK);
+    canvas.setCursor(1, CELL_UL_Y + 1);  canvas.print("BRG");
+    canvas.setCursor(65, CELL_UR_Y + 1); canvas.print("RNG");
+
+    drawBearing(pkt);
+    drawRange(pkt);
+
+    // Do NOT flush — caller will add menu content then call flush()
 }
 
 // ===========================================================================
-// Debug mode internals
-//
-// Same principle: opaque text, fixed-width strings, no fillRect.
+// Debug mode — full-frame redraw to canvas
 // ===========================================================================
-
-static void drawDebugStatic() {
-    oled.setTextSize(1);
-    oled.setTextColor(COLOR_CYAN, COLOR_BLACK);
-    oled.setCursor(0, 0);  oled.print("MAG");
-    oled.setCursor(0, 18); oled.print("ACC");
-    oled.setCursor(0, 36); oled.print("GYR");
-    oled.setCursor(0, 54); oled.print("AHRS HDG:");
-    oled.setCursor(0, 63); oled.print("MAG  HDG:");
-    oled.setCursor(0, 72); oled.print("P:");
-    oled.setCursor(60, 72); oled.print("R:");
-    debug_static_drawn = true;
-}
-
-// Helper: draw fixed-width opaque text only if string changed.
-// No fillRect — the opaque background on each character erases old content.
-static void drawIfChanged(int x, int y, const char* buf, char* prev, size_t prevSize,
-                           uint16_t color) {
-    if (strcmp(buf, prev) == 0) return;
-    strncpy(prev, buf, prevSize);
-    oled.setTextSize(1);
-    oled.setTextColor(color, COLOR_BLACK);
-    oled.setCursor(x, y);
-    oled.print(buf);
-}
 
 void showDebug(const DebugPacket& pkt) {
-    if (!debug_static_drawn) {
-        drawDebugStatic();
-        return;
-    }
+    if (!canvasReady) return;
 
-    uint8_t slot = debug_frame % 5;
+    canvas.fillScreen(COLOR_BLACK);
     char buf[24];
 
-    switch (slot) {
-        case 0: {
-            // Mag XYZ — fixed width 18 chars
-            snprintf(buf, sizeof(buf), "%6.1f %6.1f %6.1f",
-                     (double)pkt.mag_x, (double)pkt.mag_y, (double)pkt.mag_z);
-            drawIfChanged(24, 0, buf, prev_dbg_mag, sizeof(prev_dbg_mag), COLOR_WHITE);
-            break;
-        }
-        case 1: {
-            // Mag magnitude
-            float magMag = sqrtf(pkt.mag_x * pkt.mag_x + pkt.mag_y * pkt.mag_y + pkt.mag_z * pkt.mag_z);
-            snprintf(buf, sizeof(buf), "|M|=%6.1f uT  ", (double)magMag);
-            drawIfChanged(24, 9, buf, prev_dbg_magm, sizeof(prev_dbg_magm), COLOR_GRAY);
-            // Accel XYZ — fixed width
-            snprintf(buf, sizeof(buf), "%5.2f %5.2f %5.2f",
-                     (double)pkt.accel_x, (double)pkt.accel_y, (double)pkt.accel_z);
-            drawIfChanged(24, 18, buf, prev_dbg_acc, sizeof(prev_dbg_acc), COLOR_WHITE);
-            break;
-        }
-        case 2: {
-            // Accel magnitude
-            float accMag = sqrtf(pkt.accel_x * pkt.accel_x + pkt.accel_y * pkt.accel_y + pkt.accel_z * pkt.accel_z);
-            snprintf(buf, sizeof(buf), "|A|=%5.2f g    ", (double)accMag);
-            drawIfChanged(24, 27, buf, prev_dbg_accm, sizeof(prev_dbg_accm), COLOR_GRAY);
-            // Gyro XYZ — fixed width
-            snprintf(buf, sizeof(buf), "%6.3f %6.3f %6.3f",
-                     (double)pkt.gyro_x, (double)pkt.gyro_y, (double)pkt.gyro_z);
-            drawIfChanged(24, 36, buf, prev_dbg_gyr, sizeof(prev_dbg_gyr), COLOR_WHITE);
-            break;
-        }
-        case 3: {
-            // Fused heading — fixed 5 chars
-            snprintf(buf, sizeof(buf), "%5.1f ", (double)pkt.fused_heading_deg);
-            drawIfChanged(60, 54, buf, prev_dbg_fhdg, sizeof(prev_dbg_fhdg), COLOR_GREEN);
-            // Raw mag heading — fixed 5 chars
-            snprintf(buf, sizeof(buf), "%5.1f ", (double)pkt.raw_mag_heading_deg);
-            drawIfChanged(60, 63, buf, prev_dbg_mhdg, sizeof(prev_dbg_mhdg), COLOR_YELLOW);
-            break;
-        }
-        case 4: {
-            // Pitch — fixed 6 chars
-            snprintf(buf, sizeof(buf), "%6.1f", (double)pkt.pitch_deg);
-            drawIfChanged(12, 72, buf, prev_dbg_pit, sizeof(prev_dbg_pit), COLOR_WHITE);
-            // Roll — fixed 6 chars (now properly cached)
-            snprintf(buf, sizeof(buf), "%6.1f", (double)pkt.roll_deg);
-            drawIfChanged(72, 72, buf, prev_dbg_rol, sizeof(prev_dbg_rol), COLOR_WHITE);
-            break;
-        }
+    // Static labels
+    canvas.setTextSize(1);
+    canvas.setTextColor(COLOR_CYAN, COLOR_BLACK);
+    canvas.setCursor(0, 0);  canvas.print("MAG");
+    canvas.setCursor(0, 18); canvas.print("ACC");
+    canvas.setCursor(0, 36); canvas.print("GYR");
+    canvas.setCursor(0, 54); canvas.print("AHRS HDG:");
+    canvas.setCursor(0, 63); canvas.print("MAG  HDG:");
+    canvas.setCursor(0, 72); canvas.print("P:");
+    canvas.setCursor(60, 72); canvas.print("R:");
+
+    // Mag XYZ
+    snprintf(buf, sizeof(buf), "%6.1f %6.1f %6.1f",
+             (double)pkt.mag_x, (double)pkt.mag_y, (double)pkt.mag_z);
+    canvas.setTextColor(COLOR_WHITE, COLOR_BLACK);
+    canvas.setCursor(24, 0);
+    canvas.print(buf);
+
+    // Mag magnitude
+    float magMag = sqrtf(pkt.mag_x * pkt.mag_x + pkt.mag_y * pkt.mag_y + pkt.mag_z * pkt.mag_z);
+    snprintf(buf, sizeof(buf), "|M|=%6.1f uT  ", (double)magMag);
+    canvas.setTextColor(COLOR_GRAY, COLOR_BLACK);
+    canvas.setCursor(24, 9);
+    canvas.print(buf);
+
+    // Accel XYZ
+    snprintf(buf, sizeof(buf), "%5.2f %5.2f %5.2f",
+             (double)pkt.accel_x, (double)pkt.accel_y, (double)pkt.accel_z);
+    canvas.setTextColor(COLOR_WHITE, COLOR_BLACK);
+    canvas.setCursor(24, 18);
+    canvas.print(buf);
+
+    // Accel magnitude
+    float accMag = sqrtf(pkt.accel_x * pkt.accel_x + pkt.accel_y * pkt.accel_y + pkt.accel_z * pkt.accel_z);
+    snprintf(buf, sizeof(buf), "|A|=%5.2f g    ", (double)accMag);
+    canvas.setTextColor(COLOR_GRAY, COLOR_BLACK);
+    canvas.setCursor(24, 27);
+    canvas.print(buf);
+
+    // Gyro XYZ
+    snprintf(buf, sizeof(buf), "%6.3f %6.3f %6.3f",
+             (double)pkt.gyro_x, (double)pkt.gyro_y, (double)pkt.gyro_z);
+    canvas.setTextColor(COLOR_WHITE, COLOR_BLACK);
+    canvas.setCursor(24, 36);
+    canvas.print(buf);
+
+    // Fused heading
+    snprintf(buf, sizeof(buf), "%5.1f ", (double)pkt.fused_heading_deg);
+    canvas.setTextColor(COLOR_GREEN, COLOR_BLACK);
+    canvas.setCursor(60, 54);
+    canvas.print(buf);
+
+    // Raw mag heading
+    snprintf(buf, sizeof(buf), "%5.1f ", (double)pkt.raw_mag_heading_deg);
+    canvas.setTextColor(COLOR_YELLOW, COLOR_BLACK);
+    canvas.setCursor(60, 63);
+    canvas.print(buf);
+
+    // Pitch
+    snprintf(buf, sizeof(buf), "%6.1f", (double)pkt.pitch_deg);
+    canvas.setTextColor(COLOR_WHITE, COLOR_BLACK);
+    canvas.setCursor(12, 72);
+    canvas.print(buf);
+
+    // Roll
+    snprintf(buf, sizeof(buf), "%6.1f", (double)pkt.roll_deg);
+    canvas.setCursor(72, 72);
+    canvas.print(buf);
+
+    flush();
+}
+
+// ===========================================================================
+// Random-rect self-test
+// ===========================================================================
+
+static bool     rectTestActive  = false;
+static uint8_t  rectTestCoverage = 25;
+static uint32_t rectTestLastMs  = 0;
+
+void startRandomRectTest(uint8_t coveragePct) {
+    rectTestCoverage = constrain(coveragePct, 1, 100);
+    rectTestActive = true;
+    rectTestLastMs = 0;
+    canvas.fillScreen(COLOR_BLACK);
+    flush();
+    Serial.printf("[DISP] random-rect test started (%u%% coverage)\n", rectTestCoverage);
+}
+
+void stopRandomRectTest() {
+    rectTestActive = false;
+    canvas.fillScreen(COLOR_BLACK);
+    flush();
+    Serial.println("[DISP] random-rect test stopped");
+}
+
+bool isRandomRectTestActive() { return rectTestActive; }
+
+void tickRandomRectTest() {
+    if (!rectTestActive) return;
+    uint32_t now = millis();
+    if (now - rectTestLastMs < 1000) return;
+    rectTestLastMs = now;
+
+    // Compute rect dimensions from coverage percentage
+    float area = SCREEN_WIDTH * SCREEN_HEIGHT * (rectTestCoverage / 100.0f);
+    float aspect = 0.5f + (random(0, 1000) / 1000.0f) * 1.5f;
+    int h = (int)sqrtf(area / aspect);
+    int w = (int)(h * aspect);
+    if (w > SCREEN_WIDTH)  w = SCREEN_WIDTH;
+    if (h > SCREEN_HEIGHT) h = SCREEN_HEIGHT;
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
+
+    int x = random(0, SCREEN_WIDTH  - w + 1);
+    int y = random(0, SCREEN_HEIGHT - h + 1);
+
+    uint16_t color = ((uint16_t)random(8, 32) << 11) |
+                     ((uint16_t)random(16, 64) << 5) |
+                     (uint16_t)random(8, 32);
+
+    canvas.fillRect(x, y, w, h, color);
+    flush();
+    Serial.printf("[DISP] rect x=%d y=%d w=%d h=%d color=0x%04X\n", x, y, w, h, color);
+}
+
+// ===========================================================================
+// Random-text self-test
+// ===========================================================================
+
+static bool     textTestActive   = false;
+static uint8_t  textTestCoverage = 25;
+static uint32_t textTestLastMs   = 0;
+
+void startRandomTextTest(uint8_t coveragePct) {
+    textTestCoverage = constrain(coveragePct, 1, 100);
+    textTestActive = true;
+    textTestLastMs = 0;
+    canvas.fillScreen(COLOR_BLACK);
+    flush();
+    Serial.printf("[DISP] random-text test started (%u%% coverage)\n", textTestCoverage);
+}
+
+void stopRandomTextTest() {
+    textTestActive = false;
+    canvas.fillScreen(COLOR_BLACK);
+    flush();
+    Serial.println("[DISP] random-text test stopped");
+}
+
+bool isRandomTextTestActive() { return textTestActive; }
+
+void tickRandomTextTest() {
+    if (!textTestActive) return;
+    uint32_t now = millis();
+    if (now - textTestLastMs < 1000) return;
+    textTestLastMs = now;
+
+    int stringlen = 10;
+    char str[stringlen];
+    for (int i = 0; i < stringlen - 1; i++) {
+        str[i] = (char)random(0x21, 0x7F);
     }
-    debug_frame++;
+    str[stringlen - 1] = '\0';
+
+    canvas.setTextSize(2);
+    canvas.setTextColor(COLOR_WHITE, COLOR_BLACK);
+    canvas.setCursor(5, 5);
+    canvas.print(str);
+    flush();
+
+    Serial.printf("[DISP] text '%s'\n", str);
 }
 
 }  // namespace display

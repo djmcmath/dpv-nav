@@ -39,6 +39,13 @@ void init() {
     }
 }
 
+void stop() {
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    staConnected = false;
+    Serial.println("[WiFi] Stopped");
+}
+
 void update() {
     // placeholder for future reconnect logic
 }

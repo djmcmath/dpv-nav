@@ -8,6 +8,10 @@ namespace gps {
 // Does NOT block waiting for a fix — the GPS streams data continuously.
 bool init();
 
+// Enable or disable GPS processing. When disabled, update() is a no-op
+// and getFix() returns an empty fix. Does not power off the GPS module.
+void setEnabled(bool enable);
+
 // Call every loop iteration. Reads available NMEA bytes (non-blocking).
 // Returns true when a complete sentence has been parsed.
 bool update();

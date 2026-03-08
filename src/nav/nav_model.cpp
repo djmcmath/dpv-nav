@@ -40,6 +40,12 @@ void setHome() {
     homeSet = true;
 }
 
+void setTargetLatLon(float lat, float lon) {
+    home_x = (lon - baseLon) * mPerDegLon;
+    home_y = (lat - baseLat) * M_PER_DEG_LAT;
+    homeSet = true;
+}
+
 void clearHome() {
     homeSet = false;
     home_x = 0.0f;
@@ -74,6 +80,10 @@ Position getPosition() {
 
 bool hasHome() {
     return homeSet;
+}
+
+bool isUsingGps() {
+    return useGps;
 }
 
 float distanceToHome_m() {

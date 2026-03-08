@@ -242,6 +242,7 @@ static void processNavLine() {
         if (bytesToNavPacket(rxBuf, rxPos, lastNav)) {
             navValid  = true;
             lastNavMs = millis();
+            menu::updateNavState(lastNav.flags);
             if (!everConnected) {
                 everConnected = true;
                 display::clear();

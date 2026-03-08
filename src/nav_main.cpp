@@ -16,6 +16,7 @@
 #include "drivers/flow_sensor.h"
 #include "drivers/gps.h"
 #include "util/storage.h"
+#include "util/logging.h"
 #include "nav/state.h"
 #include "nav/nav_model.h"
 #include "net/wifi_manager.h"
@@ -45,6 +46,11 @@ static constexpr uint32_t LOOP_INTERVAL_US = 10000; // 100 Hz loop rate gate
 static constexpr uint32_t DIAG_INTERVAL_MS = 1000;  // 0.2 Hz sensor diagnostics
 static constexpr bool FULL_DIAG_ENABLE = false;  // set to false to disable periodic diagnostic prints
 static constexpr bool GPS_DIAG_ENABLE  = true;   // GPS position/speed/COG coherence diagnostics
+
+// ---- Toggle states (shared between command handler and sendNavPacket) ------
+static bool gGpsPosEnabled = DEFAULT_USE_GPS_POSITION;
+static bool gGpsSpdEnabled = true;   // GPS speed source enabled (stub — always true for now)
+static bool gWifiEnabled   = true;   // WiFi radio enabled (surface mode default)
 
 // ---- Serial link buffer ----------------------------------------------------
 static char linkBuf[256];
@@ -130,6 +136,9 @@ void setup() {
         // AHRS
         mahonyInit(ahrs);
 
+        // Data logging (starts in OFF state)
+        logging::init();
+
         sysState = SystemState::READY;
     }
 
@@ -160,9 +169,9 @@ void loop() {
     if (dt > 0.5f) dt = 0.01f;  // clamp on overflow
 
     // --- Read sensors -------------------------------------------------------
-    imu::Vec3f accel, gyro, mag, magRaw;
-    imu::readAccel_g(accel);
-    imu::readGyro_rad_s(gyro);
+    imu::Vec3f accel, gyro, mag, magRaw, accelRaw, gyroRaw;
+    imu::readAccel_g_raw_cal(accelRaw, accel);
+    imu::readGyro_rad_s_raw_cal(gyroRaw, gyro);
     imu::readMag_raw_cal(magRaw, mag);  // magRaw = uncalibrated µT, mag = calibrated µT
 
     // --- AHRS update --------------------------------------------------------
@@ -245,6 +254,27 @@ void loop() {
         sendNavPacket(headingDeg, pitchDeg, rollDeg, speed, useGpsSpeed,
                      nav::distanceToHome_m(), nav::bearingToHome_deg(),
                      pos.x_m, pos.y_m, fix);
+
+        // Data logging at 10 Hz (same rate as NavPacket)
+        if (logging::isLogging()) {
+            logging::LogData ld{};
+            ld.timestamp_ms = nowMs;
+            ld.heading_deg  = headingDeg;
+            ld.speed_ms     = speed;
+            ld.gpsSpeed     = useGpsSpeed;
+            ld.pos_x_m      = pos.x_m;
+            ld.pos_y_m      = pos.y_m;
+            ld.gpsPos        = nav::isUsingGps() && gpsFresh;
+            ld.mag_raw       = magRaw;
+            ld.accel_raw     = accelRaw;
+            ld.gyro_raw      = gyroRaw;
+            ld.mag_cal       = mag;
+            ld.accel_cal     = accel;
+            ld.gyro_cal      = gyro;
+            ld.pitch_deg     = pitchDeg;
+            ld.roll_deg      = rollDeg;
+            logging::log(ld);
+        }
     }
 
     // --- Accumulate mag stats for diagnostics --------------------------------
@@ -416,6 +446,9 @@ static void sendNavPacket(float heading, float pitch, float roll,
     if (gpsSpeed) flags |= FLAG_GPS_SPEED;
     if (nav::hasHome()) flags |= FLAG_HAS_HOME;
     // FLAG_TRUE_HEADING set when declination is applied (TODO)
+    if (gGpsPosEnabled) flags |= FLAG_GPS_POS_ENABLED;
+    if (gWifiEnabled)   flags |= FLAG_WIFI_ENABLED;
+    if (gGpsSpdEnabled) flags |= FLAG_GPS_SPD_ENABLED;
     pkt.flags = flags;
 
     size_t n = navPacketToBytes(pkt, linkBuf, sizeof(linkBuf));
@@ -493,10 +526,29 @@ static void handleDisplayCmd() {
                         Serial.println("CMD: RESET");
                         ESP.restart();
                         break;
-                    case DisplayCmd::NAV_OUTBOUND:
-                        Serial.println("CMD: NAV_OUTBOUND (stub)");
-                        // TODO: set outbound waypoint as destination
+                    case DisplayCmd::NAV_OUTBOUND: {
+                        Serial.println("CMD: NAV_OUTBOUND");
+                        // Load waypoint from /config/waypoint.json
+                        File wpf = LittleFS.open("/config/waypoint.json", "r");
+                        if (wpf) {
+                            String wj = wpf.readString();
+                            wpf.close();
+                            int latIdx = wj.indexOf("\"lat\"");
+                            int lonIdx = wj.indexOf("\"lon\"");
+                            if (latIdx >= 0 && lonIdx >= 0) {
+                                float wlat = wj.substring(wj.indexOf(':', latIdx) + 1).toFloat();
+                                float wlon = wj.substring(wj.indexOf(':', lonIdx) + 1).toFloat();
+                                nav::setTargetLatLon(wlat, wlon);
+                                sysState = SystemState::NAVIGATING;
+                                Serial.printf("  Outbound waypoint: %.6f, %.6f\n", wlat, wlon);
+                            } else {
+                                Serial.println("  ERROR: waypoint.json missing lat/lon");
+                            }
+                        } else {
+                            Serial.println("  ERROR: /config/waypoint.json not found");
+                        }
                         break;
+                    }
                     case DisplayCmd::NAV_HOME:
                         Serial.println("CMD: NAV_HOME");
                         nav::setHome();
@@ -521,27 +573,25 @@ static void handleDisplayCmd() {
                         // TODO: implement flow meter speed calibration
                         break;
                     case DisplayCmd::TOGGLE_GPS_POS:
-                        // Toggle GPS position usage (no getter, so just toggle via setUseGps)
-                        Serial.println("CMD: TOGGLE_GPS_POS");
-                        {
-                            static bool gpsPos = DEFAULT_USE_GPS_POSITION;
-                            gpsPos = !gpsPos;
-                            nav::setUseGps(gpsPos);
-                            Serial.print("  GPS position: ");
-                            Serial.println(gpsPos ? "ON" : "OFF");
-                        }
+                        gGpsPosEnabled = !gGpsPosEnabled;
+                        nav::setUseGps(gGpsPosEnabled);
+                        Serial.print("CMD: TOGGLE_GPS_POS -> ");
+                        Serial.println(gGpsPosEnabled ? "ON" : "OFF");
                         break;
                     case DisplayCmd::TOGGLE_GPS_SPD:
-                        Serial.println("CMD: TOGGLE_GPS_SPD (stub)");
-                        // TODO: implement GPS speed toggle
+                        gGpsSpdEnabled = !gGpsSpdEnabled;
+                        Serial.print("CMD: TOGGLE_GPS_SPD -> ");
+                        Serial.println(gGpsSpdEnabled ? "ON" : "OFF");
+                        // TODO: gate GPS speed selection on gGpsSpdEnabled
                         break;
                     case DisplayCmd::TOGGLE_WIFI:
-                        Serial.println("CMD: TOGGLE_WIFI (stub)");
-                        // TODO: implement WiFi toggle
+                        gWifiEnabled = !gWifiEnabled;
+                        Serial.print("CMD: TOGGLE_WIFI -> ");
+                        Serial.println(gWifiEnabled ? "ON" : "OFF");
+                        // TODO: call wifi::stop() / wifi::init() based on state
                         break;
                     case DisplayCmd::CYCLE_LOG_LEVEL:
-                        Serial.println("CMD: CYCLE_LOG_LEVEL (stub)");
-                        // TODO: implement log level cycling
+                        logging::cycleLevel();
                         break;
                     case DisplayCmd::TOGGLE_OP_MODE:
                     {
@@ -550,11 +600,13 @@ static void handleDisplayCmd() {
                         if (diveMode) {
                             gps::setEnabled(false);
                             wifi::stop();
+                            gWifiEnabled = false;
                             Serial.println("CMD: OP_MODE -> DIVE (GPS+WiFi off)");
                         } else {
                             gps::setEnabled(true);
                             wifi::init();
                             web::init();
+                            gWifiEnabled = true;
                             Serial.println("CMD: OP_MODE -> SURFACE (GPS+WiFi on)");
                         }
                     }

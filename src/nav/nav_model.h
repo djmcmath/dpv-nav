@@ -15,6 +15,9 @@ void init(float baselineLat, float baselineLon);
 // Snapshot current position as home.
 void setHome();
 
+// Set home to a specific lat/lon (e.g. outbound waypoint from config).
+void setTargetLatLon(float lat, float lon);
+
 // Clear home waypoint.
 void clearHome();
 
@@ -33,6 +36,9 @@ Position getPosition();
 
 // True if home has been set.
 bool hasHome();
+
+// True if GPS position is being used as truth source.
+bool isUsingGps();
 
 // Distance from current position to home (meters). Returns 0 if no home.
 float distanceToHome_m();

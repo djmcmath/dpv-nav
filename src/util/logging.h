@@ -1,54 +1,46 @@
 #pragma once
 
 #include <cstdint>
-#include <cstddef>
-#include "../types/types.h"
 #include "../sensors/imu.h"
 
 namespace logging {
 
-// Log entry contains both raw and calibrated data
-struct LogEntry {
-  uint32_t timestamp_ms;    // milliseconds since start
-  
-  // Raw sensor readings
-  imu::Vec3f mag_raw;
-  imu::Vec3f accel_raw;
-  imu::Vec3f gyro_raw;
-  
-  // Calibrated sensor readings
-  imu::Vec3f mag_cal;
-  imu::Vec3f accel_cal;
-  imu::Vec3f gyro_cal;
-  
-  // Processed data
-  float heading_deg;        // heading in degrees
-  float roll_deg;           // roll angle
-  float pitch_deg;          // pitch angle
+enum class LogLevel : uint8_t { LEVEL_OFF = 0, LEVEL_LOW, LEVEL_HIGH };
+
+// All data needed for a log entry. HIGH-only fields are ignored when level == LOW.
+struct LogData {
+    uint32_t timestamp_ms;
+    float heading_deg;
+    float speed_ms;
+    bool  gpsSpeed;       // true = GPS, false = flowmeter
+    float pos_x_m;
+    float pos_y_m;
+    bool  gpsPos;         // true = GPS position, false = DR estimate
+    // HIGH-level fields
+    imu::Vec3f mag_raw, accel_raw, gyro_raw;
+    imu::Vec3f mag_cal, accel_cal, gyro_cal;
+    float pitch_deg, roll_deg;
 };
 
-// Initialize logging system (mounts LittleFS, creates log file)
-// Returns true if successful
+// Initialize logging system: mount LittleFS (if not already mounted),
+// clean up oldest logs if free space is below threshold, determine next
+// sequential file number. Starts in OFF state — no file is opened until
+// cycleLevel() moves away from OFF.
 bool init();
 
-// Shutdown logging system (closes file, unmounts LittleFS)
+// Shutdown logging system (close file if open).
 void shutdown();
 
-// Log a data entry to file
-// Returns true if successful, false if error or not initialized
-bool logEntry(const LogEntry& entry);
+// Current log level.
+LogLevel getLevel();
 
-// Get current log file path
-const char* getLogPath();
+// Cycle OFF -> LOW -> HIGH -> OFF. Opens/closes files as needed.
+void cycleLevel();
 
-// Get number of bytes written to current log
-uint32_t getBytesLogged();
+// Log one entry. No-op if level == OFF.
+void log(const LogData& d);
 
-// Check if logging is active
+// True if level != OFF.
 bool isLogging();
-
-// Close current log and start a new one
-// Returns true if successful
-bool rotateLog();
 
 }  // namespace logging

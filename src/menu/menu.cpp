@@ -22,6 +22,12 @@ static uint32_t lastActivityMs = 0;          // for idle timeout
 static SendCmdFn gSendCmd = nullptr;
 
 static bool gDiveMode = false;  // Op mode toggle state (display-side tracking)
+static uint8_t gLogLevel = 0;  // Log level tracking (0=OFF, 1=LOW, 2=HIGH)
+
+// Nav-device toggle states (updated from NavPacket flags)
+static bool gGpsPosEnabled = true;
+static bool gGpsSpdEnabled = true;
+static bool gWifiEnabled   = true;
 
 static DisplaySettings gSettings = {
     .debugMode   = false,
@@ -216,16 +222,16 @@ static void getDisplayLabel(const MenuItem& item, char* buf, size_t bufLen) {
     const char* suffix = "";
     switch (item.action) {
         case Action::INPUT_GPS_POS:
-            suffix = "ON";  // TODO: track actual state from nav device
+            suffix = gGpsPosEnabled ? "ON" : "OFF";
             break;
         case Action::INPUT_GPS_SPD:
-            suffix = "ON";  // TODO: track actual state from nav device
+            suffix = gGpsSpdEnabled ? "ON" : "OFF";
             break;
         case Action::INPUT_WIFI:
-            suffix = "OFF"; // TODO: track actual state from nav device
+            suffix = gWifiEnabled ? "ON" : "OFF";
             break;
         case Action::INPUT_LOG_CYCLE:
-            suffix = "OFF"; // TODO: track actual state from nav device
+            suffix = gLogLevel == 0 ? "OFF" : (gLogLevel == 1 ? "LOW" : "HI");
             break;
         case Action::DISP_MODE:
             suffix = gSettings.debugMode ? "DBG" : "NAV";
@@ -293,8 +299,10 @@ static void executeAction(Action act) {
             Serial.println("[MENU] TOGGLE_WIFI");
             break;
         case Action::INPUT_LOG_CYCLE:
+            gLogLevel = (gLogLevel + 1) % 3;  // 0->1->2->0
             if (gSendCmd) gSendCmd(DisplayCmd::CYCLE_LOG_LEVEL);
-            Serial.println("[MENU] CYCLE_LOG_LEVEL");
+            Serial.printf("[MENU] Log level: %s\n",
+                          gLogLevel == 0 ? "OFF" : (gLogLevel == 1 ? "LOW" : "HIGH"));
             break;
         // Local display settings
         case Action::DISP_MODE:
@@ -469,6 +477,12 @@ void render() {
 
 const DisplaySettings& settings() {
     return gSettings;
+}
+
+void updateNavState(uint8_t flags) {
+    gGpsPosEnabled = (flags & FLAG_GPS_POS_ENABLED) != 0;
+    gGpsSpdEnabled = (flags & FLAG_GPS_SPD_ENABLED) != 0;
+    gWifiEnabled   = (flags & FLAG_WIFI_ENABLED)    != 0;
 }
 
 }  // namespace menu

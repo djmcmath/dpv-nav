@@ -183,42 +183,49 @@ void drawHLine(int x, int y, int w, uint16_t color) {
 static void drawStatusBar(const NavPacket& pkt) {
     canvas.setTextSize(1);
 
-    // System state (3 chars at x=0)
-    const char* s;
-    uint16_t c;
-    switch (pkt.system_state) {
-        case 2: s = "RDY"; c = COLOR_CYAN;   break;
-        case 3: s = "NAV"; c = COLOR_GREEN;  break;
-        case 4: s = "CAL"; c = COLOR_YELLOW; break;
-        case 5: s = "ERR"; c = COLOR_RED;    break;
-        default: s = "..."; c = COLOR_GRAY;  break;
-    }
-    canvas.setTextColor(c, COLOR_BLACK);
+    // Layout: BATT  CAL  WiFi  GPS  P  S
+    // 6px per char at size 1.  Positions chosen for even spacing.
+
+    // BATT (stubbed — no battery data yet)
+    canvas.setTextColor(COLOR_GRAY, COLOR_BLACK);
     canvas.setCursor(0, 2);
-    canvas.print(s);
+    canvas.print("BATT");
 
-    // GPS (5 chars at x=30)
+    // CAL (stubbed — no calibration quality metric yet)
+    canvas.setTextColor(COLOR_GRAY, COLOR_BLACK);
+    canvas.setCursor(27, 2);
+    canvas.print("CAL");
+
+    // WiFi: white = enabled, gray = disabled
+    uint16_t wifiColor = (pkt.flags & FLAG_WIFI_ENABLED) ? COLOR_WHITE : COLOR_GRAY;
+    canvas.setTextColor(wifiColor, COLOR_BLACK);
+    canvas.setCursor(48, 2);
+    canvas.print("WiFi");
+
+    // GPS: quality indicator (red/yellow/green)
+    uint16_t gpsColor;
     if (pkt.gps_fix_quality >= 2) {
-        s = "GP:DG"; c = COLOR_GREEN;
+        gpsColor = COLOR_GREEN;   // DGPS
     } else if (pkt.gps_fix_quality == 1) {
-        s = "GP:OK"; c = COLOR_GREEN;
+        gpsColor = COLOR_YELLOW;  // GPS fix, no DGPS
     } else {
-        s = "GP:--"; c = COLOR_RED;
+        gpsColor = COLOR_RED;     // no fix
     }
-    canvas.setTextColor(c, COLOR_BLACK);
-    canvas.setCursor(30, 2);
-    canvas.print(s);
+    canvas.setTextColor(gpsColor, COLOR_BLACK);
+    canvas.setCursor(75, 2);
+    canvas.print("GPS");
 
-    // Home (6 chars at x=72)
-    if (pkt.flags & FLAG_HAS_HOME) {
-        canvas.setTextColor(COLOR_GREEN, COLOR_BLACK);
-        canvas.setCursor(72, 2);
-        canvas.print("HM:SET");
-    } else {
-        canvas.setTextColor(COLOR_GRAY, COLOR_BLACK);
-        canvas.setCursor(72, 2);
-        canvas.print("HM:---");
-    }
+    // P: GPS position enabled — white = enabled, gray = disabled
+    uint16_t posColor = (pkt.flags & FLAG_GPS_POS_ENABLED) ? COLOR_WHITE : COLOR_GRAY;
+    canvas.setTextColor(posColor, COLOR_BLACK);
+    canvas.setCursor(99, 2);
+    canvas.print("P");
+
+    // S: GPS speed enabled — white = enabled, gray = disabled
+    uint16_t spdColor = (pkt.flags & FLAG_GPS_SPD_ENABLED) ? COLOR_WHITE : COLOR_GRAY;
+    canvas.setTextColor(spdColor, COLOR_BLACK);
+    canvas.setCursor(111, 2);
+    canvas.print("S");
 }
 
 static void drawNavGrid() {
@@ -244,7 +251,7 @@ static void drawBearing(const NavPacket& pkt) {
         // Digits (size 3)
         char digits[4];
         snprintf(digits, sizeof(digits), "%03d", brg_int);
-        canvas.setTextSize(3);
+        canvas.setTextSize(2);
         canvas.setTextColor(COLOR_WHITE, COLOR_BLACK);
         canvas.setCursor(1, 25);
         canvas.print(digits);

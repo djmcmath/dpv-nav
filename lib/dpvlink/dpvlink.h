@@ -31,9 +31,12 @@ struct NavPacket {
 };
 
 // NavPacket.flags bit definitions
-constexpr uint8_t FLAG_TRUE_HEADING = 0x01;  // 1 = true heading, 0 = magnetic
-constexpr uint8_t FLAG_GPS_SPEED    = 0x02;  // 1 = GPS speed, 0 = flow sensor
-constexpr uint8_t FLAG_HAS_HOME     = 0x04;  // 1 = home position set
+constexpr uint8_t FLAG_TRUE_HEADING    = 0x01;  // 1 = true heading, 0 = magnetic
+constexpr uint8_t FLAG_GPS_SPEED       = 0x02;  // 1 = GPS speed, 0 = flow sensor
+constexpr uint8_t FLAG_HAS_HOME        = 0x04;  // 1 = home position set
+constexpr uint8_t FLAG_GPS_POS_ENABLED = 0x08;  // 1 = GPS position usage enabled
+constexpr uint8_t FLAG_WIFI_ENABLED    = 0x10;  // 1 = WiFi radio enabled
+constexpr uint8_t FLAG_GPS_SPD_ENABLED = 0x20;  // 1 = GPS speed usage enabled
 
 // ---------------------------------------------------------------------------
 // Debug packet  (sent alongside NavPacket when debug mode enabled)

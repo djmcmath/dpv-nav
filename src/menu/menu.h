@@ -108,4 +108,8 @@ void forceRedraw();
 // Access current display settings (for use by display_main rendering logic).
 const DisplaySettings& settings();
 
+// Update nav-device toggle states from NavPacket flags.
+// Call whenever a NavPacket is received so menu labels stay in sync.
+void updateNavState(uint8_t flags);
+
 }  // namespace menu

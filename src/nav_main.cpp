@@ -183,7 +183,7 @@ void loop() {
 
     // --- Extract Euler angles -----------------------------------------------
     Euler euler = quatToEulerRad(ahrs.q);
-    float headingDeg = headingDegFromYawRad(euler.yaw);
+    float headingDeg = headingDegFromYawRad(euler.yaw, DEFAULT_DECLINATION_DEG);
     float pitchDeg   = euler.pitch * (180.0f / M_PI);
     float rollDeg    = euler.roll  * (180.0f / M_PI);
 
@@ -222,6 +222,9 @@ void loop() {
     //  - SOG < NOISE_FLOOR: always noise (position jitter at rest)
     //  - SOG > TRUST_FLOOR: always trust (clearly moving, COG drifts slowly at low speed)
     //  - In between: require COG coherence to confirm real motion
+    // When GPS speed is rejected, fall back to flow sensor. If flow sensor also
+    // reads 0 (no sensor connected), use GPS speed anyway — noisy GPS speed is
+    // always better than zero for DR integration.
     float speed;
     bool useGpsSpeed = false;
     if (gpsFresh) {
@@ -237,7 +240,19 @@ void loop() {
             speed = fix.speed_knots * KNOTS_TO_MS;
             useGpsSpeed = true;
         } else {
-            speed = flow::getSpeed_ms();
+            float flowSpeed = flow::getSpeed_ms();
+            if (flowSpeed > 0.0f) {
+                speed = flowSpeed;
+            } else {
+                // No flow sensor: use GPS speed if above noise floor,
+                // otherwise treat as stationary
+                if (fix.speed_knots >= GPS_SOG_NOISE_FLOOR_KN) {
+                    speed = fix.speed_knots * KNOTS_TO_MS;
+                    useGpsSpeed = true;
+                } else {
+                    speed = 0.0f;
+                }
+            }
         }
     } else {
         speed = flow::getSpeed_ms();
@@ -445,10 +460,11 @@ static void sendNavPacket(float heading, float pitch, float roll,
     uint8_t flags = 0;
     if (gpsSpeed) flags |= FLAG_GPS_SPEED;
     if (nav::hasHome()) flags |= FLAG_HAS_HOME;
-    // FLAG_TRUE_HEADING set when declination is applied (TODO)
+    flags |= FLAG_TRUE_HEADING;  // declination applied in heading calculation
     if (gGpsPosEnabled) flags |= FLAG_GPS_POS_ENABLED;
     if (gWifiEnabled)   flags |= FLAG_WIFI_ENABLED;
     if (gGpsSpdEnabled) flags |= FLAG_GPS_SPD_ENABLED;
+    flags |= (static_cast<uint8_t>(logging::getLevel()) << FLAG_LOG_LEVEL_SHIFT) & FLAG_LOG_LEVEL_MASK;
     pkt.flags = flags;
 
     size_t n = navPacketToBytes(pkt, linkBuf, sizeof(linkBuf));

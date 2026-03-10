@@ -353,6 +353,21 @@ static void drawSpeed(const NavPacket& pkt) {
     canvas.print(meta);
 }
 
+static void drawLogIndicator(const NavPacket& pkt) {
+    uint8_t level = (pkt.flags & FLAG_LOG_LEVEL_MASK) >> FLAG_LOG_LEVEL_SHIFT;
+    uint16_t color;
+    const char* label;
+    switch (level) {
+        case 1:  color = COLOR_YELLOW; label = "L1"; break;
+        case 2:  color = COLOR_RED;    label = "L2"; break;
+        default: color = COLOR_GRAY;   label = "L0"; break;
+    }
+    canvas.setTextSize(1);
+    canvas.setTextColor(color, COLOR_BLACK);
+    canvas.setCursor(1, 87);
+    canvas.print(label);
+}
+
 void showNav(const NavPacket& pkt) {
     if (!canvasReady) return;
 
@@ -363,6 +378,7 @@ void showNav(const NavPacket& pkt) {
     drawRange(pkt);
     drawHeading(pkt);
     drawSpeed(pkt);
+    drawLogIndicator(pkt);
     flush();
 }
 

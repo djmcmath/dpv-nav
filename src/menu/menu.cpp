@@ -33,7 +33,7 @@ static DisplaySettings gSettings = {
     .debugMode   = false,
     .showETA     = false,
     .imperial    = false,
-    .trueHeading = false,
+    .trueHeading = true,
 };
 
 // Display coordinates for menu area

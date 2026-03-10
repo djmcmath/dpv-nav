@@ -3,3 +3,4 @@ firmware/build/
 .pio/
 .claude/
 nul
+*.lck

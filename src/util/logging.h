@@ -15,6 +15,8 @@ struct LogData {
     bool  gpsSpeed;       // true = GPS, false = flowmeter
     float pos_x_m;
     float pos_y_m;
+    float lat;            // current latitude (GPS or DR-estimated)
+    float lon;            // current longitude (GPS or DR-estimated)
     bool  gpsPos;         // true = GPS position, false = DR estimate
     // HIGH-level fields
     imu::Vec3f mag_raw, accel_raw, gyro_raw;

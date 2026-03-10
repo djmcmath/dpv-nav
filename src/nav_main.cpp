@@ -279,6 +279,8 @@ void loop() {
             ld.gpsSpeed     = useGpsSpeed;
             ld.pos_x_m      = pos.x_m;
             ld.pos_y_m      = pos.y_m;
+            ld.lat           = pos.lat;
+            ld.lon           = pos.lon;
             ld.gpsPos        = nav::isUsingGps() && gpsFresh;
             ld.mag_raw       = magRaw;
             ld.accel_raw     = accelRaw;

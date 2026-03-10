@@ -82,9 +82,11 @@ static void cleanupOldLogs() {
 static void writeHeader() {
     if (!gLogFile) return;
     if (gLevel == LogLevel::LEVEL_LOW) {
-        gLogFile.print("timestamp_ms,heading_deg,speed_ms,speed_src,pos_x_m,pos_y_m,pos_src\n");
+        gLogFile.print("timestamp_ms,heading_deg,speed_ms,speed_src,"
+                       "pos_x_m,pos_y_m,lat,lon,pos_src\n");
     } else if (gLevel == LogLevel::LEVEL_HIGH) {
-        gLogFile.print("timestamp_ms,heading_deg,speed_ms,speed_src,pos_x_m,pos_y_m,pos_src,"
+        gLogFile.print("timestamp_ms,heading_deg,speed_ms,speed_src,"
+                       "pos_x_m,pos_y_m,lat,lon,pos_src,"
                        "mag_x_raw,mag_y_raw,mag_z_raw,"
                        "accel_x_raw,accel_y_raw,accel_z_raw,"
                        "gyro_x_raw,gyro_y_raw,gyro_z_raw,"
@@ -192,13 +194,15 @@ void log(const LogData& d) {
     if (!gReady || gLevel == LogLevel::LEVEL_OFF || !gLogFile) return;
 
     // Common columns (LOW and HIGH)
-    gLogFile.printf("%lu,%.2f,%.3f,%c,%.2f,%.2f,%c",
+    gLogFile.printf("%lu,%.2f,%.3f,%c,%.2f,%.2f,%.8f,%.8f,%c",
                     d.timestamp_ms,
                     d.heading_deg,
                     d.speed_ms,
                     d.gpsSpeed ? 'G' : 'F',
                     d.pos_x_m,
                     d.pos_y_m,
+                    d.lat,
+                    d.lon,
                     d.gpsPos ? 'G' : 'E');
 
     if (gLevel == LogLevel::LEVEL_HIGH) {

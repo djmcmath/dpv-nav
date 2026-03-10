@@ -29,9 +29,13 @@ constexpr float GPS_SOG_NOISE_FLOOR_KN  = 0.5f;   // SOG below this is certainly
 constexpr float GPS_SOG_TRUST_FLOOR_KN  = 2.0f;   // SOG above this is trusted regardless of COG (knots)
 
 // Position estimation
-constexpr float DEFAULT_BASELINE_LAT     = 42.0f;   // degrees N (assumed until GPS fix)
-constexpr float DEFAULT_BASELINE_LON     = -122.0f;  // degrees W (assumed until GPS fix)
+constexpr float DEFAULT_BASELINE_LAT     = 47.5f;   // degrees N (assumed until GPS fix)
+constexpr float DEFAULT_BASELINE_LON     = -122.5f;  // degrees W (assumed until GPS fix)
 constexpr bool  DEFAULT_USE_GPS_POSITION = true;     // use GPS lat/lon as position truth when available
+
+// Magnetic declination (degrees, positive = East, negative = West)
+// Look up your local value at https://www.ngdc.noaa.gov/geomag/declination.shtml
+constexpr float DEFAULT_DECLINATION_DEG  = 14.7f;   // ~14.7°E for southern Oregon (42°N, 122°W)
 
 // Display mode (compile-time): 0 = Navigation, 1 = Debug
 #ifndef DISPLAY_MODE

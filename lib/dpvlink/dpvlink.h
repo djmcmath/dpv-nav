@@ -28,6 +28,9 @@ struct NavPacket {
     uint8_t  gps_fix_quality;   // 0=none, 1=GPS, 2=DGPS
     uint8_t  gps_satellites;    // number of satellites in fix
     uint32_t uptime_ms;
+    uint8_t  cal_remaining_s;   // seconds remaining in active calibration (0 otherwise)
+    uint8_t  cal_coverage_pct;  // calibration coverage/completeness 0-100
+    uint8_t  cal_mode;          // 0=quick (hard-iron), 1=full (soft-iron data collection)
 };
 
 // NavPacket.flags bit definitions

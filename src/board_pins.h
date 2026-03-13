@@ -30,7 +30,7 @@ constexpr int BUTTON2_PIN = 13;
 // --- OLED display (SSD1351 on SPI, direct-wired to ESP32) ---
 constexpr int OLED_CS   = 15;  // TCS
 constexpr int OLED_DC   = 33;
-constexpr int OLED_RST  = 20; // Was on 32, but that was getting a reset every 10s; some kind of polling conflict, maybe.
+constexpr int OLED_RST  = 22; // Was on 32, but that was getting a reset every 10s; some kind of polling conflict, maybe.
 
 // SPI bus pins (ESP32 default VSPI)
 constexpr int DISP_SCK  = 5;

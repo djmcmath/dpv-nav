@@ -57,11 +57,23 @@ void setAccelCalibration(const Calib3& cal);
 void setGyroCalibration(const Calib3& cal);
 void setMagCalibration(const MagCalib& cal);
 
-// --- Calibration routines ---
+// --- Calibration routines (blocking) ---
 // Each writes result to `out` AND updates the internal calibration state,
 // so subsequent reads are immediately calibrated.
 void calibrateMagnetometer(MagCalib& out, uint32_t duration_ms = 30000);
 void calibrateGyroscope(Calib3& out, uint32_t duration_ms = 10000);
 void calibrateAccelerometer(Calib3& out, uint32_t sample_duration_ms = 1500);
+
+// --- Non-blocking magnetometer calibration (hard-iron sweep) ---
+// Use these from a main loop so other work (NavPacket sends, display) keeps running.
+// Call magCalNBBegin() once, then magCalNBTick() each loop iteration.
+// magCalNBTick() returns true when calibration is complete; call magCalNBGetResult() then.
+bool   magCalNBBegin(uint32_t duration_ms);
+bool   magCalNBTick();   // returns true when done
+bool   magCalNBIsActive();
+void   magCalNBGetResult(MagCalib& out);
+// Progress: elapsed_ms, remaining_ms, coverage 0-100 per axis (min of 3 = overall)
+void   magCalNBGetProgress(uint32_t& elapsed_ms, uint32_t& remaining_ms,
+                           int& covX, int& covY, int& covZ);
 
 }

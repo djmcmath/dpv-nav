@@ -49,25 +49,46 @@ For each sensor (mag, gyro, accel):
 
 ## Magnetometer Calibration
 
-**Method:** Min/max sweep (hard-iron only)
+### Quick Cal (Hard-Iron Sweep)
+
+**Method:** Min/max sweep — corrects hard-iron bias only, sets soft-iron matrix to identity.
+
+**Trigger:** Menu → CAL > Quick cal (runs non-blocking, 30 seconds)
 
 **Procedure:**
-1. System prints: "Rotate device through all orientations for 30 seconds..."
-2. Slowly rotate the device in all directions (figure-8 patterns work well)
-3. Cover all axes: roll, pitch, yaw, and diagonal orientations
-4. After 30 seconds, bias is computed as midpoint: `bias = (min + max) / 2`
+1. Select **CAL > Quick cal** from the menu
+2. The OLED switches to a calibration progress screen showing time remaining and axis coverage
+3. Rotate the device slowly through all orientations for 30 seconds (figure-8 patterns work well)
+4. Cover all axes: roll, pitch, yaw, and diagonal orientations
+5. When complete, bias is computed as midpoint `bias = (min + max) / 2`, saved to `/calib/mag_cal.json`, and the nav screen resumes automatically
+
+**Coverage indicator:** The progress screen shows 0–100% coverage as the minimum of X/Y/Z axis span relative to Earth's expected field range (~6800 LSB). Aim for ≥60% before time expires.
 
 **What it corrects:**
 - Hard-iron distortions (fixed magnetic sources in/near device)
 - Sensor manufacturing offset
-- Local field variations
 
 **What it does NOT correct:**
-- Soft-iron distortions (cross-axis coupling from ferromagnetic materials) — see [mag-calibration-workflow.md](mag-calibration-workflow.md) for full soft-iron calibration
+- Soft-iron distortions (cross-axis coupling from ferromagnetic materials) — see [mag-calibration-workflow.md](mag-calibration-workflow.md) for the full soft-iron calibration workflow
 
-**Triggering recalibration:**
+**Other ways to trigger recalibration:**
 - Delete `/calib/mag_cal.json` from LittleFS and reboot
-- Long-press BTN2 (2 seconds) on the display device
+
+### Full Cal (Soft-Iron Data Collection)
+
+**Method:** Raw sample collection — feeds the offline Python ellipsoid-fitting script.
+
+**Trigger:** Menu → CAL > Full cal (runs non-blocking, 120 seconds)
+
+**Procedure:**
+1. Mount the device on the DPV in its installed position (motors, batteries, all magnetic sources present)
+2. Select **CAL > Full cal** from the menu
+3. The OLED switches to a calibration progress screen — coverage shows time elapsed %
+4. Rotate the DPV through all orientations for 120 seconds (drive circles, tilt, roll)
+5. When complete, raw samples are saved to `/mag_cal_samples.csv` on LittleFS and the nav screen resumes
+6. Export data and run offline: see [mag-calibration-workflow.md](mag-calibration-workflow.md)
+
+**Note:** Full cal only collects data — it does not update the live calibration. The new soft-iron matrix must be computed offline and re-uploaded.
 
 **Rotation tips:**
 - Slow, deliberate rotation (~1 rotation per 2 seconds)
@@ -136,8 +157,8 @@ Files are stored on LittleFS (ESP32 internal flash). Total calibration data is <
 
 ## Forcing Recalibration
 
-1. **Delete files from LittleFS** — reboot triggers fresh calibration
-2. **BTN2 long press** — triggers mag recalibration from display device
+1. **Menu (recommended)** — CAL > Quick cal for hard-iron; CAL > Full cal + offline Python for soft-iron
+2. **Delete files from LittleFS** — reboot triggers fresh calibration
 3. **Serial commands** — use `LittleFS.remove("/calib/mag_cal.json")` etc.
 
 ## Troubleshooting

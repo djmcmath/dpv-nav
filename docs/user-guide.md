@@ -19,7 +19,7 @@
 
 3. **Quick heading sanity check**: Compare displayed heading against a phone compass or known bearing.
 
-4. **If recalibration needed**: Open menu (BTN1) → **CAL > Quick cal** (BTN2) to trigger magnetometer recalibration. Rotate device through all orientations for 10 seconds.
+4. **If recalibration needed**: Open menu (BTN1) → **CAL > Quick cal** (BTN2) to trigger magnetometer hard-iron recalibration. Rotate device through all orientations for 30 seconds. The OLED switches to a calibration progress screen automatically.
 
 ## Setting Home
 
@@ -48,8 +48,8 @@ MENU
 │   ├── Mark       — mark current position in logs
 │   └── Op Mode    — toggle dive/surface mode (shows DIVE or SURF)
 ├── CAL
-│   ├── Quick cal  — run 10-second magnetometer offset calibration
-│   ├── Full cal   — collect 120s of raw mag data for offline calibration
+│   ├── Quick cal  — 30-second hard-iron magnetometer sweep (bias only, updates saved to LittleFS)
+│   ├── Full cal   — 120-second raw mag data collection for offline soft-iron ellipsoid fitting
 │   └── Speed cal  — flow meter speed calibration (stub)
 ├── INPUT
 │   ├── GPS Pos    — toggle GPS position on/off (shows current state)
@@ -63,7 +63,27 @@ MENU
     └── Heading    — toggle magnetic vs true heading
 ```
 
-Toggle items show their current state (e.g., "Units: m", "Op Mode: SURF") and stay open after toggling. Non-toggle items (Home, Mark, Quick cal) execute and close the menu.
+Toggle items show their current state (e.g., "Units: m", "Op Mode: SURF") and stay open after toggling. Non-toggle items (Home, Mark, Quick cal, Full cal) execute and close the menu.
+
+### Calibration Progress Screen
+
+When Quick cal or Full cal is running, the normal nav display is replaced with a dedicated calibration screen:
+
+```
+MAG CAL
+QUICK (hard-iron)         ← or "FULL (soft-iron)"
+
+Remaining:  27s
+[============        ]    ← green progress bar (coverage)
+Coverage:  48%
+[============        ]    ← cyan bar (same metric)
+
+ROTATE DEVICE             ← blinks at 1 Hz
+```
+
+- **Remaining** — seconds left in the calibration
+- **Coverage** — for quick cal: minimum axis coverage (how completely each X/Y/Z axis has been spanned); for full cal: time elapsed as a percentage
+- The screen returns to normal navigation automatically when calibration finishes
 
 **Op Mode (Dive/Surface):** The device boots in **surface mode** with GPS and WiFi active. Before entering the water, toggle to **dive mode** via NAV > Op Mode — this disables GPS processing and turns off the WiFi radio. On surfacing, toggle back to surface mode to re-enable both.
 

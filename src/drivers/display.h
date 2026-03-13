@@ -51,6 +51,12 @@ void showNavTop(const NavPacket& pkt);
 // Calibrated sensor data, headings, pitch/roll.
 void showDebug(const DebugPacket& pkt);
 
+// Draw a calibration progress screen and flush to display.
+//   remaining_s    — seconds left in the calibration
+//   coverage_pct   — 0-100 coverage/completeness indicator
+//   isFull         — true = soft-iron data collection, false = quick hard-iron sweep
+void showCal(uint8_t remaining_s, uint8_t coverage_pct, bool isFull);
+
 // --- Random-rect self-test --------------------------------------------------
 // Draws a random-color rectangle at a random position once per second.
 // coveragePct (1–100) controls the fraction of screen area the rect fills.

@@ -311,6 +311,99 @@ void calibrateMagnetometer(MagCalib& out, uint32_t duration_ms) {
   Serial.println("[CAL] (Bias converted to logical frame for use with axis mapping)");
 }
 
+// ----------- Non-blocking Magnetometer Calibration -----------
+// Same min/max sweep as calibrateMagnetometer(), but runs across multiple loop() calls.
+// Call magCalNBBegin() once, then magCalNBTick() each loop iteration.
+static bool     g_nbCalActive   = false;
+static uint32_t g_nbCalStart    = 0;
+static uint32_t g_nbCalDuration = 0;
+static int16_t  g_nbMinX, g_nbMaxX, g_nbMinY, g_nbMaxY, g_nbMinZ, g_nbMaxZ;
+static uint32_t g_nbSamples     = 0;
+static MagCalib g_nbResult;
+
+static constexpr float NB_EXPECTED_RANGE = 6800.0f;
+
+bool magCalNBBegin(uint32_t duration_ms) {
+  if (!mag_inited) {
+    Serial.println("[CAL-NB] Error: mag not initialized");
+    return false;
+  }
+  if (g_nbCalActive) {
+    Serial.println("[CAL-NB] Already running — stopping previous");
+    g_nbCalActive = false;
+  }
+  // Seed min/max with first reading
+  Vec3i16 first;
+  if (readMagRaw_SensorFrame(first) != ImuStatus::Ok) {
+    Serial.println("[CAL-NB] Error: initial read failed");
+    return false;
+  }
+  g_nbMinX = g_nbMaxX = first.x;
+  g_nbMinY = g_nbMaxY = first.y;
+  g_nbMinZ = g_nbMaxZ = first.z;
+  g_nbSamples    = 0;
+  g_nbCalStart   = millis();
+  g_nbCalDuration = duration_ms;
+  g_nbCalActive  = true;
+
+  Serial.print("[CAL-NB] Hard-iron sweep started, duration=");
+  Serial.print(duration_ms / 1000);
+  Serial.println("s — rotate device through all orientations");
+  return true;
+}
+
+bool magCalNBTick() {
+  if (!g_nbCalActive) return false;
+
+  uint32_t elapsed = millis() - g_nbCalStart;
+  if (elapsed >= g_nbCalDuration) {
+    // Time's up — compute result
+    float biasX = ((float)(g_nbMinX + g_nbMaxX)) / 2.0f;
+    float biasY = ((float)(g_nbMinY + g_nbMaxY)) / 2.0f;
+    float biasZ = ((float)(g_nbMinZ + g_nbMaxZ)) / 2.0f;
+
+    Vec3i16 biasSensorInt = {(int16_t)biasX, (int16_t)biasY, (int16_t)biasZ};
+    Vec3i16 biasLogical   = applyAxisMap(biasSensorInt, g_magMap);
+    g_nbResult.bias = {(float)biasLogical.x, (float)biasLogical.y, (float)biasLogical.z};
+    g_nbResult.softIron[0][0] = 1; g_nbResult.softIron[0][1] = 0; g_nbResult.softIron[0][2] = 0;
+    g_nbResult.softIron[1][0] = 0; g_nbResult.softIron[1][1] = 1; g_nbResult.softIron[1][2] = 0;
+    g_nbResult.softIron[2][0] = 0; g_nbResult.softIron[2][1] = 0; g_nbResult.softIron[2][2] = 1;
+    g_magCalibration = g_nbResult;
+    g_nbCalActive = false;
+
+    Serial.printf("[CAL-NB] Done. Samples=%lu bias=(%+.1f,%+.1f,%+.1f) logical\n",
+                  (unsigned long)g_nbSamples, g_nbResult.bias.x, g_nbResult.bias.y, g_nbResult.bias.z);
+    return true;
+  }
+
+  // Read and expand min/max
+  Vec3i16 r;
+  if (readMagRaw_SensorFrame(r) == ImuStatus::Ok) {
+    if (r.x < g_nbMinX) g_nbMinX = r.x; if (r.x > g_nbMaxX) g_nbMaxX = r.x;
+    if (r.y < g_nbMinY) g_nbMinY = r.y; if (r.y > g_nbMaxY) g_nbMaxY = r.y;
+    if (r.z < g_nbMinZ) g_nbMinZ = r.z; if (r.z > g_nbMaxZ) g_nbMaxZ = r.z;
+    g_nbSamples++;
+  }
+  return false;
+}
+
+bool magCalNBIsActive() { return g_nbCalActive; }
+
+void magCalNBGetResult(MagCalib& out) { out = g_nbResult; }
+
+void magCalNBGetProgress(uint32_t& elapsed_ms, uint32_t& remaining_ms,
+                         int& covX, int& covY, int& covZ) {
+  if (!g_nbCalActive) {
+    elapsed_ms = remaining_ms = 0;
+    covX = covY = covZ = 0;
+    return;
+  }
+  elapsed_ms   = millis() - g_nbCalStart;
+  remaining_ms = (elapsed_ms < g_nbCalDuration) ? (g_nbCalDuration - elapsed_ms) : 0;
+  covX = min(100, (int)(((float)(g_nbMaxX - g_nbMinX) / NB_EXPECTED_RANGE) * 100.0f));
+  covY = min(100, (int)(((float)(g_nbMaxY - g_nbMinY) / NB_EXPECTED_RANGE) * 100.0f));
+  covZ = min(100, (int)(((float)(g_nbMaxZ - g_nbMinZ) / NB_EXPECTED_RANGE) * 100.0f));
+}
 
 // ----------- Gyroscope Calibration -----------
 // Calibrates gyroscope bias by sampling at rest

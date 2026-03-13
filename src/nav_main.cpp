@@ -47,6 +47,11 @@ static constexpr uint32_t DIAG_INTERVAL_MS = 1000;  // 0.2 Hz sensor diagnostics
 static constexpr bool FULL_DIAG_ENABLE = false;  // set to false to disable periodic diagnostic prints
 static constexpr bool GPS_DIAG_ENABLE  = true;   // GPS position/speed/COG coherence diagnostics
 
+// ---- Calibration mode tracking -----------------------------------------------
+// cal_mode in NavPacket: 0=quick (hard-iron), 1=full (soft-iron data collection)
+static bool    gInCal    = false;
+static uint8_t gCalMode  = 0;  // 0=quick, 1=full (matches NavPacket.cal_mode encoding)
+
 // ---- Toggle states (shared between command handler and sendNavPacket) ------
 static bool gGpsPosEnabled = DEFAULT_USE_GPS_POSITION;
 static bool gGpsSpdEnabled = true;   // GPS speed source enabled (stub — always true for now)
@@ -395,10 +400,38 @@ void loop() {
     wifi::update();
     web::update();
 
-    // --- Serial commands and mag cal collection ------------------------------
+    // --- Calibration tick and completion detection ---------------------------
+    if (gInCal) {
+        if (gCalMode == 0) {
+            // Quick cal (non-blocking hard-iron sweep)
+            if (imu::magCalNBTick()) {
+                // Done — save result and return to previous nav state
+                imu::magCalNBGetResult(magCal);
+                storage::saveMagCalibration("/mag_cal.json", magCal);
+                gInCal   = false;
+                sysState = SystemState::READY;
+                Serial.println("[CAL] Quick cal saved, returning to READY");
+            }
+        } else {
+            // Full cal (soft-iron data collection via mag_cal::)
+            if (mag_cal::isCollecting()) {
+                mag_cal::logSample();
+            } else {
+                // Collection finished (auto-stopped by duration)
+                gInCal   = false;
+                sysState = SystemState::READY;
+                Serial.println("[CAL] Full cal collection done, returning to READY");
+            }
+        }
+    }
+
+    // --- Serial commands and mag cal collection (legacy serial-triggered) ----
     serial_cmd::processInput(ahrs);
     serial_cmd::updateStabilityTest(mag, accel);
-    if (mag_cal::isCollecting()) mag_cal::logSample();
+    // Note: mag_cal::logSample() is now called in the gInCal block above for menu-triggered cals.
+    // The serial_cmd path (e.g., 'collect_mag') still calls mag_cal::startCollection() directly;
+    // handle that here to avoid missing samples if triggered via serial.
+    if (!gInCal && mag_cal::isCollecting()) mag_cal::logSample();
 
     // --- Check for commands from display ------------------------------------
     handleDisplayCmd();
@@ -469,6 +502,27 @@ static void sendNavPacket(float heading, float pitch, float roll,
     flags |= (static_cast<uint8_t>(logging::getLevel()) << FLAG_LOG_LEVEL_SHIFT) & FLAG_LOG_LEVEL_MASK;
     pkt.flags = flags;
 
+    // Pack calibration progress when in CALIBRATION state
+    if (sysState == SystemState::CALIBRATION && gInCal) {
+        pkt.cal_mode = gCalMode;
+        if (gCalMode == 0) {
+            // Quick cal: progress from non-blocking mag cal state machine
+            uint32_t elapsed_ms, remaining_ms;
+            int covX, covY, covZ;
+            imu::magCalNBGetProgress(elapsed_ms, remaining_ms, covX, covY, covZ);
+            pkt.cal_remaining_s  = (uint8_t)(remaining_ms / 1000);
+            pkt.cal_coverage_pct = (uint8_t)((covX + covY + covZ) / 3);
+        } else {
+            // Full cal: progress from mag_cal collection
+            uint32_t remaining_ms = mag_cal::getRemainingMs();
+            pkt.cal_remaining_s   = (uint8_t)(remaining_ms / 1000);
+            // Spatial coverage: min axis span / max axis span × 100.
+            // Reaches 100% only when all three axes have equal range,
+            // indicating uniform spherical orientation coverage.
+            pkt.cal_coverage_pct = mag_cal::getSpatialCoverage();
+        }
+    }
+
     size_t n = navPacketToBytes(pkt, linkBuf, sizeof(linkBuf));
     if (n > 0) {
         Serial1.write(linkBuf, n);
@@ -527,11 +581,11 @@ static void handleDisplayCmd() {
                         sysState = SystemState::READY;
                         break;
                     case DisplayCmd::START_MAG_CAL:
-                        Serial.println("CMD: START_MAG_CAL");
+                        Serial.println("CMD: START_MAG_CAL (30s quick hard-iron)");
                         sysState = SystemState::CALIBRATION;
-                        imu::calibrateMagnetometer(magCal, 10000);
-                        storage::saveMagCalibration("/mag_cal.json", magCal);
-                        sysState = SystemState::READY;
+                        gInCal   = true;
+                        gCalMode = 0;
+                        imu::magCalNBBegin(30000);
                         break;
                     case DisplayCmd::START_GYRO_CAL:
                         Serial.println("CMD: START_GYRO_CAL");
@@ -582,8 +636,10 @@ static void handleDisplayCmd() {
                         break;
                     }
                     case DisplayCmd::START_FULL_CAL:
-                        Serial.println("CMD: START_FULL_CAL (120s)");
+                        Serial.println("CMD: START_FULL_CAL (120s soft-iron data collection)");
                         sysState = SystemState::CALIBRATION;
+                        gInCal   = true;
+                        gCalMode = 1;
                         mag_cal::startCollection(120000);
                         break;
                     case DisplayCmd::START_SPEED_CAL:

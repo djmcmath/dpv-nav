@@ -12,6 +12,7 @@
 #include "config.h"
 #include "drivers/display.h"
 #include "menu/menu.h"
+#include "nav/state.h"
 #include <dpvlink.h>
 
 // ---- Hardware --------------------------------------------------------------
@@ -121,6 +122,9 @@ void setup() {
     display::reinit();
     display::clear();
     Serial.println("Display device ready — waiting for nav data");
+
+    // Auto-start random text self-test (direct OLED writes, no canvas)
+    //display::startRandomTextTest(100);
 }
 
 // ===========================================================================
@@ -195,7 +199,13 @@ void loop() {
         if (now - lastDisplayMs >= DISPLAY_INTERVAL_MS) {
             lastDisplayMs = now;
 
-            if (menu::isOpen()) {
+            SystemState navState = static_cast<SystemState>(lastNav.system_state);
+            if (navState == SystemState::CALIBRATION) {
+                // Show calibration progress screen (menu not accessible during cal)
+                display::showCal(lastNav.cal_remaining_s,
+                                 lastNav.cal_coverage_pct,
+                                 lastNav.cal_mode == 1);
+            } else if (menu::isOpen()) {
                 // Menu is open — draw top row to canvas, then menu, then flush once
                 display::showNavTop(lastNav);
                 menu::render();

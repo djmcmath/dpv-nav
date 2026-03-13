@@ -12,6 +12,11 @@ static uint32_t collection_duration = 0;
 static File cal_file;
 static uint32_t sample_count = 0;
 
+// Running min/max per axis (used for span-balance coverage metric)
+static int16_t minX, maxX, minY, maxY, minZ, maxZ;
+static bool span_initialized = false;
+
+
 bool startCollection(uint32_t duration_ms) {
   if (collecting) {
     Serial.println("[MAG_CAL] Already collecting!");
@@ -38,6 +43,7 @@ bool startCollection(uint32_t duration_ms) {
   collection_start = millis();
   collection_duration = duration_ms;
   sample_count = 0;
+  span_initialized = false;
 
   Serial.println("\n=========================================================");
   Serial.println("MAGNETOMETER CALIBRATION DATA COLLECTION");
@@ -123,6 +129,42 @@ void clearData() {
   }
 }
 
+uint32_t getElapsedMs() {
+  if (!collecting) return 0;
+  return millis() - collection_start;
+}
+
+uint32_t getRemainingMs() {
+  if (!collecting) return 0;
+  uint32_t elapsed = millis() - collection_start;
+  return (elapsed < collection_duration) ? (collection_duration - elapsed) : 0;
+}
+
+uint32_t getSampleCount() { return sample_count; }
+
+uint32_t getDurationMs() { return collection_duration; }
+
+uint8_t getSpatialCoverage() {
+  // Span-balance metric: min_axis_span / max_axis_span × 100%.
+  // Requires all three axes to have grown equally (indicating spherical rotation).
+  // Returns 0 until max span exceeds a minimum threshold (2000 LSB ≈ 30 µT at
+  // 6842 LSB/µT), preventing false 100% reports during early flat-rotation where
+  // the dynamic octant center approach fires all 8 octants almost immediately.
+  if (!span_initialized) return 0;
+  int32_t spanX = (int32_t)maxX - minX;
+  int32_t spanY = (int32_t)maxY - minY;
+  int32_t spanZ = (int32_t)maxZ - minZ;
+  int32_t maxSpan = spanX;
+  if (spanY > maxSpan) maxSpan = spanY;
+  if (spanZ > maxSpan) maxSpan = spanZ;
+  if (maxSpan < 2000) return 0;  // gate: need real movement before reporting
+  int32_t minSpan = spanX;
+  if (spanY < minSpan) minSpan = spanY;
+  if (spanZ < minSpan) minSpan = spanZ;
+  uint32_t pct = (uint32_t)(minSpan * 100 / maxSpan);
+  return (uint8_t)(pct > 100 ? 100 : pct);
+}
+
 // Call this from main loop when collecting
 // Returns true if sample was logged
 bool logSample() {
@@ -140,6 +182,21 @@ bool logSample() {
   imu::Vec3i16 raw;
   if (imu::readMagRaw(raw) != imu::ImuStatus::Ok) {
     return false;
+  }
+
+  // Update running min/max
+  if (!span_initialized) {
+    minX = maxX = raw.x;
+    minY = maxY = raw.y;
+    minZ = maxZ = raw.z;
+    span_initialized = true;
+  } else {
+    if (raw.x < minX) minX = raw.x;
+    if (raw.x > maxX) maxX = raw.x;
+    if (raw.y < minY) minY = raw.y;
+    if (raw.y > maxY) maxY = raw.y;
+    if (raw.z < minZ) minZ = raw.z;
+    if (raw.z > maxZ) maxZ = raw.z;
   }
 
   // Write to file as CSV

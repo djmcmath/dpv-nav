@@ -166,13 +166,31 @@ The system supports automatic calibration with persistence to LittleFS (flash st
 - On first boot: 6-point orientation sequence (X+/X-/Y+/Y-/Z+/Z- facing down)
 - Saves bias + scale to `/calib/accel_cal.json`
 
-To force recalibration, delete JSON files from LittleFS or trigger via button (BTN2 long press = mag cal).
+To force recalibration, delete JSON files from LittleFS or use menu → CAL > Quick cal.
+
+**Menu-Triggered Calibration (non-blocking):**
+
+Both calibration modes run non-blocking from the display menu — the nav device continues sending NavPackets throughout, and the display shows a live progress screen (time remaining + coverage bar).
+
+- **Quick cal** (CAL > Quick cal): 30-second hard-iron min/max sweep. Uses `imu::magCalNBBegin(30000)` / `imu::magCalNBTick()` called each main loop iteration. Coverage = min(X,Y,Z) axis span / 6800 LSB. Saves to `/calib/mag_cal.json` on completion.
+- **Full cal** (CAL > Full cal): 120-second raw sample collection via `mag_cal::startCollection(120000)`. Stores raw CSV to `/mag_cal_samples.csv` for offline processing. Coverage = time elapsed %.
+
+**Non-blocking quick cal API** ([sensors/imu.h](src/sensors/imu.h)):
+```cpp
+imu::magCalNBBegin(30000);          // start sweep
+// in main loop:
+if (imu::magCalNBTick()) {          // returns true when done
+    imu::magCalNBGetResult(magCal); // retrieve result
+}
+// progress query:
+imu::magCalNBGetProgress(elapsed_ms, remaining_ms, covX, covY, covZ);
+```
 
 **Advanced Field Calibration (Soft-Iron):**
 
-The built-in `calibrateMagnetometer()` function only computes hard-iron offset (bias), setting soft-iron matrix to identity. For ±5° heading accuracy on a DPV with variable magnetic signature, proper soft-iron calibration is required using ellipsoid fitting:
+The quick cal (and the blocking `calibrateMagnetometer()`) only compute hard-iron offset (bias), setting soft-iron matrix to identity. For ±5° heading accuracy on a DPV with variable magnetic signature, proper soft-iron calibration is required using ellipsoid fitting:
 
-1. **Data Collection** ([util/mag_cal_collect.cpp](src/util/mag_cal_collect.cpp)): Collect raw mag samples to CSV on LittleFS during field rotation
+1. **Data Collection** ([util/mag_cal_collect.cpp](src/util/mag_cal_collect.cpp)): Menu → CAL > Full cal (120s), or serial `start_cal` command
 2. **Export Data**: Dump CSV to serial terminal and copy to PC
 3. **Ellipsoid Fitting** ([tools/mag_calibration.py](tools/mag_calibration.py)): Python script computes hard-iron + soft-iron matrix using least-squares
 4. **Import Calibration**: Upload generated `calib_mag_cal.json` to LittleFS or hardcode in `nav_main.cpp`
@@ -331,12 +349,14 @@ Modify `ImuConfig` or `AxisMap` in [nav_main.cpp](src/nav_main.cpp) before `imu:
 - See [docs/calibration-guide.md](docs/calibration-guide.md) for sensor setup details
 
 ### Modifying Calibration Parameters
-Calibration timing and sample counts are hardcoded in [nav_main.cpp](src/nav_main.cpp):
-- `imu::calibrateMagnetometer(magCal, 10000)` - 10 sec mag calibration
-- `imu::calibrateGyroscope(gyroCal, 10000)` - 10 sec gyro calibration
-- `imu::calibrateAccelerometer(accelCal, 2500)` - 2.5 sec per orientation (15 sec total)
+Calibration timing is configured at the call sites in [nav_main.cpp](src/nav_main.cpp):
+- **Quick cal (menu)**: `imu::magCalNBBegin(30000)` — 30 sec non-blocking hard-iron sweep
+- **Full cal (menu)**: `mag_cal::startCollection(120000)` — 120 sec raw sample collection
+- **Boot mag cal (first-run)**: `imu::calibrateMagnetometer(magCal, 90000)` — 90 sec blocking sweep
+- **Gyro cal (boot)**: `imu::calibrateGyroscope(gyroCal, 10000)` — 10 sec at rest
+- **Accel cal (boot)**: `imu::calibrateAccelerometer(accelCal, 2500)` — 2.5 sec per orientation (15 sec total)
 
-To force recalibration, manually delete the JSON files from LittleFS via serial commands or filesystem access.
+To force recalibration, delete the JSON files from LittleFS or use menu → CAL > Quick cal.
 
 ## Key Files Reference
 

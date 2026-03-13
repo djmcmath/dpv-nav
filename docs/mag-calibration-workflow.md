@@ -12,27 +12,32 @@ The built-in `calibrateMagnetometer()` only computes hard-iron offset (bias), se
 
 ### 1. Data Collection (ESP32)
 
-Mount the magnetometer on the DPV and collect raw samples while rotating through all orientations.
+Mount the magnetometer on the DPV in its installed position — all magnetic sources (motors, batteries, electronics) must be present and in their normal configuration during collection.
 
-The collection module ([util/mag_cal_collect.cpp](../src/util/mag_cal_collect.cpp)) provides serial commands:
+#### Method A: Menu (recommended)
 
-```
-start_cal   — Start mag calibration data collection (30 sec)
-dump_cal    — Dump collected data to serial as CSV
-clear_cal   — Clear calibration data from LittleFS
-```
-
-**Collection procedure:**
-1. Connect ESP32 via serial terminal
-2. Type `start_cal` and press Enter
-3. Immediately start rotating the DPV:
+1. Power on both devices
+2. Open menu on display device (BTN1) → **CAL > Full cal**
+3. The OLED switches to a calibration progress screen showing time remaining and a coverage bar
+4. Immediately start rotating the DPV:
    - Drive in large circles (left and right)
    - Tilt nose up and down while circling
    - Roll left and right while circling
    - Goal: trace a sphere in 3D space with the magnetometer
-4. Continue for full 30 seconds (auto-stops and saves to LittleFS)
+5. Continue for 120 seconds — the progress screen shows elapsed % and a countdown
+6. After 120 seconds the screen returns to normal navigation; data is saved to `/mag_cal_samples.csv` on LittleFS
 
-**Important:** The more complete your rotation coverage, the better the calibration.
+#### Method B: Serial commands
+
+The collection module ([util/mag_cal_collect.cpp](../src/util/mag_cal_collect.cpp)) also accepts serial commands (useful for bench testing without the display device):
+
+```
+start_cal   — Start mag calibration data collection (30 sec default)
+dump_cal    — Dump collected data to serial as CSV
+clear_cal   — Clear calibration data from LittleFS
+```
+
+**Important:** The more complete your rotation coverage, the better the calibration. Target ≥1000 samples and coverage across all orientations.
 
 ### 2. Data Export (ESP32 → PC)
 
@@ -42,7 +47,7 @@ clear_cal   — Clear calibration data from LittleFS
 4. Save as `mag_samples.csv` on your PC
 
 **Verify data quality:**
-- Should have ~3000 samples (30 sec × 100 Hz)
+- Should have 1000+ samples (120 sec collection at the main loop rate)
 - X, Y, Z values should vary widely (full rotation coverage)
 - If samples are clustered, re-run with better rotation
 

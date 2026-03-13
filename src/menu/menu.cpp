@@ -404,8 +404,7 @@ bool select() {
     }
 
     // Leaf action — for toggle items, execute but keep menu open
-    bool isToggle = (item.action == Action::DISP_MODE ||
-                     item.action == Action::DISP_SPD_ETA ||
+    bool isToggle = (item.action == Action::DISP_SPD_ETA ||
                      item.action == Action::DISP_UNITS ||
                      item.action == Action::DISP_HDG_TYPE ||
                      item.action == Action::INPUT_GPS_POS ||

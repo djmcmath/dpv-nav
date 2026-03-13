@@ -551,15 +551,13 @@ void startRandomTextTest(uint8_t coveragePct) {
     textTestCoverage = constrain(coveragePct, 1, 100);
     textTestActive = true;
     textTestLastMs = 0;
-    canvas.fillScreen(COLOR_BLACK);
-    flush();
+    oled.fillScreen(COLOR_BLACK);
     Serial.printf("[DISP] random-text test started (%u%% coverage)\n", textTestCoverage);
 }
 
 void stopRandomTextTest() {
     textTestActive = false;
-    canvas.fillScreen(COLOR_BLACK);
-    flush();
+    oled.fillScreen(COLOR_BLACK);
     Serial.println("[DISP] random-text test stopped");
 }
 
@@ -571,20 +569,83 @@ void tickRandomTextTest() {
     if (now - textTestLastMs < 1000) return;
     textTestLastMs = now;
 
-    int stringlen = 10;
+    static const int stringlen = 10;
     char str[stringlen];
     for (int i = 0; i < stringlen - 1; i++) {
         str[i] = (char)random(0x21, 0x7F);
     }
     str[stringlen - 1] = '\0';
 
-    canvas.setTextSize(2);
-    canvas.setTextColor(COLOR_WHITE, COLOR_BLACK);
-    canvas.setCursor(5, 5);
-    canvas.print(str);
-    flush();
+    oled.fillScreen(COLOR_BLACK);
+    oled.setTextSize(2);
+    oled.setTextColor(COLOR_WHITE);
+    oled.setCursor(5, 5);
+    oled.print(str);
 
     Serial.printf("[DISP] text '%s'\n", str);
+}
+
+// ===========================================================================
+// Calibration progress screen
+// Layout (128x96):
+//   y= 2  "MAG CAL"        cyan, size 1
+//   y=12  "QUICK" / "FULL" yellow, size 1
+//   y=26  "Remaining: XXXs" white, size 1
+//   y=38  time progress bar (filled = elapsed fraction)
+//   y=52  "Coverage: XX%"  white, size 1
+//   y=64  coverage bar     (filled = coverage_pct)
+//   y=80  "ROTATE DEVICE"  yellow, size 1 (blinks via second parity)
+// ===========================================================================
+void showCal(uint8_t remaining_s, uint8_t coverage_pct, bool isFull) {
+    if (!canvasReady) return;
+    canvas.fillScreen(COLOR_BLACK);
+
+    // Title
+    canvas.setTextColor(COLOR_CYAN);
+    canvas.setTextSize(1);
+    canvas.setCursor(2, 2);
+    canvas.print("MAG CAL");
+
+    // Mode label
+    canvas.setTextColor(COLOR_YELLOW);
+    canvas.setCursor(2, 12);
+    canvas.print(isFull ? "FULL (soft-iron)" : "QUICK (hard-iron)");
+
+    // Time remaining
+    char buf[24];
+    snprintf(buf, sizeof(buf), "Remaining: %3us", (unsigned)remaining_s);
+    canvas.setTextColor(COLOR_WHITE);
+    canvas.setCursor(2, 26);
+    canvas.print(buf);
+
+    // Time progress bar (y=38, h=8)
+    constexpr int BAR_X = 2, BAR_W = 124, BAR_H = 8;
+    canvas.fillRect(BAR_X, 38, BAR_W, BAR_H, COLOR_GRAY);
+    // coverage_pct serves as the primary completeness metric for both bars:
+    //   quick cal = min axis coverage (0-100%)
+    //   full cal  = time elapsed fraction (0-100%)
+    int filled = (int)(BAR_W * (int)coverage_pct / 100);
+    if (filled > BAR_W) filled = BAR_W;
+    if (filled > 0) canvas.fillRect(BAR_X, 38, filled, BAR_H, COLOR_GREEN);
+
+    // Coverage label
+    snprintf(buf, sizeof(buf), "Coverage: %3u%%", (unsigned)coverage_pct);
+    canvas.setTextColor(COLOR_WHITE);
+    canvas.setCursor(2, 52);
+    canvas.print(buf);
+
+    // Coverage bar (y=64, h=8)
+    canvas.fillRect(BAR_X, 64, BAR_W, BAR_H, COLOR_GRAY);
+    if (filled > 0) canvas.fillRect(BAR_X, 64, filled, BAR_H, COLOR_CYAN);
+
+    // "ROTATE DEVICE" reminder — blink at ~1 Hz using uptime seconds parity
+    if ((millis() / 1000) & 1) {
+        canvas.setTextColor(COLOR_YELLOW);
+        canvas.setCursor(2, 80);
+        canvas.print("ROTATE DEVICE");
+    }
+
+    flush();
 }
 
 }  // namespace display

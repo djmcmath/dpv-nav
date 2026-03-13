@@ -25,7 +25,7 @@ constexpr float    KNOTS_TO_MS      = 0.514444f;  // knots → m/s conversion fa
 // Coherence is the resultant length of unit-vector EMA of COG (0=random, 1=identical).
 constexpr float GPS_COG_EMA_ALPHA       = 0.3f;   // EMA smoothing factor (at 1 Hz: ~3-4 sample window)
 constexpr float GPS_COG_COHERENCE_THRESH = 0.85f;  // Below this, GPS speed is treated as noise
-constexpr float GPS_SOG_NOISE_FLOOR_KN  = 0.5f;   // SOG below this is certainly noise (knots)
+constexpr float GPS_SOG_NOISE_FLOOR_KN  = 0.1f;   // SOG below this is certainly noise (knots)
 constexpr float GPS_SOG_TRUST_FLOOR_KN  = 2.0f;   // SOG above this is trusted regardless of COG (knots)
 
 // Position estimation

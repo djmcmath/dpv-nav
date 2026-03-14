@@ -67,6 +67,38 @@ def fit_ellipsoid_simple(X):
     return center, radii, rotation
 
 
+def fit_circle_2d(samples_xy):
+    """
+    Fit a 2D circle to X,Y samples using algebraic least-squares.
+
+    This is the most accurate way to determine the horizontal hard-iron bias
+    (bias_x, bias_y) for heading calibration:
+    - Uses only the two axes that directly determine heading (atan2(y, x))
+    - Not affected by how samples are distributed in elevation (upper vs lower
+      hemisphere) — any azimuth-uniform flat rotation gives an accurate center
+    - Works with partial azimuth coverage as long as it spans ≥180°
+
+    Math: for each sample (x, y), the circle equation (x-cx)² + (y-cy)² = r²
+    can be rewritten as the linear system:  2cx·x + 2cy·y + F = x² + y²
+    where F = r² - cx² - cy².  Solve for (2cx, 2cy, F) by least squares.
+
+    Returns (cx, cy, r).
+    """
+    # Pre-center for numerical stability (magnetometer counts can be ~thousands)
+    offset = (np.max(samples_xy, axis=0) + np.min(samples_xy, axis=0)) / 2.0
+    xy = samples_xy - offset
+    x, y = xy[:, 0], xy[:, 1]
+
+    A = np.column_stack([x, y, np.ones_like(x)])
+    b = x**2 + y**2
+    p, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+
+    cx = p[0] / 2.0 + offset[0]
+    cy = p[1] / 2.0 + offset[1]
+    r = np.sqrt((p[0] / 2.0)**2 + (p[1] / 2.0)**2 + p[2])
+    return cx, cy, r
+
+
 def fit_ellipsoid_algebraic(X):
     """
     Algebraic ellipsoid fitting with robustness checks.
@@ -255,33 +287,69 @@ def compute_calibration(samples, flat_samples=None):
         print(f"         Rotation coverage may be incomplete.")
         print(f"         Expected span > 1000, got: X={spans[0]:.0f}, Y={spans[1]:.0f}, Z={spans[2]:.0f}")
 
-    # Try algebraic fit first
-    try:
-        center, radii, rotation = fit_ellipsoid_algebraic(samples)
-    except Exception as e:
-        print(f"\nAlgebraic fit failed: {e}")
-        print("Using simple axis-aligned method instead...")
-        center, radii, rotation = fit_ellipsoid_simple(samples)
+    if flat_samples is not None:
+        # --- Hybrid approach (flat data provided) ---
+        #
+        # The 3D ellipsoid fit cannot reliably determine bias_x/bias_y when
+        # samples are unevenly distributed in elevation (as they always are
+        # with hand-collected data): the fit minimizes sphere residuals across
+        # all samples, which pulls the center toward the denser upper-hemisphere
+        # data and leaves the horizontal plane off-center.
+        #
+        # Fix: use each data source for what it's actually good at —
+        #   bias_x, bias_y : 2D algebraic circle fit on flat rotation X,Y
+        #                    (direct measurement of horizontal circle center;
+        #                     immune to elevation-distribution bias)
+        #   bias_z         : midpoint of the 3D Z range
+        #                    (heading doesn't depend on Z for a flat device)
+        #   soft-iron      : PCA of 3D data centered on the flat-derived bias
+        #                    (3D data is well-suited for shape/rotation fit)
+        #
+        # This separates the two error sources and avoids the "3D RMS degrades"
+        # issue that occurs when the old _refine_horizontal_bias shifts the
+        # bias away from the 3D-optimum after the fact.
 
-    # Hard-iron offset is the ellipsoid center
-    bias = center
+        bias_x, bias_y, r_flat = fit_circle_2d(flat_samples[:, :2])
+        bias_z = (np.max(samples[:, 2]) + np.min(samples[:, 2])) / 2.0
+        bias = np.array([bias_x, bias_y, bias_z])
 
-    # Soft-iron correction matrix transforms ellipsoid to sphere
-    # Scale each principal axis to have the same radius (average)
-    avg_radius = np.mean(radii)
+        LSB_PER_UT = 68.42
+        print(f"\n  Bias from 2D circle fit (flat data) + 3D Z midpoint:")
+        print(f"  X: {bias_x:8.2f}  ({bias_x/LSB_PER_UT:.2f} uT)  -- from flat rotation")
+        print(f"  Y: {bias_y:8.2f}  ({bias_y/LSB_PER_UT:.2f} uT)  -- from flat rotation")
+        print(f"  Z: {bias_z:8.2f}  ({bias_z/LSB_PER_UT:.2f} uT)  -- from 3D Z range")
+        print(f"  Flat circle radius: {r_flat:.1f} counts ({r_flat/LSB_PER_UT:.2f} uT)")
 
-    # Build correction matrix: M = R * S * R^T
-    # where S is diagonal scaling matrix, R is rotation to principal axes
+        # Soft-iron from PCA of 3D data centered on the flat-derived bias.
+        # The center shift is small (~100-250 counts) relative to the ellipsoid
+        # radius (~3400 counts), so PCA still finds the correct principal axes.
+        X_centered = samples - bias
+        cov = np.cov(X_centered.T)
+        eigenvalues, eigenvectors = linalg.eigh(cov)
+        rotation = eigenvectors
+        X_aligned = X_centered @ rotation
+        radii = (np.max(X_aligned, axis=0) - np.min(X_aligned, axis=0)) / 2.0
+        avg_radius = np.mean(radii)
+        center = bias  # for diagnostics consistency
+
+    else:
+        # --- 3D-only approach (no flat data) ---
+        # Fit full ellipsoid to determine both bias and soft-iron from 3D data.
+        # NOTE: bias_x/bias_y accuracy depends on having well-balanced elevation
+        # coverage. Use the flat-rotation CSV argument for better heading accuracy.
+        try:
+            center, radii, rotation = fit_ellipsoid_algebraic(samples)
+        except Exception as e:
+            print(f"\nAlgebraic fit failed: {e}")
+            print("Using simple axis-aligned method instead...")
+            center, radii, rotation = fit_ellipsoid_simple(samples)
+
+        bias = center
+        avg_radius = np.mean(radii)
+
+    # Build soft-iron correction matrix: M = R * diag(avg_r / radii) * R^T
     scale_matrix = np.diag(avg_radius / radii)
     soft_iron = rotation @ scale_matrix @ rotation.T
-
-    # Stage 2: refine horizontal-plane hard-iron bias (optional).
-    # The global 3D ellipsoid fit is dominated by the denser upper-hemisphere
-    # samples, leaving a residual center offset in the horizontal plane that
-    # causes a sin(θ) heading error. When a dedicated flat-rotation CSV is
-    # provided, use those samples to fit a 2D circle and correct the offset.
-    if flat_samples is not None:
-        bias = _refine_horizontal_bias(flat_samples, bias, soft_iron)
 
     # Diagnostics
     info = {

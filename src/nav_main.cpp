@@ -640,7 +640,7 @@ static void handleDisplayCmd() {
                         sysState = SystemState::CALIBRATION;
                         gInCal   = true;
                         gCalMode = 1;
-                        mag_cal::startCollection(120000);
+                        mag_cal::startCollection(180000);
                         break;
                     case DisplayCmd::START_SPEED_CAL:
                         Serial.println("CMD: START_SPEED_CAL (stub)");

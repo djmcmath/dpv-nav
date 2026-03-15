@@ -59,6 +59,8 @@ Code is organized into namespaces by subsystem:
 - `ui::` - Display output (console_update for OLED/serial)
 - `logging::` - Data logging system (LittleFS-based)
 - `storage::` - Calibration persistence (JSON files in LittleFS)
+- `nvs_nav::` - Nav device runtime state persistence (ESP32 NVS via Preferences)
+- `nvs_disp::` - Display device settings persistence (ESP32 NVS via Preferences)
 
 ### Directory Structure
 
@@ -87,7 +89,8 @@ src/
 │   ├── menu.cpp/h             # Hierarchical menu: state machine, rendering, JSON load, actions
 ├── util/                      # Utilities
 │   ├── logging.cpp/h          # Data logging to LittleFS
-│   └── storage.cpp/h          # Calibration save/load (JSON)
+│   ├── storage.cpp/h          # Calibration save/load (JSON)
+│   └── nvs_state.cpp/h        # Runtime state persistence (ESP32 NVS: toggles, position)
 └── types/
     └── types.h                # Core data types (Vec3i16, Vec3f, Calib3, MagCalib, etc.)
 lib/
@@ -125,6 +128,7 @@ Key functions in `nav::`:
 - `init(baselineLat, baselineLon)` — set coordinate origin
 - `updateDR(heading_deg, speed_ms, dt)` — dead-reckoning step (call every loop)
 - `updateGPS(lat, lon)` — snap position to GPS truth (when available)
+- `setPosition(x_m, y_m)` — directly set position (used on boot to restore NVS-saved position)
 - `setHome()` / `clearHome()` — manage home waypoint
 - `distanceToHome_m()` / `bearingToHome_deg()` — range/bearing to home
 
@@ -196,6 +200,40 @@ The quick cal (and the blocking `calibrateMagnetometer()`) only compute hard-iro
 4. **Import Calibration**: Upload generated `calib_mag_cal.json` to LittleFS or hardcode in `nav_main.cpp`
 
 See [docs/mag-calibration-workflow.md](docs/mag-calibration-workflow.md) for complete procedure. This workflow is essential for real-world DPV deployment where the magnetometer is mounted on the DPV with motors, batteries, and other magnetic sources.
+
+### NVS State Persistence
+
+Runtime toggle states and estimated position are persisted to ESP32 NVS (Non-Volatile Storage) using the Arduino `Preferences` library. This is separate from LittleFS calibration data.
+
+**What is persisted:**
+
+| Variable | NVS namespace | Key | Saved when |
+|----------|--------------|-----|-----------|
+| GPS position enabled | `nav_state` | `gps_pos` | On toggle |
+| GPS speed enabled | `nav_state` | `gps_spd` | On toggle |
+| WiFi enabled | `nav_state` | `wifi` | On toggle |
+| Dive mode | `nav_state` | `dive_mode` | On toggle |
+| Log level (0/1/2) | `nav_state` | `log_level` | On cycle |
+| Estimated X position | `nav_state` | `pos_x` | Every `NVS_POS_SAVE_INTERVAL_MS` (30 s) |
+| Estimated Y position | `nav_state` | `pos_y` | Every `NVS_POS_SAVE_INTERVAL_MS` (30 s) |
+| Display mode (nav/debug) | `disp_state` | `debug_mode` | On toggle |
+| Show ETA vs speed | `disp_state` | `show_eta` | On toggle |
+| Imperial units | `disp_state` | `imperial` | On toggle |
+| True heading | `disp_state` | `true_heading` | On toggle |
+
+**On boot:** NVS state is loaded at the end of `setup()` in [nav_main.cpp](src/nav_main.cpp) (after WiFi/web server init). If NVS is empty (first boot), factory defaults are used. The restored position is applied via `nav::setPosition()`. Dive mode re-disables GPS and WiFi if it was active.
+
+**API** ([src/util/nvs_state.h](src/util/nvs_state.h)):
+```cpp
+nvs_nav::State s = nvs_nav::load();   // load (returns defaults if uninitialized)
+nvs_nav::save(s);                      // save full state (built from current globals via currentNavNvsState())
+nvs_nav::savePosition(x_m, y_m);      // save only position fields (periodic)
+
+nvs_disp::State d = nvs_disp::load(); // load display settings
+nvs_disp::save(d);                     // save display settings
+```
+
+**Position save interval:** Configurable via `NVS_POS_SAVE_INTERVAL_MS` in [config.h](src/config.h) (default 30 s). Position is also included in any full `nvs_nav::save()` call triggered by a toggle, so it's always at least as fresh as the last toggle.
 
 ### I2C / Wire Usage
 
@@ -379,6 +417,7 @@ To force recalibration, delete the JSON files from LittleFS or use menu → CAL 
 - [lib/dpvlink/dpvlink.h](lib/dpvlink/dpvlink.h) — Inter-device packet format (NavPacket, DebugPacket, DisplayCmd, PacketType discriminator)
 - [src/sensors/calib.h](src/sensors/calib.h) — Calibration application functions
 - [src/util/storage.h](src/util/storage.h) — Calibration save/load (JSON to LittleFS)
+- [src/util/nvs_state.h](src/util/nvs_state.h) — Runtime state persistence (ESP32 NVS): `nvs_nav::` (toggle states, position) and `nvs_disp::` (display settings)
 - [src/util/logging.h](src/util/logging.h) — Data logging system (CSV-like format)
 - [docs/overview.md](docs/overview.md) — Project overview, architecture, feature summary
 - [docs/user-guide.md](docs/user-guide.md) — User-facing guide: boot, display, buttons, dive workflow

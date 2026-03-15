@@ -54,3 +54,6 @@ constexpr float DEFAULT_DECLINATION_DEG  = 14.7f;   // ~14.7°E for southern Ore
 
 // Debug packet send interval (ms) — can be slower than nav packet
 constexpr uint32_t DEBUG_SEND_INTERVAL_MS = 200;  // 5 Hz
+
+// NVS position save interval (ms) — how often estimated position is persisted to NVS
+constexpr uint32_t NVS_POS_SAVE_INTERVAL_MS = 30000;  // 30 seconds

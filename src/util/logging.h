@@ -39,6 +39,9 @@ LogLevel getLevel();
 // Cycle OFF -> LOW -> HIGH -> OFF. Opens/closes files as needed.
 void cycleLevel();
 
+// Set level directly (e.g. to restore from NVS on boot). No-op if already at that level.
+void setLevel(LogLevel level);
+
 // Log one entry. No-op if level == OFF.
 void log(const LogData& d);
 

@@ -15,6 +15,7 @@
     - If no calibration files found, runs interactive calibration (30s mag sweep, 10s gyro at rest, 6-point accel)
     - GPS initialized (streams NMEA, does not block waiting for fix)
     - Flow sensor initialized (ISR-based pulse counting)
+    - **NVS state restored** — previous session's toggle states (GPS, WiFi, op mode, log level) and last estimated position are reloaded from ESP32 NVS flash
     - Display shows boot status lines: "Display...ok", "Backlight...ok", "Link...ok"
 
 3. **Quick heading sanity check**: Compare displayed heading against a phone compass or known bearing.
@@ -65,6 +66,8 @@ MENU
 
 Toggle items show their current state (e.g., "Units: m", "Op Mode: SURF") and stay open after toggling. Non-toggle items (Home, Mark, Quick cal, Full cal) execute and close the menu.
 
+All toggle states (GPS Pos, GPS Spd, WiFi, Op Mode, Log level, and all Display settings) are saved to NVS immediately on change and restored on next boot.
+
 ### Calibration Progress Screen
 
 When Quick cal or Full cal is running, the normal nav display is replaced with a dedicated calibration screen:
@@ -85,7 +88,7 @@ ROTATE DEVICE             ← blinks at 1 Hz
 - **Coverage** — for quick cal: minimum axis coverage (how completely each X/Y/Z axis has been spanned); for full cal: time elapsed as a percentage
 - The screen returns to normal navigation automatically when calibration finishes
 
-**Op Mode (Dive/Surface):** The device boots in **surface mode** with GPS and WiFi active. Before entering the water, toggle to **dive mode** via NAV > Op Mode — this disables GPS processing and turns off the WiFi radio. On surfacing, toggle back to surface mode to re-enable both.
+**Op Mode (Dive/Surface):** The device boots in the **last saved mode** (surface mode on first boot). Before entering the water, toggle to **dive mode** via NAV > Op Mode — this disables GPS processing and turns off the WiFi radio, and the selection is saved to NVS immediately. On surfacing, toggle back to surface mode to re-enable both.
 
 The menu definition is stored in `/menu.json` on LittleFS. To customize, edit `data/menu.json` and upload with `pio run -e display -t uploadfs`.
 
@@ -184,6 +187,7 @@ Key settings in [src/config.h](../src/config.h):
 | `DISPLAY_UNITS_IMPERIAL` | 0 | Units: 0 = metric (m, m/min), 1 = imperial (ft, ft/min) |
 | `ENABLE_DEBUG_PACKET` | 0 | Nav device sends DebugPacket: 0 = off, 1 = on |
 | `DEBUG_SEND_INTERVAL_MS` | 200 | Debug packet send rate in ms (5 Hz default) |
+| `NVS_POS_SAVE_INTERVAL_MS` | 30000 | How often estimated position is written to NVS (ms) |
 
 ## Troubleshooting
 

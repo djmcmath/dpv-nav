@@ -69,6 +69,11 @@ void setUseGps(bool enable) {
     useGps = enable;
 }
 
+void setPosition(float x_m, float y_m) {
+    cur_x = x_m;
+    cur_y = y_m;
+}
+
 Position getPosition() {
     Position p;
     p.x_m = cur_x;

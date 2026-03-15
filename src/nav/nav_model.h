@@ -31,6 +31,9 @@ void updateGPS(float lat, float lon);
 // Enable/disable GPS position as truth source.
 void setUseGps(bool enable);
 
+// Restore a saved position (e.g. from NVS on boot).
+void setPosition(float x_m, float y_m);
+
 // Current position in local XY and lat/lon.
 Position getPosition();
 

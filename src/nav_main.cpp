@@ -23,6 +23,7 @@
 #include "net/web_server.h"
 #include "util/serial_commands.h"
 #include "util/mag_cal_collect.h"
+#include "util/nvs_state.h"
 #include <dpvlink.h>
 
 // ---- AHRS state -----------------------------------------------------------
@@ -38,9 +39,10 @@ static Calib3    accelCal;
 
 // ---- Nav state -------------------------------------------------------------
 static SystemState sysState = SystemState::BOOT;
-static uint32_t lastLoopUs  = 0;
-static uint32_t lastSendMs  = 0;
-static uint32_t lastDiagMs  = 0;
+static uint32_t lastLoopUs    = 0;
+static uint32_t lastSendMs    = 0;
+static uint32_t lastDiagMs    = 0;
+static uint32_t lastPosSaveMs = 0;
 static constexpr uint32_t SEND_INTERVAL_MS = 100;  // 10 Hz link rate
 static constexpr uint32_t LOOP_INTERVAL_US = 10000; // 100 Hz loop rate gate
 static constexpr uint32_t DIAG_INTERVAL_MS = 1000;  // 0.2 Hz sensor diagnostics
@@ -56,9 +58,25 @@ static uint8_t gCalMode  = 0;  // 0=quick, 1=full (matches NavPacket.cal_mode en
 static bool gGpsPosEnabled = DEFAULT_USE_GPS_POSITION;
 static bool gGpsSpdEnabled = true;   // GPS speed source enabled (stub — always true for now)
 static bool gWifiEnabled   = true;   // WiFi radio enabled (surface mode default)
+static bool gDiveMode      = false;  // Dive mode active (persisted to NVS)
 
 // ---- Serial link buffer ----------------------------------------------------
 static char linkBuf[256];
+
+// ---- NVS helpers -----------------------------------------------------------
+// Build full nav NVS state from current globals (avoids stale-read-then-write).
+static nvs_nav::State currentNavNvsState() {
+    nav::Position pos = nav::getPosition();
+    nvs_nav::State s;
+    s.gps_pos   = gGpsPosEnabled;
+    s.gps_spd   = gGpsSpdEnabled;
+    s.wifi      = gWifiEnabled;
+    s.dive_mode = gDiveMode;
+    s.log_level = static_cast<uint8_t>(logging::getLevel());
+    s.pos_x     = pos.x_m;
+    s.pos_y     = pos.y_m;
+    return s;
+}
 
 // ---- Forward declarations --------------------------------------------------
 static void loadCalibration();
@@ -151,6 +169,31 @@ void setup() {
     // Placed after calibration so blocking cal doesn't starve the connection.
     wifi::init();
     web::init();
+
+    // Restore state from NVS (previous session)
+    {
+        nvs_nav::State nvsState = nvs_nav::load();
+        gGpsPosEnabled = nvsState.gps_pos;
+        gGpsSpdEnabled = nvsState.gps_spd;
+        gDiveMode      = nvsState.dive_mode;
+        nav::setUseGps(gGpsPosEnabled);
+        nav::setPosition(nvsState.pos_x, nvsState.pos_y);
+        if (nvsState.log_level > 0) {
+            logging::setLevel(static_cast<logging::LogLevel>(nvsState.log_level));
+        }
+        if (gDiveMode) {
+            gps::setEnabled(false);
+            wifi::stop();
+            gWifiEnabled = false;
+        } else {
+            gWifiEnabled = nvsState.wifi;
+            if (!gWifiEnabled) wifi::stop();
+        }
+        Serial.printf("[NVS] Restored: gps_pos=%d gps_spd=%d wifi=%d dive=%d log=%d pos=(%.1f,%.1f)\n",
+                      gGpsPosEnabled, gGpsSpdEnabled, gWifiEnabled, gDiveMode,
+                      nvsState.log_level, nvsState.pos_x, nvsState.pos_y);
+    }
+
     lastLoopUs = micros();
     Serial.println("Nav device ready");
     serial_cmd::printHelp();
@@ -297,6 +340,13 @@ void loop() {
             ld.roll_deg      = rollDeg;
             logging::log(ld);
         }
+    }
+
+    // --- Periodic NVS position save ------------------------------------------
+    if (nowMs - lastPosSaveMs >= NVS_POS_SAVE_INTERVAL_MS) {
+        lastPosSaveMs = nowMs;
+        nav::Position pos = nav::getPosition();
+        nvs_nav::savePosition(pos.x_m, pos.y_m);
     }
 
     // --- Accumulate mag stats for diagnostics --------------------------------
@@ -651,27 +701,29 @@ static void handleDisplayCmd() {
                         nav::setUseGps(gGpsPosEnabled);
                         Serial.print("CMD: TOGGLE_GPS_POS -> ");
                         Serial.println(gGpsPosEnabled ? "ON" : "OFF");
+                        nvs_nav::save(currentNavNvsState());
                         break;
                     case DisplayCmd::TOGGLE_GPS_SPD:
                         gGpsSpdEnabled = !gGpsSpdEnabled;
                         Serial.print("CMD: TOGGLE_GPS_SPD -> ");
                         Serial.println(gGpsSpdEnabled ? "ON" : "OFF");
                         // TODO: gate GPS speed selection on gGpsSpdEnabled
+                        nvs_nav::save(currentNavNvsState());
                         break;
                     case DisplayCmd::TOGGLE_WIFI:
                         gWifiEnabled = !gWifiEnabled;
                         Serial.print("CMD: TOGGLE_WIFI -> ");
                         Serial.println(gWifiEnabled ? "ON" : "OFF");
                         // TODO: call wifi::stop() / wifi::init() based on state
+                        nvs_nav::save(currentNavNvsState());
                         break;
                     case DisplayCmd::CYCLE_LOG_LEVEL:
                         logging::cycleLevel();
+                        nvs_nav::save(currentNavNvsState());
                         break;
                     case DisplayCmd::TOGGLE_OP_MODE:
-                    {
-                        static bool diveMode = false;
-                        diveMode = !diveMode;
-                        if (diveMode) {
+                        gDiveMode = !gDiveMode;
+                        if (gDiveMode) {
                             gps::setEnabled(false);
                             wifi::stop();
                             gWifiEnabled = false;
@@ -683,7 +735,7 @@ static void handleDisplayCmd() {
                             gWifiEnabled = true;
                             Serial.println("CMD: OP_MODE -> SURFACE (GPS+WiFi on)");
                         }
-                    }
+                        nvs_nav::save(currentNavNvsState());
                         break;
                     default:
                         break;

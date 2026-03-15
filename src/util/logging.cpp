@@ -186,12 +186,29 @@ void cycleLevel() {
     }
 }
 
+void setLevel(LogLevel level) {
+    if (!gReady || gLevel == level) return;
+    closeFile();
+    gLevel = level;
+    if (gLevel != LogLevel::LEVEL_OFF) {
+        openNextFile();
+    }
+}
+
 bool isLogging() {
     return gReady && gLevel != LogLevel::LEVEL_OFF;
 }
 
 void log(const LogData& d) {
     if (!gReady || gLevel == LogLevel::LEVEL_OFF || !gLogFile) return;
+
+    // LOW level logs at 1 Hz — skip calls that arrive faster than that.
+    if (gLevel == LogLevel::LEVEL_LOW) {
+        static uint32_t lastLowLogMs = 0;
+        uint32_t now = millis();
+        if (now - lastLowLogMs < 1000) return;
+        lastLowLogMs = now;
+    }
 
     // Common columns (LOW and HIGH)
     gLogFile.printf("%lu,%.2f,%.3f,%c,%.2f,%.2f,%.8f,%.8f,%c",

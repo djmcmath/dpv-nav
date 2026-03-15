@@ -1,5 +1,6 @@
 #include "menu.h"
 #include "../drivers/display.h"
+#include "../util/nvs_state.h"
 #include <Arduino.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
@@ -308,18 +309,22 @@ static void executeAction(Action act) {
         case Action::DISP_MODE:
             gSettings.debugMode = !gSettings.debugMode;
             Serial.print("[MENU] Mode: "); Serial.println(gSettings.debugMode ? "DEBUG" : "NAV");
+            nvs_disp::save({gSettings.debugMode, gSettings.showETA, gSettings.imperial, gSettings.trueHeading});
             break;
         case Action::DISP_SPD_ETA:
             gSettings.showETA = !gSettings.showETA;
             Serial.print("[MENU] Show: "); Serial.println(gSettings.showETA ? "ETA" : "SPEED");
+            nvs_disp::save({gSettings.debugMode, gSettings.showETA, gSettings.imperial, gSettings.trueHeading});
             break;
         case Action::DISP_UNITS:
             gSettings.imperial = !gSettings.imperial;
             Serial.print("[MENU] Units: "); Serial.println(gSettings.imperial ? "ft" : "m");
+            nvs_disp::save({gSettings.debugMode, gSettings.showETA, gSettings.imperial, gSettings.trueHeading});
             break;
         case Action::DISP_HDG_TYPE:
             gSettings.trueHeading = !gSettings.trueHeading;
             Serial.print("[MENU] Heading: "); Serial.println(gSettings.trueHeading ? "TRUE" : "MAG");
+            nvs_disp::save({gSettings.debugMode, gSettings.showETA, gSettings.imperial, gSettings.trueHeading});
             break;
         case Action::NAV_OP_MODE:
             gDiveMode = !gDiveMode;
@@ -341,6 +346,17 @@ void init(SendCmdFn sendFn) {
         Serial.println("[MENU] Using hardcoded default menu");
         loadDefaults();
     }
+
+    // Restore display settings from NVS
+    nvs_disp::State nvsDisp = nvs_disp::load();
+    gSettings.debugMode   = nvsDisp.debug_mode;
+    gSettings.showETA     = nvsDisp.show_eta;
+    gSettings.imperial    = nvsDisp.imperial;
+    gSettings.trueHeading = nvsDisp.true_heading;
+    Serial.printf("[NVS] Disp restored: debug=%d eta=%d imperial=%d trueHdg=%d\n",
+                  gSettings.debugMode, gSettings.showETA,
+                  gSettings.imperial, gSettings.trueHeading);
+
     stackDepth = 0;  // closed
     invalidateMenuCache();
 }

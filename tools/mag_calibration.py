@@ -552,6 +552,62 @@ def main():
     else:
         print(f"  Quality:           POOR (>5% RMS) — recollect with fuller sphere coverage")
 
+    # Heading accuracy analysis (requires flat rotation data)
+    if flat_samples is not None:
+        print("\n" + "="*60)
+        print("HEADING ACCURACY ANALYSIS (flat device)")
+        print("="*60)
+
+        LSB_PER_UT = 68.42
+
+        # Azimuth coverage of flat data (12 x 30-degree sectors)
+        centered_flat = flat_samples[:, :2] - np.array([bias[0], bias[1]])
+        azimuths = np.degrees(np.arctan2(centered_flat[:, 1], centered_flat[:, 0])) % 360.0
+        n_bins = 12
+        bin_counts = np.zeros(n_bins, dtype=int)
+        for az in azimuths:
+            bin_counts[int(az / (360.0 / n_bins)) % n_bins] += 1
+        covered_bins = np.sum(bin_counts > 0)
+        print(f"\n  Flat rotation azimuth coverage: {covered_bins}/{n_bins} sectors "
+              f"({100 * covered_bins // n_bins}%)")
+        if covered_bins < n_bins:
+            missing = [f"{i*30}-{i*30+30}deg" for i in range(n_bins) if bin_counts[i] == 0]
+            print(f"  Missing sectors: {', '.join(missing)}")
+
+        # Apply calibration to flat samples and measure calibrated circle
+        cal_flat = (soft_iron @ (flat_samples - bias).T).T
+        cx_cal = (np.max(cal_flat[:, 0]) + np.min(cal_flat[:, 0])) / 2.0
+        cy_cal = (np.max(cal_flat[:, 1]) + np.min(cal_flat[:, 1])) / 2.0
+        r_x = (np.max(cal_flat[:, 0]) - np.min(cal_flat[:, 0])) / 2.0
+        r_y = (np.max(cal_flat[:, 1]) - np.min(cal_flat[:, 1])) / 2.0
+        r_avg_2d = (r_x + r_y) / 2.0
+        center_offset = np.sqrt(cx_cal**2 + cy_cal**2)
+        roundness = min(r_x, r_y) / max(r_x, r_y) if max(r_x, r_y) > 0 else 0.0
+
+        heading_err_offset = (np.degrees(np.arcsin(min(1.0, center_offset / r_avg_2d)))
+                              if r_avg_2d > 0 else 0.0)
+        ellipticity_err = (np.degrees(np.arctan(abs(r_x - r_y) / r_avg_2d))
+                           if r_avg_2d > 0 else 0.0)
+        total_err = heading_err_offset + ellipticity_err
+
+        print(f"\n  Calibrated flat circle (counts / uT):")
+        print(f"  Center: ({cx_cal:+.1f} / {cx_cal/LSB_PER_UT:+.3f} uT,  "
+              f"{cy_cal:+.1f} / {cy_cal/LSB_PER_UT:+.3f} uT)  (ideal: 0, 0)")
+        print(f"  Radius: X={r_x:.1f} ({r_x/LSB_PER_UT:.2f} uT)  "
+              f"Y={r_y:.1f} ({r_y/LSB_PER_UT:.2f} uT)")
+        print(f"  Roundness: {roundness:.3f}  (ideal: 1.000)")
+
+        print(f"\n  Heading accuracy estimate:")
+        print(f"  From circle offset:  +/-{heading_err_offset:.1f} deg max")
+        print(f"  From ellipticity:    +/-{ellipticity_err:.1f} deg max")
+        print(f"  Total (worst case):  +/-{total_err:.1f} deg")
+        if total_err < 2.0:
+            print(f"  Rating: EXCELLENT (<2 deg expected error)")
+        elif total_err < 5.0:
+            print(f"  Rating: GOOD (2-5 deg expected error)")
+        else:
+            print(f"  Rating: POOR (>5 deg) -- recollect flat data or more sphere coverage")
+
     print("\n" + "="*60)
 
     # Save to JSON

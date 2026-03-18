@@ -9,6 +9,7 @@
             "name": "PlatformIO",
             "includePath": [
                 "D:/Documents/dpv-nav/src",
+                "C:/Users/djmcm/.platformio/packages/framework-arduinoespressif32/libraries/Preferences/src",
                 "C:/Users/djmcm/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src",
                 "C:/Users/djmcm/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src",
                 "C:/Users/djmcm/.platformio/packages/framework-arduinoespressif32/libraries/LittleFS/src",
@@ -230,7 +231,6 @@
                 "C:/Users/djmcm/.platformio/packages/framework-arduinoespressif32/libraries/I2S/src",
                 "C:/Users/djmcm/.platformio/packages/framework-arduinoespressif32/libraries/Insights/src",
                 "C:/Users/djmcm/.platformio/packages/framework-arduinoespressif32/libraries/NetBIOS/src",
-                "C:/Users/djmcm/.platformio/packages/framework-arduinoespressif32/libraries/Preferences/src",
                 "C:/Users/djmcm/.platformio/packages/framework-arduinoespressif32/libraries/RainMaker/src",
                 "C:/Users/djmcm/.platformio/packages/framework-arduinoespressif32/libraries/SD/src",
                 "C:/Users/djmcm/.platformio/packages/framework-arduinoespressif32/libraries/SD_MMC/src",
@@ -247,6 +247,7 @@
                 "limitSymbolsToIncludedHeaders": true,
                 "path": [
                     "D:/Documents/dpv-nav/src",
+                    "C:/Users/djmcm/.platformio/packages/framework-arduinoespressif32/libraries/Preferences/src",
                     "C:/Users/djmcm/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src",
                     "C:/Users/djmcm/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src",
                     "C:/Users/djmcm/.platformio/packages/framework-arduinoespressif32/libraries/LittleFS/src",
@@ -468,7 +469,6 @@
                     "C:/Users/djmcm/.platformio/packages/framework-arduinoespressif32/libraries/I2S/src",
                     "C:/Users/djmcm/.platformio/packages/framework-arduinoespressif32/libraries/Insights/src",
                     "C:/Users/djmcm/.platformio/packages/framework-arduinoespressif32/libraries/NetBIOS/src",
-                    "C:/Users/djmcm/.platformio/packages/framework-arduinoespressif32/libraries/Preferences/src",
                     "C:/Users/djmcm/.platformio/packages/framework-arduinoespressif32/libraries/RainMaker/src",
                     "C:/Users/djmcm/.platformio/packages/framework-arduinoespressif32/libraries/SD/src",
                     "C:/Users/djmcm/.platformio/packages/framework-arduinoespressif32/libraries/SD_MMC/src",

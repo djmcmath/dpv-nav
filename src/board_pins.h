@@ -1,12 +1,12 @@
 #pragma once
 
-// --- I2C bus ---
-constexpr int SDA_PIN = 23;
-constexpr int SCL_PIN = 22;
+// --- I2C bus --- Feather v1 pins
+constexpr int SDA_PIN = 23;  // if shift to feather v2, this is GPIO22
+constexpr int SCL_PIN = 22;  // if shift to feather v2, this is GPIO20
 
 // --- GPS UART (Adafruit Ultimate GPS v3 on Serial2, nav device only) ---
-constexpr int GPS_RX_PIN = 16;  // ESP32 RX <- GPS TX
-constexpr int GPS_TX_PIN = 17;  // ESP32 TX -> GPS RX
+constexpr int GPS_RX_PIN = 16;  // ESP32 RX (GPIO 16) <- GPS TX
+constexpr int GPS_TX_PIN = 17;  // ESP32 TX (GPIO 17) -> GPS RX
 
 // --- Inter-device serial link (Serial1) ---
 // Nav device uses GPIO25/26 (GPS occupies 16/17).

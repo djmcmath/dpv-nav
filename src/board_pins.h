@@ -1,6 +1,6 @@
 #pragma once
 
-// --- I2C bus --- Feather v1 pins
+// --- I2C bus for IMU --- Feather v1 pins
 constexpr int SDA_PIN = 23;  // if shift to feather v2, this is GPIO22
 constexpr int SCL_PIN = 22;  // if shift to feather v2, this is GPIO20
 
@@ -12,8 +12,8 @@ constexpr int GPS_TX_PIN = 17;  // ESP32 TX (GPIO 17) -> GPS RX
 // Nav device uses GPIO25/26 (GPS occupies 16/17).
 // Display device uses GPIO16/17 (no GPS on display board).
 #ifdef BUILD_NAV
-constexpr int LINK_TX_PIN = 25; //connect to DISPLAY's RX pin 16
-constexpr int LINK_RX_PIN = 26; //connect to DISPLAY's TX pin 17
+constexpr int LINK_TX_PIN = 25; //connect to DISPLAY's RX pin 16, pin 25 is aka A1 and DAC1.
+constexpr int LINK_RX_PIN = 26; //connect to DISPLAY's TX pin 17, pin 26 is aka A0 and DAC2
 #else  // BUILD_DISPLAY
 constexpr int LINK_TX_PIN = 17;
 constexpr int LINK_RX_PIN = 16;

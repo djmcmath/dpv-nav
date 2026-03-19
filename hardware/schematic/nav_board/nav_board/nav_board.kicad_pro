@@ -451,7 +451,7 @@
     "pinned_symbol_libs": []
   },
   "meta": {
-    "filename": "display_board.kicad_pro",
+    "filename": "nav_board.kicad_pro",
     "version": 3
   },
   "net_settings": {
@@ -473,33 +473,6 @@
         "via_diameter": 0.6,
         "via_drill": 0.3,
         "wire_width": 6
-      },
-      {
-        "bus_width": 12,
-        "line_style": 1,
-        "name": "CritSignal",
-        "pcb_color": "rgba(0, 0, 0, 0.000)",
-        "priority": 1,
-        "schematic_color": "rgb(255, 16, 255)",
-        "wire_width": 12
-      },
-      {
-        "bus_width": 18,
-        "line_style": 0,
-        "name": "Ground",
-        "pcb_color": "rgba(0, 0, 0, 0.000)",
-        "priority": 0,
-        "schematic_color": "rgb(19, 255, 34)",
-        "wire_width": 18
-      },
-      {
-        "bus_width": 18,
-        "line_style": 0,
-        "name": "Power",
-        "pcb_color": "rgba(0, 0, 0, 0.000)",
-        "priority": 2,
-        "schematic_color": "rgb(255, 0, 11)",
-        "wire_width": 18
       }
     ],
     "meta": {
@@ -507,40 +480,7 @@
     },
     "net_colors": null,
     "netclass_assignments": null,
-    "netclass_patterns": [
-      {
-        "netclass": "Default",
-        "pattern": "POWER"
-      },
-      {
-        "netclass": "Default",
-        "pattern": "+5V"
-      },
-      {
-        "netclass": "Power",
-        "pattern": "power"
-      },
-      {
-        "netclass": "Power",
-        "pattern": "+5V"
-      },
-      {
-        "netclass": "Ground",
-        "pattern": "GND"
-      },
-      {
-        "netclass": "CritSignal",
-        "pattern": "/TCS"
-      },
-      {
-        "netclass": "Default",
-        "pattern": "/DC"
-      },
-      {
-        "netclass": "CritSignal",
-        "pattern": "/SCK"
-      }
-    ]
+    "netclass_patterns": []
   },
   "pcbnew": {
     "last_paths": {
@@ -671,7 +611,7 @@
   },
   "sheets": [
     [
-      "3e37256e-2b25-4e86-94d2-6d548613571d",
+      "78b79bbc-e44a-4098-ae3b-b1371cb4fe97",
       "Root"
     ]
   ],

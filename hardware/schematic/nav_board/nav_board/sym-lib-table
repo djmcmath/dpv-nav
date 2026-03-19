@@ -1,0 +1,4 @@
+(sym_lib_table
+  (version 7)
+  (lib (name "DPVNav_Parts_Schematic_Library")(type "KiCad")(uri "D:/Documents/dpv-nav/hardware/DPVNav_Parts_Schematic_Library.kicad_sym")(options "")(descr ""))
+)

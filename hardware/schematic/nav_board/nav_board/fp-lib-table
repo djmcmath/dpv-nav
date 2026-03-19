@@ -1,0 +1,4 @@
+(fp_lib_table
+  (version 7)
+  (lib (name "DPVNav Footprint Library")(type "KiCad")(uri "D:/Documents/dpv-nav/hardware/DPVNav Footprint Library.pretty")(options "")(descr ""))
+)

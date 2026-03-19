@@ -36,7 +36,7 @@ static char txBuf[64];
 static constexpr uint32_t DISPLAY_INTERVAL_MS = 250;  // 4 Hz refresh
 static constexpr uint32_t NAV_TIMEOUT_MS      = 5000; // show "NO LINK" after 5 s
 static constexpr uint32_t COUNTER_INTERVAL_MS = 1000; // 1 Hz idle counter
-static constexpr uint32_t REINIT_INTERVAL_MS  = 30000; // periodic display reinit
+static constexpr uint32_t REINIT_INTERVAL_MS  = 30000000; // periodic display reinit
 static uint32_t lastDisplayMs  = 0;
 static uint32_t lastCounterMs  = 0;
 static uint32_t lastReinitMs   = 0;

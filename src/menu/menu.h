@@ -112,4 +112,9 @@ const DisplaySettings& settings();
 // Call whenever a NavPacket is received so menu labels stay in sync.
 void updateNavState(uint8_t flags);
 
+// Returns true if the user just selected "Speed cal" and the display device
+// should enter distance-selection mode.  Cleared by clearSpeedCalPending().
+bool isPendingSpeedCal();
+void clearSpeedCalPending();
+
 }  // namespace menu

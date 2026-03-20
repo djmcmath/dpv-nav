@@ -57,6 +57,19 @@ void showDebug(const DebugPacket& pkt);
 //   isFull         — true = soft-iron data collection, false = quick hard-iron sweep
 void showCal(uint8_t remaining_s, uint8_t coverage_pct, bool isFull);
 
+// Speed calibration screens (all flush to display).
+// Distance selection — user chooses how far they will swim.
+void showSpeedCalDistSelect(uint16_t dist_ft);
+// Waiting for flow — DPV not yet moving.
+void showSpeedCalWaiting();
+// Run in progress — show large elapsed-time counter.
+void showSpeedCalRunning(uint16_t elapsed_s, uint16_t dist_ft);
+// Accept/reject result screen.
+//   choice: 0 = RESET+ACCEPT, 1 = ACCEPT, 2 = REJECT  (highlighted item)
+void showSpeedCalResult(uint16_t dist_ft, uint16_t elapsed_s,
+                        float k_existing, float k_proposed,
+                        uint8_t choice);
+
 // --- Random-rect self-test --------------------------------------------------
 // Draws a random-color rectangle at a random position once per second.
 // coveragePct (1–100) controls the fraction of screen area the rect fills.

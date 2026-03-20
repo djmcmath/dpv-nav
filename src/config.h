@@ -57,3 +57,28 @@ constexpr uint32_t DEBUG_SEND_INTERVAL_MS = 200;  // 5 Hz
 
 // NVS position save interval (ms) — how often estimated position is persisted to NVS
 constexpr uint32_t NVS_POS_SAVE_INTERVAL_MS = 30000;  // 30 seconds
+
+// ---------------------------------------------------------------------------
+// Speed calibration thresholds
+// ---------------------------------------------------------------------------
+
+// Flow speed (m/s) above which we consider the DPV to be moving and start the run.
+// Below this on start: stay in WAITING state.
+constexpr float SPEED_CAL_START_THRESHOLD_MS  = 0.3f;   // ~0.6 kt — definite motion
+
+// Flow speed (m/s) below which we consider the DPV stopped (end of run).
+// Fraction of start threshold — catches a clean stop without false-triggering
+// on momentary deceleration mid-run.
+constexpr float SPEED_CAL_STOP_THRESHOLD_MS   = 0.08f;  // ~0.15 kt
+
+// Heading deviation (degrees) from EMA baseline that triggers end of run.
+// Only checked after SPEED_CAL_MIN_RUN_S seconds have elapsed.
+constexpr float SPEED_CAL_HEADING_STOP_DEG    = 90.0f;
+
+// Minimum run duration (seconds) before heading-change stop is checked.
+// Prevents early termination due to heading wobble at run start.
+constexpr float SPEED_CAL_MIN_RUN_S           = 30.0f;
+
+// EMA alpha for heading tracking during the speed cal run.
+// Low alpha = slow-moving reference that represents the "stable" course.
+constexpr float SPEED_CAL_HDG_EMA_ALPHA       = 0.02f;

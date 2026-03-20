@@ -24,6 +24,7 @@ static SendCmdFn gSendCmd = nullptr;
 
 static bool gDiveMode = false;  // Op mode toggle state (display-side tracking)
 static uint8_t gLogLevel = 0;  // Log level tracking (0=OFF, 1=LOW, 2=HIGH)
+static bool gSpeedCalPending = false;  // true after user selects "Speed cal"
 
 // Nav-device toggle states (updated from NavPacket flags)
 static bool gGpsPosEnabled = true;
@@ -284,8 +285,8 @@ static void executeAction(Action act) {
             Serial.println("[MENU] CAL_FULL (START_FULL_CAL)");
             break;
         case Action::CAL_SPEED:
-            if (gSendCmd) gSendCmd(DisplayCmd::START_SPEED_CAL);
-            Serial.println("[MENU] CAL_SPEED (stub)");
+            gSpeedCalPending = true;  // signal display_main to enter distance selection
+            Serial.println("[MENU] CAL_SPEED: entering distance selection");
             break;
         case Action::INPUT_GPS_POS:
             if (gSendCmd) gSendCmd(DisplayCmd::TOGGLE_GPS_POS);
@@ -498,6 +499,14 @@ void updateNavState(uint8_t flags) {
     gGpsPosEnabled = (flags & FLAG_GPS_POS_ENABLED) != 0;
     gGpsSpdEnabled = (flags & FLAG_GPS_SPD_ENABLED) != 0;
     gWifiEnabled   = (flags & FLAG_WIFI_ENABLED)    != 0;
+}
+
+bool isPendingSpeedCal() {
+    return gSpeedCalPending;
+}
+
+void clearSpeedCalPending() {
+    gSpeedCalPending = false;
 }
 
 }  // namespace menu

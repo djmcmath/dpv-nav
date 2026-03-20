@@ -648,4 +648,206 @@ void showCal(uint8_t remaining_s, uint8_t coverage_pct, bool isFull) {
     flush();
 }
 
+// ===========================================================================
+// Speed calibration screens
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Distance selection
+// Layout (128×96):
+//   y= 2  "SPEED CAL"          cyan, size 1
+//   y=14  "Set distance:"      white, size 1
+//   y=32  "  300 ft  "         yellow, size 2  (big selected value)
+//   y=58  "BTN1: change"       gray, size 1
+//   y=70  "BTN2: confirm"      gray, size 1
+// ---------------------------------------------------------------------------
+void showSpeedCalDistSelect(uint16_t dist_ft) {
+    if (!canvasReady) return;
+    canvas.fillScreen(COLOR_BLACK);
+
+    canvas.setTextSize(1);
+    canvas.setTextColor(COLOR_CYAN);
+    canvas.setCursor(2, 2);
+    canvas.print("SPEED CAL");
+
+    canvas.setTextColor(COLOR_WHITE);
+    canvas.setCursor(2, 14);
+    canvas.print("Set distance:");
+
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%u ft", (unsigned)dist_ft);
+    canvas.setTextSize(2);
+    canvas.setTextColor(COLOR_YELLOW);
+    // Center the text horizontally (each char: 12px wide at size 2)
+    int textW = (int)strlen(buf) * 12;
+    int curX  = (128 - textW) / 2;
+    if (curX < 2) curX = 2;
+    canvas.setCursor(curX, 32);
+    canvas.print(buf);
+
+    canvas.setTextSize(1);
+    canvas.setTextColor(COLOR_GRAY);
+    canvas.setCursor(2, 62);
+    canvas.print("BTN1: change");
+    canvas.setCursor(2, 74);
+    canvas.print("BTN2: confirm");
+
+    flush();
+}
+
+// ---------------------------------------------------------------------------
+// Waiting for flow
+// Layout:
+//   y= 2  "SPEED CAL"       cyan, size 1
+//   y=16  "WAITING FOR"     yellow, size 1
+//   y=28  "FLOW..."         yellow, size 1 (blinks ~1 Hz)
+//   y=52  "Start moving"    white, size 1
+//   y=64  "to begin run"    white, size 1
+// ---------------------------------------------------------------------------
+void showSpeedCalWaiting() {
+    if (!canvasReady) return;
+    canvas.fillScreen(COLOR_BLACK);
+
+    canvas.setTextSize(1);
+    canvas.setTextColor(COLOR_CYAN);
+    canvas.setCursor(2, 2);
+    canvas.print("SPEED CAL");
+
+    canvas.setTextColor(COLOR_YELLOW);
+    canvas.setCursor(2, 16);
+    canvas.print("WAITING FOR");
+    if ((millis() / 500) & 1) {
+        canvas.setCursor(2, 28);
+        canvas.print("FLOW...");
+    }
+
+    canvas.setTextColor(COLOR_WHITE);
+    canvas.setCursor(2, 50);
+    canvas.print("Start moving");
+    canvas.setCursor(2, 62);
+    canvas.print("to begin run");
+
+    flush();
+}
+
+// ---------------------------------------------------------------------------
+// Run in progress — big elapsed timer
+// Layout:
+//   y= 2   "SPEED CAL"             cyan, size 1
+//   y=14   "RUNNING"               green, size 1
+//   y=30   elapsed seconds (size 3, centered)
+//   y=72   "XXXft"                 white, size 1
+//   y=84   "Stop=slow/turn"        gray, size 1
+// ---------------------------------------------------------------------------
+void showSpeedCalRunning(uint16_t elapsed_s, uint16_t dist_ft) {
+    if (!canvasReady) return;
+    canvas.fillScreen(COLOR_BLACK);
+
+    canvas.setTextSize(1);
+    canvas.setTextColor(COLOR_CYAN);
+    canvas.setCursor(2, 2);
+    canvas.print("SPEED CAL");
+
+    canvas.setTextColor(COLOR_GREEN);
+    canvas.setCursor(2, 14);
+    canvas.print("RUNNING");
+
+    // Big timer (size 3 = 24px tall, 18px per char)
+    char timeBuf[8];
+    snprintf(timeBuf, sizeof(timeBuf), "%u", (unsigned)elapsed_s);
+    int textW = (int)strlen(timeBuf) * 18;
+    int curX  = (128 - textW) / 2;
+    if (curX < 2) curX = 2;
+    canvas.setTextSize(3);
+    canvas.setTextColor(COLOR_YELLOW);
+    canvas.setCursor(curX, 30);
+    canvas.print(timeBuf);
+
+    canvas.setTextSize(1);
+    canvas.setTextColor(COLOR_WHITE);
+    char distBuf[16];
+    snprintf(distBuf, sizeof(distBuf), "%uft target", (unsigned)dist_ft);
+    canvas.setCursor(2, 72);
+    canvas.print(distBuf);
+
+    canvas.setTextColor(COLOR_GRAY);
+    canvas.setCursor(2, 84);
+    canvas.print("Stop=slow/turn");
+
+    flush();
+}
+
+// ---------------------------------------------------------------------------
+// Accept/reject result
+// Layout (128×96):
+//   y= 2   "SPEED CAL"             cyan, size 1
+//   y=14   "XXXft  XXXs"           white, size 1
+//   y=26   "Cur: X.XXX"            white, size 1
+//   y=38   "New: X.XXX"            yellow/green, size 1
+//   y=50   separator line
+//   Three choice rows (each 14px tall):
+//   y=54   choice 0 label
+//   y=68   choice 1 label
+//   y=82   choice 2 label
+//   Highlighted choice shown in yellow with ">" prefix; others in gray.
+// ---------------------------------------------------------------------------
+void showSpeedCalResult(uint16_t dist_ft, uint16_t elapsed_s,
+                        float k_existing, float k_proposed,
+                        uint8_t choice) {
+    if (!canvasReady) return;
+    canvas.fillScreen(COLOR_BLACK);
+
+    canvas.setTextSize(1);
+
+    // Title
+    canvas.setTextColor(COLOR_CYAN);
+    canvas.setCursor(2, 2);
+    canvas.print("SPEED CAL");
+
+    // Distance and time
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%uft  %us", (unsigned)dist_ft, (unsigned)elapsed_s);
+    canvas.setTextColor(COLOR_WHITE);
+    canvas.setCursor(2, 14);
+    canvas.print(buf);
+
+    // Existing k-factor
+    snprintf(buf, sizeof(buf), "Cur: %.3f", k_existing);
+    canvas.setTextColor(COLOR_WHITE);
+    canvas.setCursor(2, 26);
+    canvas.print(buf);
+
+    // Proposed k-factor
+    snprintf(buf, sizeof(buf), "New: %.3f", k_proposed);
+    canvas.setTextColor(COLOR_YELLOW);
+    canvas.setCursor(2, 38);
+    canvas.print(buf);
+
+    // Separator
+    canvas.drawFastHLine(0, 51, 128, COLOR_CYAN);
+
+    // Choices
+    static const char* const labels[3] = {
+        "RESET+ACCEPT",
+        "ACCEPT",
+        "REJECT"
+    };
+    const int rowY[3] = { 54, 68, 82 };
+    for (int i = 0; i < 3; i++) {
+        if (i == (int)choice) {
+            canvas.setTextColor(COLOR_YELLOW);
+            canvas.setCursor(2, rowY[i]);
+            canvas.print("> ");
+            canvas.print(labels[i]);
+        } else {
+            canvas.setTextColor(COLOR_GRAY);
+            canvas.setCursor(2, rowY[i]);
+            canvas.print("  ");
+            canvas.print(labels[i]);
+        }
+    }
+
+    flush();
+}
+
 }  // namespace display

@@ -47,6 +47,21 @@ static bool     wasLinkDead    = false;
 // Track whether we need to redraw nav after menu closes
 static bool menuWasOpen = false;
 
+// ---- Speed calibration UI state --------------------------------------------
+// Phases live entirely on the display device; the nav device drives
+// cal_mode (2/3/4) in NavPackets once the run starts.
+enum class SpeedCalPhase : uint8_t {
+    NONE,         // not in speed cal
+    DIST_SELECT,  // user choosing target distance
+    WAITING,      // waiting for DPV flow to start
+    RUNNING,      // run in progress (nav drives timer via cal_mode=3)
+    RESULT,       // accept/reject result (nav drives cal_mode=4)
+};
+
+static SpeedCalPhase gSpeedCalPhase      = SpeedCalPhase::NONE;
+static uint16_t      gSpeedCalDist_ft    = 300;  // selected distance
+static uint8_t       gSpeedCalChoice     = 0;    // 0=RESET+ACCEPT, 1=ACCEPT, 2=REJECT
+
 // ---- Button debounce -------------------------------------------------------
 static constexpr uint32_t DEBOUNCE_MS   = 50;
 static constexpr uint32_t LONG_PRESS_MS = 2000;
@@ -167,9 +182,16 @@ void loop() {
     // --- Menu timeout check -------------------------------------------------
     menu::tick();
 
-    // --- If menu just closed, force full redraw -----------------------------
+    // --- If menu just closed, check for pending speed cal or force redraw ---
     if (menuWasOpen && !menu::isOpen()) {
         menuWasOpen = false;
+        if (menu::isPendingSpeedCal()) {
+            menu::clearSpeedCalPending();
+            gSpeedCalPhase   = SpeedCalPhase::DIST_SELECT;
+            gSpeedCalDist_ft = 300;  // default distance
+            gSpeedCalChoice  = 0;
+            Serial.println("[SPEED_CAL] entering distance selection");
+        }
         display::clear();
     }
     if (menu::isOpen()) {
@@ -199,12 +221,30 @@ void loop() {
         if (now - lastDisplayMs >= DISPLAY_INTERVAL_MS) {
             lastDisplayMs = now;
 
+            // Speed cal distance selection overrides everything (pre-nav-device)
+            if (gSpeedCalPhase == SpeedCalPhase::DIST_SELECT) {
+                display::showSpeedCalDistSelect(gSpeedCalDist_ft);
+            } else {
+
             SystemState navState = static_cast<SystemState>(lastNav.system_state);
             if (navState == SystemState::CALIBRATION) {
-                // Show calibration progress screen (menu not accessible during cal)
-                display::showCal(lastNav.cal_remaining_s,
-                                 lastNav.cal_coverage_pct,
-                                 lastNav.cal_mode == 1);
+                // Dispatch by cal_mode: 0/1 = mag cal, 2/3/4 = speed cal
+                if (lastNav.cal_mode <= 1) {
+                    display::showCal(lastNav.cal_remaining_s,
+                                     lastNav.cal_coverage_pct,
+                                     lastNav.cal_mode == 1);
+                } else if (lastNav.cal_mode == 2) {
+                    display::showSpeedCalWaiting();
+                } else if (lastNav.cal_mode == 3) {
+                    display::showSpeedCalRunning(lastNav.speed_cal_elapsed_s,
+                                                 lastNav.speed_cal_dist_ft);
+                } else if (lastNav.cal_mode == 4) {
+                    display::showSpeedCalResult(lastNav.speed_cal_dist_ft,
+                                                lastNav.speed_cal_elapsed_s,
+                                                lastNav.speed_cal_k_existing,
+                                                lastNav.speed_cal_k_proposed,
+                                                gSpeedCalChoice);
+                }
             } else if (menu::isOpen()) {
                 // Menu is open — draw top row to canvas, then menu, then flush once
                 display::showNavTop(lastNav);
@@ -218,6 +258,7 @@ void loop() {
                     display::showNav(lastNav);
                 }
             }
+            } // end else (not DIST_SELECT)
         }
     } else if (!everConnected) {
         // Never received nav data — show idle uptime counter at 1 Hz
@@ -255,6 +296,26 @@ static void processNavLine() {
             menu::updateNavState(lastNav.flags);
             if (!everConnected) {
                 everConnected = true;
+                display::clear();
+            }
+            // Advance speed cal phase based on cal_mode from nav device
+            SystemState ns = static_cast<SystemState>(lastNav.system_state);
+            if (ns == SystemState::CALIBRATION) {
+                if (lastNav.cal_mode == 3 &&
+                    (gSpeedCalPhase == SpeedCalPhase::WAITING ||
+                     gSpeedCalPhase == SpeedCalPhase::RUNNING)) {
+                    gSpeedCalPhase = SpeedCalPhase::RUNNING;
+                } else if (lastNav.cal_mode == 4 &&
+                           gSpeedCalPhase != SpeedCalPhase::RESULT) {
+                    gSpeedCalPhase   = SpeedCalPhase::RESULT;
+                    gSpeedCalChoice  = 0;
+                    Serial.println("[SPEED_CAL] result ready — showing accept/reject");
+                }
+            } else if (ns != SystemState::CALIBRATION &&
+                       (gSpeedCalPhase == SpeedCalPhase::WAITING ||
+                        gSpeedCalPhase == SpeedCalPhase::RUNNING)) {
+                // Nav device exited calibration unexpectedly
+                gSpeedCalPhase = SpeedCalPhase::NONE;
                 display::clear();
             }
         }
@@ -301,6 +362,14 @@ static void sendCmd(DisplayCmd cmd) {
     size_t n = displayCmdToBytes(cmd, txBuf, sizeof(txBuf));
     if (n > 0) {
         Serial1.write(txBuf, n);
+    }
+}
+
+static void sendSpeedCalStart(uint16_t dist_ft) {
+    size_t n = displaySpeedCalStartToBytes(dist_ft, txBuf, sizeof(txBuf));
+    if (n > 0) {
+        Serial1.write(txBuf, n);
+        Serial.printf("[SPEED_CAL] START_SPEED_CAL dist=%uft\n", (unsigned)dist_ft);
     }
 }
 
@@ -351,7 +420,52 @@ static void handleButtons() {
         }
     }
 
-    // --- BTN1: short press on release ----------------------------------------
+    // --- Speed cal: distance selection mode ----------------------------------
+    if (gSpeedCalPhase == SpeedCalPhase::DIST_SELECT) {
+        // BTN1: cycle distance (150→200→…→500→150)
+        if (!btn1.pressed && !btn1.fired && btn1.pressStartMs > 0) {
+            btn1.fired = true;
+            gSpeedCalDist_ft += 50;
+            if (gSpeedCalDist_ft > 500) gSpeedCalDist_ft = 150;
+            Serial.printf("[SPEED_CAL] dist select: %uft\n", (unsigned)gSpeedCalDist_ft);
+        }
+        // BTN2: confirm distance, kick off run on nav device
+        if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
+            btn2.fired = true;
+            sendSpeedCalStart(gSpeedCalDist_ft);
+            gSpeedCalPhase = SpeedCalPhase::WAITING;
+        }
+        return;
+    }
+
+    // --- Speed cal: accept/reject result mode --------------------------------
+    if (gSpeedCalPhase == SpeedCalPhase::RESULT) {
+        // BTN1: cycle through choices
+        if (!btn1.pressed && !btn1.fired && btn1.pressStartMs > 0) {
+            btn1.fired = true;
+            gSpeedCalChoice = (gSpeedCalChoice + 1) % 3;
+        }
+        // BTN2: confirm choice
+        if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
+            btn2.fired = true;
+            if (gSpeedCalChoice == 0) {
+                sendCmd(DisplayCmd::SPEED_CAL_ACCEPT_RESET);
+                Serial.println("[SPEED_CAL] choice: RESET+ACCEPT");
+            } else if (gSpeedCalChoice == 1) {
+                sendCmd(DisplayCmd::SPEED_CAL_ACCEPT);
+                Serial.println("[SPEED_CAL] choice: ACCEPT");
+            } else {
+                sendCmd(DisplayCmd::SPEED_CAL_REJECT);
+                Serial.println("[SPEED_CAL] choice: REJECT");
+            }
+            gSpeedCalPhase = SpeedCalPhase::NONE;
+            display::clear();
+        }
+        return;
+    }
+
+    // --- Normal menu handling ------------------------------------------------
+    // BTN1: short press on release
     if (!btn1.pressed && !btn1.fired && btn1.pressStartMs > 0) {
         btn1.fired = true;
         if (menu::isOpen()) {
@@ -362,7 +476,7 @@ static void handleButtons() {
         }
     }
 
-    // --- BTN2: short press on release ----------------------------------------
+    // BTN2: short press on release
     if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
         btn2.fired = true;
         if (menu::isOpen()) {

@@ -30,7 +30,19 @@ struct NavPacket {
     uint32_t uptime_ms;
     uint8_t  cal_remaining_s;   // seconds remaining in active calibration (0 otherwise)
     uint8_t  cal_coverage_pct;  // calibration coverage/completeness 0-100
-    uint8_t  cal_mode;          // 0=quick (hard-iron), 1=full (soft-iron data collection)
+    // cal_mode values:
+    //   0 = quick mag cal (hard-iron sweep)
+    //   1 = full mag cal  (soft-iron data collection)
+    //   2 = speed cal — waiting for flow to start
+    //   3 = speed cal — run in progress (timer running)
+    //   4 = speed cal — result ready, awaiting accept/reject
+    uint8_t  cal_mode;
+
+    // Speed calibration result fields (only populated when cal_mode == 2/3/4)
+    uint16_t speed_cal_dist_ft;      // selected calibration distance (feet)
+    uint16_t speed_cal_elapsed_s;    // elapsed run time (seconds)
+    float    speed_cal_k_existing;   // k-factor before this calibration run
+    float    speed_cal_k_proposed;   // computed k-factor from this run
 };
 
 // NavPacket.flags bit definitions
@@ -78,12 +90,15 @@ enum class DisplayCmd : uint8_t {
     NAV_HOME       = 11,  // select power-on position as home/destination
     MARK_POSITION  = 12,  // mark current position in logs
     START_FULL_CAL = 13,  // start 120s mag cal data collection
-    START_SPEED_CAL = 14, // start speed calibration (stub)
-    TOGGLE_GPS_POS = 15,  // toggle GPS position usage
-    TOGGLE_GPS_SPD = 16,  // toggle GPS speed usage
-    TOGGLE_WIFI    = 17,  // toggle WiFi on/off
-    CYCLE_LOG_LEVEL = 18, // cycle logging level
-    TOGGLE_OP_MODE  = 19, // toggle dive/surface mode (GPS + WiFi)
+    START_SPEED_CAL      = 14, // start speed calibration (with embedded dist_ft field)
+    TOGGLE_GPS_POS       = 15, // toggle GPS position usage
+    TOGGLE_GPS_SPD       = 16, // toggle GPS speed usage
+    TOGGLE_WIFI          = 17, // toggle WiFi on/off
+    CYCLE_LOG_LEVEL      = 18, // cycle logging level
+    TOGGLE_OP_MODE       = 19, // toggle dive/surface mode (GPS + WiFi)
+    SPEED_CAL_ACCEPT_RESET = 20, // accept result and reset history to single measurement
+    SPEED_CAL_ACCEPT       = 21, // accept result and add to rolling history
+    SPEED_CAL_REJECT       = 22, // reject result, discard measurement
 };
 
 // ---------------------------------------------------------------------------
@@ -105,3 +120,11 @@ bool   bytesToDebugPacket(const char* buf, size_t len, DebugPacket& out);
 
 size_t displayCmdToBytes(DisplayCmd cmd, char* buf, size_t bufLen);
 bool   bytesToDisplayCmd(const char* buf, size_t len, DisplayCmd& out);
+
+// Serialize START_SPEED_CAL with the selected distance embedded as "dist" field.
+// Use this instead of displayCmdToBytes() when initiating a speed calibration run.
+size_t displaySpeedCalStartToBytes(uint16_t dist_ft, char* buf, size_t bufLen);
+
+// Extract the "dist" field from a parsed START_SPEED_CAL command buffer.
+// Returns 300 (default) if the field is absent.
+uint16_t parseSpeedCalDist(const char* buf, size_t len);

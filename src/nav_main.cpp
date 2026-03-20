@@ -24,6 +24,7 @@
 #include "util/serial_commands.h"
 #include "util/mag_cal_collect.h"
 #include "util/nvs_state.h"
+#include "util/speed_cal.h"
 #include <dpvlink.h>
 
 // ---- AHRS state -----------------------------------------------------------
@@ -50,9 +51,26 @@ static constexpr bool FULL_DIAG_ENABLE = false;  // set to false to disable peri
 static constexpr bool GPS_DIAG_ENABLE  = true;   // GPS position/speed/COG coherence diagnostics
 
 // ---- Calibration mode tracking -----------------------------------------------
-// cal_mode in NavPacket: 0=quick (hard-iron), 1=full (soft-iron data collection)
+// cal_mode in NavPacket:
+//   0 = quick mag cal (hard-iron)
+//   1 = full mag cal  (soft-iron collection)
+//   2 = speed cal — waiting for flow
+//   3 = speed cal — run in progress
+//   4 = speed cal — result ready, awaiting display accept/reject
 static bool    gInCal    = false;
-static uint8_t gCalMode  = 0;  // 0=quick, 1=full (matches NavPacket.cal_mode encoding)
+static uint8_t gCalMode  = 0;
+
+// ---- Speed calibration state ------------------------------------------------
+static uint16_t gSpeedCalDist_ft     = 300;    // target distance selected by user
+static uint32_t gSpeedCalStartMs     = 0;      // millis() when run started
+static uint32_t gSpeedCalPulseTotal  = 0;      // pulses accumulated during run
+static float    gSpeedCalHdgSinEMA   = 0.0f;
+static float    gSpeedCalHdgCosEMA   = 0.0f;
+static bool     gSpeedCalHdgPrimed   = false;
+// Result values — populated when run ends, sent until display acknowledges
+static float    gSpeedCalKExisting   = 0.0f;
+static float    gSpeedCalKProposed   = 0.0f;
+static uint16_t gSpeedCalElapsedS    = 0;
 
 // ---- Toggle states (shared between command handler and sendNavPacket) ------
 static bool gGpsPosEnabled = DEFAULT_USE_GPS_POSITION;
@@ -462,7 +480,7 @@ void loop() {
                 sysState = SystemState::READY;
                 Serial.println("[CAL] Quick cal saved, returning to READY");
             }
-        } else {
+        } else if (gCalMode == 1) {
             // Full cal (soft-iron data collection via mag_cal::)
             if (mag_cal::isCollecting()) {
                 mag_cal::logSample();
@@ -472,7 +490,94 @@ void loop() {
                 sysState = SystemState::READY;
                 Serial.println("[CAL] Full cal collection done, returning to READY");
             }
+        } else if (gCalMode == 2) {
+            // Speed cal — WAITING: watch for flow to exceed start threshold
+            float flowSpd = flow::getSpeed_ms();
+            if (flowSpd >= SPEED_CAL_START_THRESHOLD_MS) {
+                // Flow detected — start the run
+                gCalMode             = 3;
+                gSpeedCalStartMs     = millis();
+                gSpeedCalPulseTotal  = 0;
+                gSpeedCalHdgPrimed   = false;
+                Serial.printf("[SPEED_CAL] Run started, target %uft\n",
+                              (unsigned)gSpeedCalDist_ft);
+            }
+        } else if (gCalMode == 3) {
+            // Speed cal — RUNNING: accumulate pulses, watch stop conditions
+            gSpeedCalPulseTotal += flow::getLastPulseCount();
+            uint32_t elapsedMs  = millis() - gSpeedCalStartMs;
+            float    elapsedS   = elapsedMs / 1000.0f;
+
+            // Update heading EMA (circular, handles 0°/360° wrap)
+            float hdgRad = headingDeg * (float)(M_PI / 180.0);
+            if (!gSpeedCalHdgPrimed) {
+                gSpeedCalHdgSinEMA = sinf(hdgRad);
+                gSpeedCalHdgCosEMA = cosf(hdgRad);
+                gSpeedCalHdgPrimed = true;
+            } else {
+                gSpeedCalHdgSinEMA += SPEED_CAL_HDG_EMA_ALPHA *
+                                      (sinf(hdgRad) - gSpeedCalHdgSinEMA);
+                gSpeedCalHdgCosEMA += SPEED_CAL_HDG_EMA_ALPHA *
+                                      (cosf(hdgRad) - gSpeedCalHdgCosEMA);
+            }
+
+            // --- Stop conditions ---
+            bool runDone = false;
+
+            // 1) Flow drops: DPV has stopped
+            if (flow::getSpeed_ms() < SPEED_CAL_STOP_THRESHOLD_MS) {
+                runDone = true;
+                Serial.println("[SPEED_CAL] Stop: flow dropped");
+            }
+
+            // 2) After minimum run time, large heading deviation signals end
+            if (!runDone && elapsedS >= SPEED_CAL_MIN_RUN_S) {
+                float emaHdgRad = atan2f(gSpeedCalHdgSinEMA, gSpeedCalHdgCosEMA);
+                float diffRad   = hdgRad - emaHdgRad;
+                // Normalise to [-π, π]
+                while (diffRad >  (float)M_PI) diffRad -= 2.0f * (float)M_PI;
+                while (diffRad < -(float)M_PI) diffRad += 2.0f * (float)M_PI;
+                if (fabsf(diffRad) * (180.0f / (float)M_PI) >= SPEED_CAL_HEADING_STOP_DEG) {
+                    runDone = true;
+                    Serial.printf("[SPEED_CAL] Stop: heading change %.1f° after %.1fs\n",
+                                  fabsf(diffRad) * (180.0f / (float)M_PI), elapsedS);
+                }
+            }
+
+            if (runDone && elapsedS >= 5.0f) {
+                // Compute proposed k-factor
+                // Formula: k_new = total_pulses / (dist_m * 60 * 1000 * cross_section_m2)
+                // This is derived from:
+                //   speed_ms = (freq_hz / k) / 60 / 1000 / cross_section_m2
+                //   where freq_hz = total_pulses / elapsed_s, speed_ms = dist_m / elapsed_s
+                //   elapsed_s cancels → k = total_pulses / (dist_m * 60 * 1000 * cross_section)
+                float distM  = gSpeedCalDist_ft * 0.3048f;
+                float k_new  = (float)gSpeedCalPulseTotal /
+                               (distM * 60.0f * 1000.0f * FLOW_CROSS_SECTION_M2);
+
+                // Load current history for the existing average
+                speed_cal::History hist = speed_cal::load();
+                float k_existing = speed_cal::averageK(hist, FLOW_K_FACTOR);
+
+                gSpeedCalKExisting = k_existing;
+                gSpeedCalKProposed = k_new;
+                gSpeedCalElapsedS  = (elapsedS > 65535.0f) ? 65535 :
+                                     (uint16_t)elapsedS;
+
+                gCalMode = 4;  // transition to RESULT state
+                Serial.printf("[SPEED_CAL] Result: %upulses dist=%.1fm t=%.1fs "
+                              "k_exist=%.4f k_new=%.4f\n",
+                              (unsigned)gSpeedCalPulseTotal, distM, elapsedS,
+                              k_existing, k_new);
+            }
+            // If run ended too quickly (< 5 s), abort back to WAITING
+            else if (runDone) {
+                gCalMode = 2;
+                Serial.println("[SPEED_CAL] Run too short, returning to WAITING");
+            }
         }
+        // cal_mode == 4 (RESULT): no tick needed; nav device just keeps broadcasting
+        // result fields in NavPacket until display sends accept/reject command.
     }
 
     // --- Serial commands and mag cal collection (legacy serial-triggered) ----
@@ -562,14 +667,25 @@ static void sendNavPacket(float heading, float pitch, float roll,
             imu::magCalNBGetProgress(elapsed_ms, remaining_ms, covX, covY, covZ);
             pkt.cal_remaining_s  = (uint8_t)(remaining_ms / 1000);
             pkt.cal_coverage_pct = (uint8_t)((covX + covY + covZ) / 3);
-        } else {
+        } else if (gCalMode == 1) {
             // Full cal: progress from mag_cal collection
             uint32_t remaining_ms = mag_cal::getRemainingMs();
             pkt.cal_remaining_s   = (uint8_t)(remaining_ms / 1000);
-            // Spatial coverage: min axis span / max axis span × 100.
-            // Reaches 100% only when all three axes have equal range,
-            // indicating uniform spherical orientation coverage.
-            pkt.cal_coverage_pct = mag_cal::getSpatialCoverage();
+            pkt.cal_coverage_pct  = mag_cal::getSpatialCoverage();
+        } else {
+            // Speed cal (cal_mode 2/3/4): pack run data
+            pkt.speed_cal_dist_ft    = gSpeedCalDist_ft;
+            pkt.speed_cal_k_existing = gSpeedCalKExisting;
+            pkt.speed_cal_k_proposed = gSpeedCalKProposed;
+            if (gCalMode == 3) {
+                // Running: send live elapsed time
+                uint32_t elapsedMs = millis() - gSpeedCalStartMs;
+                pkt.speed_cal_elapsed_s = (elapsedMs / 1000 > 65535) ?
+                                          65535 : (uint16_t)(elapsedMs / 1000);
+            } else {
+                // Waiting (2) or result (4): send recorded elapsed
+                pkt.speed_cal_elapsed_s = gSpeedCalElapsedS;
+            }
         }
     }
 
@@ -692,9 +808,58 @@ static void handleDisplayCmd() {
                         gCalMode = 1;
                         mag_cal::startCollection(180000);
                         break;
-                    case DisplayCmd::START_SPEED_CAL:
-                        Serial.println("CMD: START_SPEED_CAL (stub)");
-                        // TODO: implement flow meter speed calibration
+                    case DisplayCmd::START_SPEED_CAL: {
+                        gSpeedCalDist_ft = parseSpeedCalDist(cmdBuf, cmdPos);
+                        Serial.printf("CMD: START_SPEED_CAL dist=%uft\n",
+                                      (unsigned)gSpeedCalDist_ft);
+                        // Load current k-factor average for reporting
+                        {
+                            speed_cal::History hist = speed_cal::load();
+                            gSpeedCalKExisting = speed_cal::averageK(hist, FLOW_K_FACTOR);
+                        }
+                        gSpeedCalKProposed   = gSpeedCalKExisting;  // no proposal yet
+                        gSpeedCalElapsedS    = 0;
+                        gSpeedCalPulseTotal  = 0;
+                        gSpeedCalHdgPrimed   = false;
+                        sysState = SystemState::CALIBRATION;
+                        gInCal   = true;
+                        gCalMode = 2;  // WAITING
+                        break;
+                    }
+                    case DisplayCmd::SPEED_CAL_ACCEPT_RESET: {
+                        Serial.println("CMD: SPEED_CAL_ACCEPT_RESET");
+                        speed_cal::History hist{};
+                        speed_cal::addMeasurement(hist, gSpeedCalKProposed);
+                        speed_cal::save(hist);
+                        // Apply new k-factor immediately
+                        flow::setConfig({ gSpeedCalKProposed,
+                                          FLOW_CROSS_SECTION_M2,
+                                          FLOW_AVG_PERIOD_S });
+                        Serial.printf("[SPEED_CAL] k-factor reset to %.4f\n",
+                                      gSpeedCalKProposed);
+                        gInCal   = false;
+                        sysState = SystemState::READY;
+                        break;
+                    }
+                    case DisplayCmd::SPEED_CAL_ACCEPT: {
+                        Serial.println("CMD: SPEED_CAL_ACCEPT");
+                        speed_cal::History hist = speed_cal::load();
+                        speed_cal::addMeasurement(hist, gSpeedCalKProposed);
+                        speed_cal::save(hist);
+                        float newK = speed_cal::averageK(hist, FLOW_K_FACTOR);
+                        flow::setConfig({ newK,
+                                          FLOW_CROSS_SECTION_M2,
+                                          FLOW_AVG_PERIOD_S });
+                        Serial.printf("[SPEED_CAL] k-factor updated to %.4f (avg of %d)\n",
+                                      newK, (int)hist.count);
+                        gInCal   = false;
+                        sysState = SystemState::READY;
+                        break;
+                    }
+                    case DisplayCmd::SPEED_CAL_REJECT:
+                        Serial.println("CMD: SPEED_CAL_REJECT — discarding result");
+                        gInCal   = false;
+                        sysState = SystemState::READY;
                         break;
                     case DisplayCmd::TOGGLE_GPS_POS:
                         gGpsPosEnabled = !gGpsPosEnabled;

@@ -47,6 +47,13 @@ size_t navPacketToBytes(const NavPacket& pkt, char* buf, size_t bufLen) {
         doc["cp"] = pkt.cal_coverage_pct;
         doc["cm"] = pkt.cal_mode;
     }
+    // Speed cal fields — only serialize during speed calibration (cal_mode 2/3/4)
+    if (pkt.cal_mode >= 2) {
+        doc["sd"] = pkt.speed_cal_dist_ft;
+        doc["se"] = pkt.speed_cal_elapsed_s;
+        doc["sk"] = pkt.speed_cal_k_existing;
+        doc["sp"] = pkt.speed_cal_k_proposed;
+    }
 
     size_t n = serializeJson(doc, buf, bufLen - 1);
     if (n == 0 || n >= bufLen - 1) return 0;
@@ -73,10 +80,35 @@ bool bytesToNavPacket(const char* buf, size_t len, NavPacket& out) {
     out.gps_fix_quality  = doc["gq"]  | (uint8_t)0;
     out.gps_satellites   = doc["gs"]  | (uint8_t)0;
     out.uptime_ms        = doc["up"]  | (uint32_t)0;
-    out.cal_remaining_s  = doc["cr"]  | (uint8_t)0;
-    out.cal_coverage_pct = doc["cp"]  | (uint8_t)0;
-    out.cal_mode         = doc["cm"]  | (uint8_t)0;
+    out.cal_remaining_s      = doc["cr"]  | (uint8_t)0;
+    out.cal_coverage_pct     = doc["cp"]  | (uint8_t)0;
+    out.cal_mode             = doc["cm"]  | (uint8_t)0;
+    out.speed_cal_dist_ft    = doc["sd"]  | (uint16_t)0;
+    out.speed_cal_elapsed_s  = doc["se"]  | (uint16_t)0;
+    out.speed_cal_k_existing = doc["sk"]  | 0.0f;
+    out.speed_cal_k_proposed = doc["sp"]  | 0.0f;
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Speed calibration start command with embedded distance
+// ---------------------------------------------------------------------------
+size_t displaySpeedCalStartToBytes(uint16_t dist_ft, char* buf, size_t bufLen) {
+    JsonDocument doc;
+    doc["cmd"]  = static_cast<uint8_t>(DisplayCmd::START_SPEED_CAL);
+    doc["dist"] = dist_ft;
+
+    size_t n = serializeJson(doc, buf, bufLen - 1);
+    if (n == 0 || n >= bufLen - 1) return 0;
+    buf[n]     = '\n';
+    buf[n + 1] = '\0';
+    return n + 1;
+}
+
+uint16_t parseSpeedCalDist(const char* buf, size_t len) {
+    JsonDocument doc;
+    if (deserializeJson(doc, buf, len)) return 300;
+    return doc["dist"] | (uint16_t)300;
 }
 
 // ---------------------------------------------------------------------------

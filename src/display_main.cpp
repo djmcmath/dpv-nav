@@ -298,7 +298,11 @@ static void processNavLine() {
                 everConnected = true;
                 display::clear();
             }
-            // Advance speed cal phase based on cal_mode from nav device
+            // Advance speed cal phase based on cal_mode from nav device.
+            // Only advance forward — never reset backward on a single packet.
+            // A stale NavPacket (sent before nav processed START_SPEED_CAL) would
+            // show ns=READY while the display is already in WAITING, so we must
+            // not reset on a single non-CALIBRATION packet.
             SystemState ns = static_cast<SystemState>(lastNav.system_state);
             if (ns == SystemState::CALIBRATION) {
                 if (lastNav.cal_mode == 3 &&
@@ -311,12 +315,6 @@ static void processNavLine() {
                     gSpeedCalChoice  = 0;
                     Serial.println("[SPEED_CAL] result ready — showing accept/reject");
                 }
-            } else if (ns != SystemState::CALIBRATION &&
-                       (gSpeedCalPhase == SpeedCalPhase::WAITING ||
-                        gSpeedCalPhase == SpeedCalPhase::RUNNING)) {
-                // Nav device exited calibration unexpectedly
-                gSpeedCalPhase = SpeedCalPhase::NONE;
-                display::clear();
             }
         }
     } else if (ptype == PacketType::DEBUG) {

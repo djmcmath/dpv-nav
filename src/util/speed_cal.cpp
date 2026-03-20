@@ -10,6 +10,8 @@ History load() {
     History h{};
     h.count = 0;
 
+    if (!LittleFS.exists(SPEED_CAL_FILE)) return h;
+
     File f = LittleFS.open(SPEED_CAL_FILE, "r");
     if (!f) return h;
 

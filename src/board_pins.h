@@ -27,19 +27,19 @@ constexpr int FLOW_SENSOR_PIN = 34;  // Started with GPIO 25 (ADC2) but conflict
 constexpr int BUTTON1_PIN = 27;
 constexpr int BUTTON2_PIN = 13;
 
-// --- OLED display (SSD1351 on SPI, direct-wired to ESP32) ---
-constexpr int OLED_CS   = 15;  // TCS
-constexpr int OLED_DC   = 33;
-constexpr int OLED_RST  = 22; // Was on 32, but that was getting a reset every 10s; some kind of polling conflict, maybe.
+// --- TFT display (ST7789 320x240 on SPI, direct-wired to ESP32) ---
+constexpr int TFT_CS    = 15;
+constexpr int TFT_DC    = 33;
+constexpr int TFT_RST   = 22; // Shared with SCL_PIN — verify wiring if I2C conflicts occur
 
 // SPI bus pins (ESP32 default VSPI)
 constexpr int DISP_SCK  = 5;
 constexpr int DISP_MOSI = 18;
 constexpr int DISP_MISO = 19;  // NC for display
 
-// --- MCP23017 GPIO Expander (on shared I2C bus) ---
-constexpr uint8_t MCP23017_ADDR = 0x20;  // A0=A1=A2=GND
-constexpr uint8_t MCP_BACKLIGHT_PIN = 2;  // GPA2 — display backlight
+// --- MCP23017 GPIO Expander — removed; display board now uses EyeSPI direct ---
+// constexpr uint8_t MCP23017_ADDR = 0x20;
+// constexpr uint8_t MCP_BACKLIGHT_PIN = 2;
 
 
 /*

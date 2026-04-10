@@ -54,6 +54,8 @@ size_t navPacketToBytes(const NavPacket& pkt, char* buf, size_t bufLen) {
         doc["sk"] = pkt.speed_cal_k_existing;
         doc["sp"] = pkt.speed_cal_k_proposed;
     }
+    // Boot flags — always send (display needs them for boot status screen)
+    if (pkt.boot_flags) doc["bf"] = pkt.boot_flags;
 
     size_t n = serializeJson(doc, buf, bufLen - 1);
     if (n == 0 || n >= bufLen - 1) return 0;
@@ -87,6 +89,7 @@ bool bytesToNavPacket(const char* buf, size_t len, NavPacket& out) {
     out.speed_cal_elapsed_s  = doc["se"]  | (uint16_t)0;
     out.speed_cal_k_existing = doc["sk"]  | 0.0f;
     out.speed_cal_k_proposed = doc["sp"]  | 0.0f;
+    out.boot_flags           = doc["bf"]  | (uint8_t)0;
     return true;
 }
 

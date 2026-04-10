@@ -1,12 +1,10 @@
 // display_main.cpp — Display device entry point
-// Receives NavPacket from nav device over Serial1, renders on SSD1351 OLED.
+// Receives NavPacket from nav device over Serial1, renders on ST7789 TFT (320x240).
 // Reads buttons and sends DisplayCmd back to nav device.
 // Menu system: BTN1 opens/cycles, BTN2 selects, 15s idle timeout.
 // Both buttons held 2s: display reinit (SPI re-init + clear, no reboot).
 
 #include <Arduino.h>
-#include <Wire.h>
-#include <Adafruit_MCP23X17.h>
 
 #include "board_pins.h"
 #include "config.h"
@@ -14,10 +12,6 @@
 #include "menu/menu.h"
 #include "nav/state.h"
 #include <dpvlink.h>
-
-// ---- Hardware --------------------------------------------------------------
-static Adafruit_MCP23X17 mcp;
-static bool mcpOk = false;
 
 // ---- Link receive state ----------------------------------------------------
 static char rxBuf[256];
@@ -41,8 +35,16 @@ static uint32_t lastDisplayMs  = 0;
 static uint32_t lastCounterMs  = 0;
 static uint32_t lastReinitMs   = 0;
 static uint32_t idleCounter    = 0;
-static bool     everConnected  = false;
 static bool     wasLinkDead    = false;
+
+// ---- Boot phase state machine -----------------------------------------------
+// WAITING  → loop shows "Waiting..." counter until first NavPacket
+// STATUS   → shows nav-device boot results for BOOT_STATUS_HOLD_MS, then DONE
+// DONE     → normal nav/cal/menu rendering
+enum class BootPhase : uint8_t { WAITING, STATUS, DONE };
+static BootPhase gBootPhase     = BootPhase::WAITING;
+static uint32_t  gBootShowMs    = 0;
+static constexpr uint32_t BOOT_STATUS_HOLD_MS = 4000;
 
 // Track whether we need to redraw nav after menu closes
 static bool menuWasOpen = false;
@@ -101,45 +103,20 @@ void setup() {
     pinMode(BUTTON1_PIN, INPUT);
     pinMode(BUTTON2_PIN, INPUT);
 
-    // OLED display — init before I2C (matches working init order)
+    // TFT display (ST7789)
     bool displayOk = display::init();
     Serial.print("Display init: ");
     Serial.println(displayOk ? "OK" : "FAIL");
 
-    // I2C bus + MCP23017 backlight
-    Wire.begin(SDA_PIN, SCL_PIN);
-    mcpOk = mcp.begin_I2C(MCP23017_ADDR, &Wire);
-    if (mcpOk) {
-        mcp.pinMode(MCP_BACKLIGHT_PIN, OUTPUT);
-        mcp.digitalWrite(MCP_BACKLIGHT_PIN, HIGH);
-        Serial.println("Backlight ON");
-    } else {
-        Serial.println("WARNING: MCP23017 not found — skipping backlight");
-    }
-
-    // Self-test: R/G/B color fills then summary text
-    display::reinit(); 
-    display::clear();
+    // Self-test: R/G/B color fills + "DPV-Nav" splash
     display::selfTest();
-    delay(500);
-
-    // Boot status lines
     display::clear();
-    display::statusLine("Display", displayOk);
-    display::statusLine("Backlight", mcpOk);
-    display::statusLine("Link", false);
-    delay(500);
 
     // Initialize menu system
     menu::init(sendCmd);
 
-    // Re-init display after all hardware setup (I2C/MCP init can disrupt SPI state)
     display::reinit();
-    display::clear();
     Serial.println("Display device ready — waiting for nav data");
-
-    // Auto-start random text self-test (direct OLED writes, no canvas)
-    //display::startRandomTextTest(100);
 }
 
 // ===========================================================================
@@ -203,19 +180,48 @@ void loop() {
     if (now - lastReinitMs >= REINIT_INTERVAL_MS) {
         lastReinitMs = now;
         display::reinit();
-        // reinit re-pushes the canvas buffer, so display content is restored
+        // reinit re-initializes SSD controller and SPI speed
     }
 
     // --- Update display -------------------------------------------------------
     // Skip normal rendering while any self-test is running
     if (display::isRandomRectTestActive() || display::isRandomTextTestActive()) return;
 
+    if (gBootPhase == BootPhase::WAITING) {
+        // No nav contact yet — show animated "Waiting..." counter at 1 Hz
+        if (now - lastCounterMs >= COUNTER_INTERVAL_MS) {
+            lastCounterMs = now;
+            idleCounter++;
+            char buf[22];
+            snprintf(buf, sizeof(buf), "Waiting... %lus", (unsigned long)idleCounter);
+            display::drawText(4, 44, buf, 0x07E0, 1);
+            display::flush();
+        }
+        return;
+    }
+
+    if (gBootPhase == BootPhase::STATUS) {
+        // Show boot status screen until hold time expires; re-render at 4 Hz
+        // to keep it visible (display::showBootStatus was already called on first packet).
+        if (now - lastDisplayMs >= DISPLAY_INTERVAL_MS) {
+            lastDisplayMs = now;
+            display::showBootStatus(lastNav.boot_flags);
+        }
+        if (now - gBootShowMs >= BOOT_STATUS_HOLD_MS) {
+            gBootPhase = BootPhase::DONE;
+            wasLinkDead = false;
+            display::clear();
+        }
+        return;
+    }
+
+    // --- BootPhase::DONE — normal operation ----------------------------------
     bool linkAlive = navValid && (now - lastNavMs < NAV_TIMEOUT_MS);
 
     if (linkAlive) {
-        // Transitioning from dead → alive: wipe the "NO LINK" screen
         if (wasLinkDead) {
             wasLinkDead = false;
+            display::clear();
         }
         // Live data — render at 4 Hz
         if (now - lastDisplayMs >= DISPLAY_INTERVAL_MS) {
@@ -246,7 +252,7 @@ void loop() {
                                                 gSpeedCalChoice);
                 }
             } else if (menu::isOpen()) {
-                // Menu is open — draw top row to canvas, then menu, then flush once
+                // Menu is open — draw top row, then menu overlay, then flush (no-op)
                 display::showNavTop(lastNav);
                 menu::render();
                 display::flush();
@@ -260,18 +266,8 @@ void loop() {
             }
             } // end else (not DIST_SELECT)
         }
-    } else if (!everConnected) {
-        // Never received nav data — show idle uptime counter at 1 Hz
-        if (now - lastCounterMs >= COUNTER_INTERVAL_MS) {
-            lastCounterMs = now;
-            idleCounter++;
-            char buf[22];
-            snprintf(buf, sizeof(buf), "Waiting... %lus", (unsigned long)idleCounter);
-            display::drawText(4, 44, buf, 0x07E0, 1);
-            display::flush();
-        }
     } else {
-        // Was connected but link dropped
+        // Link dropped
         if (!wasLinkDead) {
             wasLinkDead = true;
             display::clear();
@@ -294,9 +290,10 @@ static void processNavLine() {
             navValid  = true;
             lastNavMs = millis();
             menu::updateNavState(lastNav.flags);
-            if (!everConnected) {
-                everConnected = true;
-                display::clear();
+            if (gBootPhase == BootPhase::WAITING) {
+                gBootPhase  = BootPhase::STATUS;
+                gBootShowMs = millis();
+                display::showBootStatus(lastNav.boot_flags);
             }
             // Advance speed cal phase based on cal_mode from nav device.
             // Only advance forward — never reset backward on a single packet.
@@ -321,10 +318,6 @@ static void processNavLine() {
         if (bytesToDebugPacket(rxBuf, rxPos, lastDebug)) {
             debugValid = true;
             lastNavMs = millis();
-            if (!everConnected) {
-                everConnected = true;
-                display::clear();
-            }
         }
     }
 }

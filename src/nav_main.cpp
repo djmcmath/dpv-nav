@@ -44,11 +44,14 @@ static uint32_t lastLoopUs    = 0;
 static uint32_t lastSendMs    = 0;
 static uint32_t lastDiagMs    = 0;
 static uint32_t lastPosSaveMs = 0;
-static constexpr uint32_t SEND_INTERVAL_MS = 100;  // 10 Hz link rate
-static constexpr uint32_t LOOP_INTERVAL_US = 10000; // 100 Hz loop rate gate
-static constexpr uint32_t DIAG_INTERVAL_MS = 1000;  // 0.2 Hz sensor diagnostics
+static uint32_t lastFlowLogMs = 0;
+static constexpr uint32_t SEND_INTERVAL_MS     = 100;   // 10 Hz link rate
+static constexpr uint32_t LOOP_INTERVAL_US     = 10000; // 100 Hz loop rate gate
+static constexpr uint32_t DIAG_INTERVAL_MS     = 1000;  // 1 Hz sensor diagnostics
+static constexpr uint32_t FLOW_LOG_INTERVAL_MS = 250;   // 4 Hz flow debug logging
 static constexpr bool FULL_DIAG_ENABLE = false;  // set to false to disable periodic diagnostic prints
 static constexpr bool GPS_DIAG_ENABLE  = true;   // GPS position/speed/COG coherence diagnostics
+static constexpr bool FLOW_LOG_ENABLE  = false;   // set to false to disable flow debug logging
 
 // ---- Calibration mode tracking -----------------------------------------------
 // cal_mode in NavPacket:
@@ -71,6 +74,9 @@ static bool     gSpeedCalHdgPrimed   = false;
 static float    gSpeedCalKExisting   = 0.0f;
 static float    gSpeedCalKProposed   = 0.0f;
 static uint16_t gSpeedCalElapsedS    = 0;
+
+// ---- Boot status flags (set during setup, sent in every NavPacket) ---------
+static uint8_t gBootFlags = 0;
 
 // ---- Toggle states (shared between command handler and sendNavPacket) ------
 static bool gGpsPosEnabled = DEFAULT_USE_GPS_POSITION;
@@ -150,13 +156,15 @@ void setup() {
         sysState = SystemState::ERROR;
     } else {
         Serial.println("IMU init OK");
+        gBootFlags |= BOOT_IMU_OK;
 
-        // Load or run calibration
+        // Load or run calibration (sets BOOT_*_CAL_OK flags)
         loadCalibration();
 
         // GPS
         if (gps::init()) {
             Serial.println("GPS init OK");
+            gBootFlags |= BOOT_GPS_OK;
         } else {
             Serial.println("WARNING: GPS init failed");
         }
@@ -455,6 +463,16 @@ void loop() {
         mStatN = 0;  // reset for next window
     }
 
+    // --- Flow sensor debug at 4 Hz -----------------------------------------
+    if (FLOW_LOG_ENABLE && (nowMs - lastFlowLogMs >= FLOW_LOG_INTERVAL_MS)) {
+        lastFlowLogMs = nowMs;
+        Serial.printf("[FLOW] pulses=%u  freq=%.2f Hz  raw=%.4f lpm  speed=%.4f m/s\n",
+                      flow::getLastPulseCount(),
+                      flow::getFrequency_hz(),
+                      flow::getFlowRate_lpm(),
+                      flow::getSpeed_ms());
+    }
+
 #if ENABLE_DEBUG_PACKET
     // --- Send DebugPacket at debug rate ------------------------------------
     static uint32_t lastDebugSendMs = 0;
@@ -600,6 +618,7 @@ static void loadCalibration() {
     // Magnetometer
     if (storage::loadMagCalibration("/mag_cal.json", magCal)) {
         imu::setMagCalibration(magCal);
+        gBootFlags |= BOOT_MAG_CAL_OK;
         Serial.println("Mag calibration loaded from LittleFS");
     } else {
         Serial.println("No mag calibration found — running min/max sweep (90 s)");
@@ -610,9 +629,12 @@ static void loadCalibration() {
     // Gyroscope
     if (storage::loadCalib3("/gyro_cal.json", gyroCal)) {
         imu::setGyroCalibration(gyroCal);
+        gBootFlags |= BOOT_GYRO_CAL_OK;
         Serial.println("Gyro calibration loaded from LittleFS");
     } else {
+        delay(2500);  //give the user a second to realize what's happened
         Serial.println("No gyro calibration found — sampling at rest (10 s)");
+        delay(2500);  //give the user a second to realize what's happened
         imu::calibrateGyroscope(gyroCal, 10000);
         storage::saveCalib3("/gyro_cal.json", gyroCal);
     }
@@ -620,9 +642,12 @@ static void loadCalibration() {
     // Accelerometer
     if (storage::loadCalib3("/accel_cal.json", accelCal)) {
         imu::setAccelCalibration(accelCal);
+        gBootFlags |= BOOT_ACCEL_CAL_OK;
         Serial.println("Accel calibration loaded from LittleFS");
     } else {
+        delay(2500);  //give the user a second to realize what's happened
         Serial.println("No accel calibration found — 6-point cal");
+        delay(2500);  //give the user a second to realize what's happened
         imu::calibrateAccelerometer(accelCal, 2500);
         storage::saveCalib3("/accel_cal.json", accelCal);
     }
@@ -655,7 +680,8 @@ static void sendNavPacket(float heading, float pitch, float roll,
     if (gWifiEnabled)   flags |= FLAG_WIFI_ENABLED;
     if (gGpsSpdEnabled) flags |= FLAG_GPS_SPD_ENABLED;
     flags |= (static_cast<uint8_t>(logging::getLevel()) << FLAG_LOG_LEVEL_SHIFT) & FLAG_LOG_LEVEL_MASK;
-    pkt.flags = flags;
+    pkt.flags      = flags;
+    pkt.boot_flags = gBootFlags;
 
     // Pack calibration progress when in CALIBRATION state
     if (sysState == SystemState::CALIBRATION && gInCal) {

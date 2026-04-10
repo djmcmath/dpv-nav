@@ -43,7 +43,18 @@ struct NavPacket {
     uint16_t speed_cal_elapsed_s;    // elapsed run time (seconds)
     float    speed_cal_k_existing;   // k-factor before this calibration run
     float    speed_cal_k_proposed;   // computed k-factor from this run
+
+    // Boot status flags — set once during nav device setup(), sent in every packet.
+    // Display uses these to show the boot results screen after first link contact.
+    uint8_t boot_flags;  // see BOOT_* constants below
 };
+
+// NavPacket.boot_flags bit definitions
+constexpr uint8_t BOOT_IMU_OK       = 0x01;  // IMU init succeeded
+constexpr uint8_t BOOT_GPS_OK       = 0x02;  // GPS init succeeded
+constexpr uint8_t BOOT_MAG_CAL_OK   = 0x04;  // mag calibration loaded from flash
+constexpr uint8_t BOOT_GYRO_CAL_OK  = 0x08;  // gyro calibration loaded from flash
+constexpr uint8_t BOOT_ACCEL_CAL_OK = 0x10;  // accel calibration loaded from flash
 
 // NavPacket.flags bit definitions
 constexpr uint8_t FLAG_TRUE_HEADING    = 0x01;  // 1 = true heading, 0 = magnetic

@@ -7,7 +7,7 @@ struct DebugPacket;
 
 namespace display {
 
-// Initialize SPI bus and SSD1351 OLED.  Call once during setup.
+// Initialize SPI bus and ST7789 TFT (320x240 landscape).  Call once during setup.
 bool init();
 
 // Cycle through solid color fills to verify display is working.
@@ -50,6 +50,11 @@ void showNavTop(const NavPacket& pkt);
 // Draw the full debug screen to canvas and flush to display.
 // Calibrated sensor data, headings, pitch/roll.
 void showDebug(const DebugPacket& pkt);
+
+// Draw the nav-device boot status screen and flush to display.
+// Shows pass/fail for each subsystem (IMU, GPS, cal files).
+// boot_flags uses the BOOT_* bit constants from dpvlink.h.
+void showBootStatus(uint8_t boot_flags);
 
 // Draw a calibration progress screen and flush to display.
 //   remaining_s    — seconds left in the calibration

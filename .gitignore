@@ -4,3 +4,6 @@ firmware/build/
 .claude/
 nul
 *.lck
+*.zip
+*.log
+*.tar.gz

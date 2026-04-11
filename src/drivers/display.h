@@ -4,6 +4,7 @@
 
 struct NavPacket;
 struct DebugPacket;
+struct CalProgressPacket;
 
 namespace display {
 
@@ -61,6 +62,12 @@ void showBootStatus(uint8_t boot_flags);
 //   coverage_pct   — 0-100 coverage/completeness indicator
 //   isFull         — true = soft-iron data collection, false = quick hard-iron sweep
 void showCal(uint8_t remaining_s, uint8_t coverage_pct, bool isFull);
+
+// Draw the bin-coverage calibration grid screen and flush to display.
+// Shows a color-coded heading × elevation grid (black/red/yellow/green per bin).
+//   pkt     — CalProgressPacket with bin counts and totals
+//   title   — short title string ("BASELINE CAL" or "MOUNTED CAL")
+void showCalGrid(const struct CalProgressPacket& pkt, const char* title);
 
 // Speed calibration screens (all flush to display).
 // Distance selection — user chooses how far they will swim.

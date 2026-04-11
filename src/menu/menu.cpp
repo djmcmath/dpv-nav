@@ -102,10 +102,10 @@ static void loadDefaults() {
     auto& cal = submenus[2];
     strncpy(cal.title, "Cal", MENU_LABEL_LEN);
     cal.count = 4;
-    strncpy(cal.items[0].label, "Quick cal", MENU_LABEL_LEN);
-    cal.items[0].action = Action::CAL_QUICK; cal.items[0].submenuIdx = -1;
-    strncpy(cal.items[1].label, "Full cal", MENU_LABEL_LEN);
-    cal.items[1].action = Action::CAL_FULL; cal.items[1].submenuIdx = -1;
+    strncpy(cal.items[0].label, "Baseline", MENU_LABEL_LEN);
+    cal.items[0].action = Action::CAL_BASELINE; cal.items[0].submenuIdx = -1;
+    strncpy(cal.items[1].label, "Mounted", MENU_LABEL_LEN);
+    cal.items[1].action = Action::CAL_MOUNTED; cal.items[1].submenuIdx = -1;
     strncpy(cal.items[2].label, "Speed cal", MENU_LABEL_LEN);
     cal.items[2].action = Action::CAL_SPEED; cal.items[2].submenuIdx = -1;
     strncpy(cal.items[3].label, "..", MENU_LABEL_LEN);
@@ -276,13 +276,13 @@ static void executeAction(Action act) {
             if (gSendCmd) gSendCmd(DisplayCmd::MARK_POSITION);
             Serial.println("[MENU] MARK_POSITION");
             break;
-        case Action::CAL_QUICK:
-            if (gSendCmd) gSendCmd(DisplayCmd::START_MAG_CAL);
-            Serial.println("[MENU] CAL_QUICK (START_MAG_CAL)");
+        case Action::CAL_BASELINE:
+            if (gSendCmd) gSendCmd(DisplayCmd::START_BASELINE_CAL);
+            Serial.println("[MENU] CAL_BASELINE (START_BASELINE_CAL)");
             break;
-        case Action::CAL_FULL:
-            if (gSendCmd) gSendCmd(DisplayCmd::START_FULL_CAL);
-            Serial.println("[MENU] CAL_FULL (START_FULL_CAL)");
+        case Action::CAL_MOUNTED:
+            if (gSendCmd) gSendCmd(DisplayCmd::START_MOUNTED_CAL);
+            Serial.println("[MENU] CAL_MOUNTED (START_MOUNTED_CAL)");
             break;
         case Action::CAL_SPEED:
             gSpeedCalPending = true;  // signal display_main to enter distance selection

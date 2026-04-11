@@ -85,6 +85,10 @@ static bool tftReady = false;
 // Boot status line Y cursor
 static int bootLineY = 0;
 
+// Cal grid: track whether static layout (title, labels) has been drawn for
+// the current cal session.  Reset by clear() so each new session starts fresh.
+static bool g_calGridStaticDrawn = false;
+
 // ---------------------------------------------------------------------------
 // Nav mode layout constants
 // ---------------------------------------------------------------------------
@@ -154,6 +158,7 @@ void selfTest() {
 
 void clear() {
     invalidateNavCache();
+    g_calGridStaticDrawn = false;  // next showCalGrid call redraws static elements
     tft.fillScreen(COLOR_BLACK);
     delay(50);
     bootLineY = 0;
@@ -164,7 +169,8 @@ void reinit() {
     tft.setRotation(rotation);
     tft.setSPISpeed(SPI_CLOCK_HZ);
     delay(50);
-    invalidateNavCache();  // display is blank after reinit; force full redraw
+    invalidateNavCache();
+    g_calGridStaticDrawn = false;  // display is blank after reinit; force full redraw
     Serial.println("[DISP] reinit complete");
 }
 
@@ -1009,6 +1015,156 @@ void showSpeedCalResult(uint16_t dist_ft, uint16_t elapsed_s,
             tft.setCursor(4, rowY[i]);
             tft.print("  ");
             tft.print(labels[i]);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bin-coverage calibration grid
+// Layout (320×240):
+//   y=0..19   — title row
+//   y=20..35  — heading labels (N NE E SE S SW W NW N NE E SE)
+//   y=36..195 — bin grid (elevation rows × heading columns, color-coded)
+//   y=196..215 — elevation labels on left edge
+//   y=216..239 — status row ("X/60 bins green" or "DONE — Saving CSV...")
+// ---------------------------------------------------------------------------
+void showCalGrid(const CalProgressPacket& pkt, const char* title) {
+    const bool isMounted = (pkt.cal_type == (uint8_t)CalType::MOUNTED);
+    const int HDG_COLS   = 12;
+    const int ELEV_ROWS  = isMounted ? 3 : 5;
+    const int GRID_X     = 28;
+    const int GRID_Y     = 36;
+    const int COL_W      = 24;
+    const int ROW_H      = isMounted ? 50 : 30;  // 3 rows→50px, 5 rows→30px
+    const int GRID_H     = ROW_H * ELEV_ROWS;
+    const int STATUS_Y   = GRID_Y + GRID_H + 8;
+
+    // --- Static layout: draw only once per cal session to avoid full-screen flicker.
+    // clear() resets g_calGridStaticDrawn so the next session redraws from scratch.
+    if (!g_calGridStaticDrawn) {
+        tft.fillScreen(COLOR_BLACK);
+
+        // Title
+        tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
+        tft.setTextSize(2);
+        tft.setCursor(4, 2);
+        tft.print(title);
+
+        // Heading labels (N, NE, E … repeating across 12 cols)
+        const char* hdgLabels[12] = { "N","NE","E","SE","S","SW","W","NW","N","NE","E","SE" };
+        tft.setTextSize(1);
+        tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+        for (int c = 0; c < HDG_COLS; c++) {
+            tft.setCursor(GRID_X + c * COL_W + 2, 22);
+            tft.print(hdgLabels[c]);
+        }
+
+        // Elevation labels (left column)
+        const char* elevLabels5[5] = { "+60", "+30", "  0", "-30", "-60" };
+        const char* elevLabels3[3] = { "+30", "  0", "-30" };
+        const char** elevLabels = isMounted ? elevLabels3 : elevLabels5;
+        tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+        for (int r = 0; r < ELEV_ROWS; r++) {
+            tft.setCursor(0, GRID_Y + r * ROW_H + ROW_H / 2 - 4);
+            tft.print(elevLabels[r]);
+        }
+
+        g_calGridStaticDrawn = true;
+    }
+
+    // --- Bin cells ---
+    // Each cell is drawn with a FULL fillRect(cx, cy, COL_W, ROW_H) covering the
+    // entire cell rectangle including its border pixels.  This means every frame
+    // the previous white highlight border is automatically overwritten by the cell
+    // color — no prev-bin tracking needed.  The current-bin white border is then
+    // drawn on top after all cells are filled.
+    for (int r = 0; r < ELEV_ROWS; r++) {
+        for (int c = 0; c < HDG_COLS; c++) {
+            int binIdx = r * HDG_COLS + c;
+            uint8_t cnt = (binIdx < pkt.bins_total) ? pkt.bin_counts[binIdx] : 0;
+
+            uint16_t color;
+            if (cnt >= MAG_CAL_BIN_GREEN_THRESHOLD)       color = COLOR_GREEN;
+            else if (cnt >= MAG_CAL_BIN_YELLOW_THRESHOLD) color = COLOR_YELLOW;
+            else if (cnt > 0)                              color = COLOR_RED;
+            else                                           color = 0x1082;  // very dark gray
+
+            int cx = GRID_X + c * COL_W;
+            int cy = GRID_Y + r * ROW_H;
+            tft.fillRect(cx, cy, COL_W, ROW_H, color);  // full cell — erases old border
+
+            // Sample count in non-green cells (drawn inside cell, away from border)
+            if (cnt > 0 && cnt < MAG_CAL_BIN_GREEN_THRESHOLD) {
+                tft.setTextSize(1);
+                tft.setTextColor(COLOR_BLACK, color);
+                tft.setCursor(cx + 4, cy + ROW_H / 2 - 4);
+                tft.print(cnt);
+            }
+        }
+    }
+
+    // --- Current-orientation highlight: white border on active bin ---
+    // Drawn after all cells so it's always on top.  The next frame's cell fillRect
+    // for this bin will overwrite this border when/if the device moves.
+    if (pkt.current_bin >= 0 && pkt.current_bin < pkt.bins_total) {
+        int r = pkt.current_bin / HDG_COLS;
+        int c = pkt.current_bin % HDG_COLS;
+        tft.drawRect(GRID_X + c * COL_W, GRID_Y + r * ROW_H, COL_W, ROW_H, COLOR_WHITE);
+    }
+
+    // --- Status + orientation row (clear then redraw each frame) ---
+    tft.fillRect(0, STATUS_Y - 2, 320, 46, COLOR_BLACK);  // clear both status lines
+
+    if (pkt.complete) {
+        tft.setTextSize(2);
+        tft.setTextColor(COLOR_GREEN, COLOR_BLACK);
+        tft.setCursor(4, STATUS_Y);
+        tft.print("DONE - Saving CSV...");
+    } else {
+        // Line 1: bin count (left), completion is row-weighted so may finish before all bins green
+        tft.setTextSize(2);
+        char sbuf[16];
+        snprintf(sbuf, sizeof(sbuf), "%d/%d bins", pkt.bins_green, pkt.bins_total);
+        tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+        tft.setCursor(4, STATUS_Y);
+        tft.print(sbuf);
+
+        // Line 2: fit quality when available, orientation otherwise.
+        // Once fit_valid, the heading error estimate is more actionable than
+        // the raw orientation readout (which the bin grid already shows visually).
+        if (pkt.fit_valid) {
+            // Colour-code by estimated heading error
+            uint16_t fcol = (pkt.fit_hdg_err_deg < 3.0f) ? COLOR_GREEN
+                          : (pkt.fit_hdg_err_deg < 7.0f) ? COLOR_YELLOW
+                          : COLOR_RED;
+            char fbuf[20];
+            snprintf(fbuf, sizeof(fbuf), "Fit:\xB1%.1f\xB0", pkt.fit_hdg_err_deg);
+            tft.setTextSize(2);
+            tft.setTextColor(fcol, COLOR_BLACK);
+            tft.setCursor(4, STATUS_Y + 20);
+            tft.print(fbuf);
+            // Stability suffix: blank = converging, "~" = nearly stable, "OK" = stable
+            if (pkt.fit_delta < 0.5f) {
+                tft.setTextColor(COLOR_GREEN, COLOR_BLACK);
+                tft.print(" OK");
+            } else if (pkt.fit_delta < 2.0f) {
+                tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
+                tft.print("  ~");
+            }
+        } else {
+            // Orientation readout until enough samples for a valid fit
+            float hdg   = pkt.cur_hdg_deg;
+            float pitch = pkt.cur_pitch_deg;
+            if (hdg < 0.0f) hdg += 360.0f;
+            if (hdg >= 360.0f) hdg -= 360.0f;
+            static const char* dirs[8] = { "N","NE","E","SE","S","SW","W","NW" };
+            int didx = (int)((hdg + 22.5f) / 45.0f) % 8;
+            char obuf[14];
+            snprintf(obuf, sizeof(obuf), "%s %+.0f\xB0", dirs[didx], pitch);
+            tft.setTextSize(2);
+            tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
+            tft.setCursor(4, STATUS_Y + 20);
+            tft.print(obuf);
         }
     }
 }

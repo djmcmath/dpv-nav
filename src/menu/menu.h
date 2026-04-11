@@ -25,8 +25,8 @@ enum class Action : uint8_t {
     NAV_OUTBOUND,
     NAV_HOME,
     NAV_MARK,
-    CAL_QUICK,
-    CAL_FULL,
+    CAL_BASELINE,       // bin-aware baseline (off-scooter) cal
+    CAL_MOUNTED,        // bin-aware mounted (on-scooter) cal
     CAL_SPEED,
     INPUT_GPS_POS,
     INPUT_GPS_SPD,

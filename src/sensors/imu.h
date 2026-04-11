@@ -6,6 +6,9 @@
 #include <Wire.h>
 #include "calib.h"  // For MagCalib struct
 
+// Forward declaration — CalProgressPacket defined in dpvlink.h
+struct CalProgressPacket;
+
 namespace imu {
 
 //struct Vec3i16 { int16_t x, y, z; };
@@ -64,7 +67,7 @@ void calibrateMagnetometer(MagCalib& out, uint32_t duration_ms = 30000);
 void calibrateGyroscope(Calib3& out, uint32_t duration_ms = 10000);
 void calibrateAccelerometer(Calib3& out, uint32_t sample_duration_ms = 1500);
 
-// --- Non-blocking magnetometer calibration (hard-iron sweep) ---
+// --- Non-blocking magnetometer calibration (hard-iron sweep, legacy) ---
 // Use these from a main loop so other work (NavPacket sends, display) keeps running.
 // Call magCalNBBegin() once, then magCalNBTick() each loop iteration.
 // magCalNBTick() returns true when calibration is complete; call magCalNBGetResult() then.
@@ -75,5 +78,37 @@ void   magCalNBGetResult(MagCalib& out);
 // Progress: elapsed_ms, remaining_ms, coverage 0-100 per axis (min of 3 = overall)
 void   magCalNBGetProgress(uint32_t& elapsed_ms, uint32_t& remaining_ms,
                            int& covX, int& covY, int& covZ);
+
+// --- Bin-aware magnetometer calibration collection ---
+// Used for both Baseline cal (60 bins, full sphere) and Mounted cal (36 bins, limited range).
+// Samples are collected from raw sensor + AHRS pitch/heading to bin them by orientation.
+// Once a bin is green (>= MAG_CAL_BIN_GREEN_THRESHOLD samples), new samples are
+// rejected for that bin to avoid skewing the fit with duplicate data.
+// Caller provides pitch_deg (from AHRS accel) and heading_deg (from AHRS yaw).
+//
+// Usage:
+//   magBinCalBegin(isMounted);           // start collection
+//   // in main loop:
+//   magBinCalTick(pitch_deg, heading_deg, rawMag);  // add one sample
+//   if (magBinCalIsComplete()) { ... }   // all bins green
+//   // retrieve:
+//   magBinCalGetProgress(pkt);           // fill CalProgressPacket
+//   magBinCalDumpCSV(file);              // write samples to open LittleFS File
+//   magBinCalEnd();                      // clean up
+
+void   magBinCalBegin(bool isMounted);
+// Add one sample; pitch_deg from AHRS, heading_deg from AHRS, rawMag in logical frame (post-axis-map).
+// Must be the output of readMagRaw() — NOT readMagRaw_SensorFrame().  The calibration JSON is
+// applied in logical frame at runtime, so samples stored here must also be in logical frame.
+// Returns true if sample was accepted (bin not yet green)
+bool   magBinCalTick(float pitch_deg, float heading_deg, const Vec3i16& rawMagLogical);
+bool   magBinCalIsActive();
+bool   magBinCalIsComplete();   // true when all bins green
+// Fill CalProgressPacket with current bin state
+void   magBinCalGetProgress(struct CalProgressPacket& pkt);
+// Write raw samples as CSV to an already-open File object
+// Format: mx,my,mz (raw sensor counts, one per line)
+void   magBinCalDumpCSV(void* filePtr);  // void* to avoid #include <LittleFS.h> here
+void   magBinCalEnd();
 
 }

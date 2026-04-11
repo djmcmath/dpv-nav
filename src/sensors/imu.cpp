@@ -5,6 +5,9 @@
 #include <Arduino.h>
 #include "imu.h"
 #include <math.h>
+#include "../config.h"
+#include <LittleFS.h>
+#include <dpvlink.h>
 //#include "i2c.h"
 
 // No more extern globals — each sensor keeps its own internal calibration state,
@@ -403,6 +406,371 @@ void magCalNBGetProgress(uint32_t& elapsed_ms, uint32_t& remaining_ms,
   covX = min(100, (int)(((float)(g_nbMaxX - g_nbMinX) / NB_EXPECTED_RANGE) * 100.0f));
   covY = min(100, (int)(((float)(g_nbMaxY - g_nbMinY) / NB_EXPECTED_RANGE) * 100.0f));
   covZ = min(100, (int)(((float)(g_nbMaxZ - g_nbMinZ) / NB_EXPECTED_RANGE) * 100.0f));
+}
+
+// ---------------------------------------------------------------------------
+// Incremental 2-D ellipse fitter (live solution quality during bin cal)
+// ---------------------------------------------------------------------------
+// Model: A*xn^2 + C*yn^2 + D*xn + E*yn = 1  (axis-aligned ellipse, XY plane)
+// where (xn, yn) = calibration-applied counts / FIT_NORM.
+//
+// Maintains the 4×4 normal equations incrementally so we can solve at any
+// time without re-iterating over stored samples.  Calling magFit2DSolve()
+// (once per CalProgressPacket, ~2 Hz) costs only a 4×4 Gauss-Jordan solve —
+// microseconds on ESP32.
+//
+// For baseline cal with identity calibration loaded: fitter sees raw counts
+// in µT-normalised space — estimates how elliptical the raw data is.
+// For mounted cal with baseline cal loaded: fitter sees base-corrected counts
+// — estimates the mounting residual ellipticity and expected heading error.
+// ---------------------------------------------------------------------------
+
+static constexpr float FIT_NORM = 4096.0f;   // normalise counts to ~unit range
+
+struct MagFit2D {
+    // Running sums for symmetric 4×4 XtX matrix.
+    // Feature order: [xn², yn², xn, yn]
+    float S_x4,  S_x2y2, S_y4;       // XtX [0,0] [0,1] [1,1]
+    float S_x3,  S_x2y;              // XtX [0,2] [0,3]
+    float S_xy2, S_y3;               // XtX [1,2] [1,3]
+    float S_x2,  S_xy,   S_y2;      // XtX [2,2] [2,3] [3,3] — also Xtb[0..1]
+    float S_x,   S_y;               // also Xtb[2..3]
+    uint32_t n;
+
+    // Current solution
+    float A, C, D, E;               // ellipse coefficients
+    float cx_norm, cy_norm;          // ellipse centre (normalised space)
+    float rx_norm, ry_norm;          // semi-axes (normalised space)
+    float hdg_err_deg;               // estimated heading error from ellipticity
+    float alg_rms;                   // algebraic RMS residual (dimensionless)
+    bool  valid;                     // true once a valid solution exists
+
+    // Stability: centre shift since previous solve (normalised space)
+    float prev_cx, prev_cy;
+    float delta;                     // converges toward 0 as data stabilises
+};
+
+static MagFit2D g_magFit{};
+
+static void magFit2DReset() {
+    memset(&g_magFit, 0, sizeof(g_magFit));
+}
+
+// Add one sample.  Apply current g_magCalibration (bias + soft-iron, X and Y
+// rows only) before accumulating so the fitter operates in calibrated space.
+// With identity cal loaded: fitter sees raw counts. With base cal loaded: sees
+// base-corrected residual.  In both cases FIT_NORM normalises to ~unit range.
+static void magFit2DAdd(const Vec3i16& raw) {
+    // Apply calibration (same transform as readMag(), skipping Z output)
+    float xc = raw.x - g_magCalibration.bias.x;
+    float yc = raw.y - g_magCalibration.bias.y;
+    float zc = raw.z - g_magCalibration.bias.z;
+    float xs = g_magCalibration.softIron[0][0]*xc
+             + g_magCalibration.softIron[0][1]*yc
+             + g_magCalibration.softIron[0][2]*zc;
+    float ys = g_magCalibration.softIron[1][0]*xc
+             + g_magCalibration.softIron[1][1]*yc
+             + g_magCalibration.softIron[1][2]*zc;
+
+    float xn = xs / FIT_NORM;
+    float yn = ys / FIT_NORM;
+    float x2 = xn*xn, y2 = yn*yn;
+
+    MagFit2D& s = g_magFit;
+    s.S_x4   += x2*x2;
+    s.S_x2y2 += x2*y2;
+    s.S_y4   += y2*y2;
+    s.S_x3   += x2*xn;
+    s.S_x2y  += x2*yn;
+    s.S_xy2  += xn*y2;
+    s.S_y3   += y2*yn;
+    s.S_x2   += x2;
+    s.S_xy   += xn*yn;
+    s.S_y2   += y2;
+    s.S_x    += xn;
+    s.S_y    += yn;
+    s.n++;
+}
+
+// Solve the 4×4 normal equations by Gauss-Jordan elimination.
+// Populates g_magFit solution fields.  Returns true if valid ellipse found.
+static bool magFit2DSolve() {
+    MagFit2D& s = g_magFit;
+    if (s.n < 8) { s.valid = false; return false; }
+
+    // Augmented matrix [XtX | Xtb], row order: A, C, D, E
+    // RHS Xtb_i = sum(phi_i * 1) = [S_x2, S_y2, S_x, S_y]
+    float M[4][5] = {
+        { s.S_x4,   s.S_x2y2, s.S_x3,  s.S_x2y, s.S_x2 },
+        { s.S_x2y2, s.S_y4,   s.S_xy2, s.S_y3,  s.S_y2 },
+        { s.S_x3,   s.S_xy2,  s.S_x2,  s.S_xy,  s.S_x  },
+        { s.S_x2y,  s.S_y3,   s.S_xy,  s.S_y2,  s.S_y  },
+    };
+
+    // Gauss-Jordan with partial pivoting
+    for (int col = 0; col < 4; col++) {
+        int pivot = col;
+        for (int row = col+1; row < 4; row++)
+            if (fabsf(M[row][col]) > fabsf(M[pivot][col])) pivot = row;
+        if (fabsf(M[pivot][col]) < 1e-8f) { s.valid = false; return false; }
+
+        if (pivot != col)
+            for (int j = 0; j <= 4; j++) { float t = M[col][j]; M[col][j] = M[pivot][j]; M[pivot][j] = t; }
+
+        float inv = 1.0f / M[col][col];
+        for (int j = col; j <= 4; j++) M[col][j] *= inv;
+
+        for (int row = 0; row < 4; row++) {
+            if (row == col) continue;
+            float f = M[row][col];
+            for (int j = col; j <= 4; j++) M[row][j] -= f * M[col][j];
+        }
+    }
+
+    float A = M[0][4], C = M[1][4], D = M[2][4], E = M[3][4];
+    if (A <= 0 || C <= 0) { s.valid = false; return false; }
+
+    float denom = 1.0f + D*D/(4.0f*A) + E*E/(4.0f*C);
+    if (denom <= 0) { s.valid = false; return false; }
+
+    // Save previous centre for stability tracking
+    s.prev_cx = s.cx_norm;
+    s.prev_cy = s.cy_norm;
+
+    s.A = A;  s.C = C;  s.D = D;  s.E = E;
+    s.cx_norm = -D / (2.0f*A);
+    s.cy_norm = -E / (2.0f*C);
+    s.rx_norm = sqrtf(denom / A);
+    s.ry_norm = sqrtf(denom / C);
+
+    // Heading error estimate from XY ellipticity (degrees)
+    float avg_r = (s.rx_norm + s.ry_norm) * 0.5f;
+    float diff  = fabsf(s.rx_norm - s.ry_norm);
+    s.hdg_err_deg = atan2f(diff, avg_r) * 57.2957795f;
+
+    // Algebraic RMS residual from accumulated sums
+    float SS =
+        A*A*s.S_x4 + C*C*s.S_y4 + D*D*s.S_x2 + E*E*s.S_y2
+      + 2.0f*A*C*s.S_x2y2 + 2.0f*A*D*s.S_x3 + 2.0f*A*E*s.S_x2y
+      + 2.0f*C*D*s.S_xy2  + 2.0f*C*E*s.S_y3  + 2.0f*D*E*s.S_xy
+      - 2.0f*A*s.S_x2 - 2.0f*C*s.S_y2 - 2.0f*D*s.S_x - 2.0f*E*s.S_y
+      + (float)s.n;
+    s.alg_rms = (SS > 0) ? sqrtf(SS / (float)s.n) : 0.0f;
+
+    // Centre shift from previous solve
+    float dcx = s.cx_norm - s.prev_cx, dcy = s.cy_norm - s.prev_cy;
+    s.delta = sqrtf(dcx*dcx + dcy*dcy);
+
+    s.valid = true;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Bin-Aware Magnetometer Calibration Collection
+// ---------------------------------------------------------------------------
+// Collects raw mag samples bucketed into orientation bins (heading × elevation).
+// Once a bin reaches the green threshold, further samples are rejected for that bin.
+// This prevents oversampling of easy orientations and produces a more balanced fit.
+
+// Maximum total samples we ever store across all bins
+static constexpr int BIN_CAL_MAX_SAMPLES = 60 * MAG_CAL_BIN_GREEN_THRESHOLD * 2;  // 1800
+
+struct BinCalSample {
+    int16_t x, y, z;  // raw logical-frame counts (post-axis-map, from readMagRaw())
+};
+
+static bool          g_binCalActive    = false;
+static bool          g_binCalMounted   = false;
+static int           g_binCalBinCount  = 0;         // 60 or 36
+static uint8_t       g_binCounts[60]   = {};         // samples per bin
+static BinCalSample* g_binSamples      = nullptr;   // heap-allocated
+static int           g_binSampleCount  = 0;
+static int           g_lastComputedBin = -1;         // current device orientation (bin index), updated every tick
+static float         g_lastPitchDeg    = 0.0f;       // actual pitch at last tick (for display readout)
+static float         g_lastHdgDeg      = 0.0f;       // actual heading at last tick (for display readout)
+
+// Per-bin last-accepted sample for runtime duplicate rejection.
+// Prevents the same sensor reading from being counted multiple times when
+// the magnetometer hasn't updated between AHRS loop iterations.
+static BinCalSample g_binLastSample[60] = {};
+static bool         g_binHasSample[60]  = {};
+
+// Map a sample's orientation to a bin index, or -1 if out of range for mounted
+static int getBinIndex(float pitch_deg, float heading_deg, bool isMounted) {
+    // Heading sector: 0°..360° → 0..11
+    if (heading_deg < 0.0f) heading_deg += 360.0f;
+    if (heading_deg >= 360.0f) heading_deg -= 360.0f;
+    int hdgSector = (int)(heading_deg / 30.0f);
+    if (hdgSector < 0) hdgSector = 0;
+    if (hdgSector > 11) hdgSector = 11;
+
+    int elevBand;
+    if (isMounted) {
+        // 3 bands: 0 = nose-up (≥+30°), 1 = level (-30°..+30°), 2 = nose-down (<-30°)
+        // MAG_CAL_ELEV_L1 = -30.0f, so -MAG_CAL_ELEV_L1 = +30.0f
+        if (pitch_deg >= -MAG_CAL_ELEV_L1)      elevBand = 0;  // pitch ≥ +30
+        else if (pitch_deg >= MAG_CAL_ELEV_L1)  elevBand = 1;  // pitch ≥ -30 (level)
+        else                                    elevBand = 2;  // pitch < -30
+    } else {
+        // 5 bands: 0=high2(>60), 1=high1(30-60), 2=level(-30-+30), 3=low1(-60..-30), 4=low2(<-60)
+        if (pitch_deg >= MAG_CAL_ELEV_H2)        elevBand = 0;
+        else if (pitch_deg >= MAG_CAL_ELEV_H1)   elevBand = 1;
+        else if (pitch_deg >= MAG_CAL_ELEV_L1)   elevBand = 2;
+        else if (pitch_deg >= MAG_CAL_ELEV_L2)   elevBand = 3;
+        else                                      elevBand = 4;
+    }
+
+    int sectors = isMounted ? MAG_CAL_MOUNTED_HDG_SECTORS : MAG_CAL_BASELINE_HDG_SECTORS;
+    return elevBand * sectors + hdgSector;
+}
+
+void magBinCalBegin(bool isMounted) {
+    magBinCalEnd();  // clean up any previous run
+
+    g_binCalMounted  = isMounted;
+    g_binCalBinCount = isMounted ? MAG_CAL_MOUNTED_BINS : MAG_CAL_BASELINE_BINS;
+    g_binSampleCount = 0;
+    memset(g_binCounts,     0, sizeof(g_binCounts));
+    memset(g_binHasSample,  0, sizeof(g_binHasSample));
+    memset(g_binLastSample, 0, sizeof(g_binLastSample));
+
+    g_binSamples = (BinCalSample*)malloc(BIN_CAL_MAX_SAMPLES * sizeof(BinCalSample));
+    if (!g_binSamples) {
+        Serial.println("[BIN_CAL] ERROR: malloc failed for sample buffer");
+        return;
+    }
+
+    magFit2DReset();  // reset incremental fitter for fresh session
+    g_binCalActive = true;
+    Serial.printf("[BIN_CAL] Started %s cal, %d bins, max %d samples\n",
+                  isMounted ? "mounted" : "baseline", g_binCalBinCount, BIN_CAL_MAX_SAMPLES);
+}
+
+bool magBinCalTick(float pitch_deg, float heading_deg, const Vec3i16& rawMagSensor) {
+    if (!g_binCalActive || !g_binSamples) return false;
+
+    int bin = getBinIndex(pitch_deg, heading_deg, g_binCalMounted);
+    g_lastComputedBin = bin;  // always track current orientation, even if sample rejected
+    g_lastPitchDeg    = pitch_deg;
+    g_lastHdgDeg      = heading_deg;
+    if (bin < 0 || bin >= g_binCalBinCount) return false;
+
+    // Reject if bin is already green
+    if (g_binCounts[bin] >= MAG_CAL_BIN_GREEN_THRESHOLD) return false;
+
+    // Reject exact duplicate — the magnetometer ODR (~80 Hz) is slower than the AHRS
+    // loop (100 Hz), so consecutive reads often return the same raw value.
+    if (g_binHasSample[bin]) {
+        const BinCalSample& prev = g_binLastSample[bin];
+        if (prev.x == rawMagSensor.x && prev.y == rawMagSensor.y && prev.z == rawMagSensor.z) {
+            return false;
+        }
+    }
+
+    // Reject if sample buffer is full
+    if (g_binSampleCount >= BIN_CAL_MAX_SAMPLES) return false;
+
+    BinCalSample s = { rawMagSensor.x, rawMagSensor.y, rawMagSensor.z };
+    g_binSamples[g_binSampleCount++] = s;
+    g_binLastSample[bin]  = s;
+    g_binHasSample[bin]   = true;
+    g_binCounts[bin]++;
+
+    // Feed accepted sample to incremental 2-D fitter (applies current cal internally)
+    magFit2DAdd(rawMagSensor);
+    return true;
+}
+
+bool magBinCalIsActive() { return g_binCalActive; }
+
+bool magBinCalIsComplete() {
+    if (!g_binCalActive) return false;
+
+    const int sectors = MAG_CAL_BASELINE_HDG_SECTORS;  // 12 (same for both cal types)
+    const int rows    = g_binCalMounted ? MAG_CAL_MOUNTED_ELEV_BANDS : MAG_CAL_BASELINE_ELEV_BANDS;
+
+    for (int r = 0; r < rows; r++) {
+        // Per-row sector requirement (weighted by tilt difficulty):
+        //   Baseline 5-row: row 2 = level, rows 1/3 = ±30°, rows 0/4 = ±60°
+        //   Mounted  3-row: row 1 = level, rows 0/2 = ±30°
+        int required;
+        if (g_binCalMounted) {
+            required = (r == 1) ? MAG_CAL_SECTORS_LEVEL : MAG_CAL_SECTORS_MID;
+        } else {
+            if      (r == 2)            required = MAG_CAL_SECTORS_LEVEL;
+            else if (r == 1 || r == 3)  required = MAG_CAL_SECTORS_MID;
+            else                        required = MAG_CAL_SECTORS_EXTREME;
+        }
+
+        int greenInRow = 0;
+        for (int c = 0; c < sectors; c++) {
+            if (g_binCounts[r * sectors + c] >= MAG_CAL_BIN_GREEN_THRESHOLD) greenInRow++;
+        }
+        if (greenInRow < required) return false;
+    }
+    return true;
+}
+
+void magBinCalGetProgress(CalProgressPacket& pkt) {
+    pkt.cal_type   = g_binCalMounted ? (uint8_t)CalType::MOUNTED : (uint8_t)CalType::BASELINE;
+    pkt.phase      = (uint8_t)CalPhase::COLLECT;
+    pkt.bins_total = (uint8_t)g_binCalBinCount;
+    pkt.complete   = magBinCalIsComplete();
+
+    uint8_t green = 0;
+    for (int i = 0; i < g_binCalBinCount; i++) {
+        uint8_t cnt = g_binCounts[i];
+        pkt.bin_counts[i] = cnt;
+        if (cnt >= MAG_CAL_BIN_GREEN_THRESHOLD) green++;
+    }
+    // Zero-fill remaining slots (for baseline → 60, mounted → 36, rest = 0)
+    for (int i = g_binCalBinCount; i < 60; i++) {
+        pkt.bin_counts[i] = 0;
+    }
+    pkt.bins_green    = green;
+    pkt.current_bin   = (g_lastComputedBin >= 0 && g_lastComputedBin < g_binCalBinCount)
+                        ? (int8_t)g_lastComputedBin : (int8_t)-1;
+    pkt.cur_pitch_deg = g_lastPitchDeg;
+    pkt.cur_hdg_deg   = g_lastHdgDeg;
+
+    // Update incremental fit and populate quality fields.
+    // magFit2DSolve() runs a 4×4 Gauss-Jordan solve on the accumulated sums —
+    // cheap enough to call every time GetProgress is polled (~2 Hz).
+    magFit2DSolve();
+    pkt.fit_valid       = g_magFit.valid;
+    pkt.fit_hdg_err_deg = g_magFit.hdg_err_deg;
+    // Convert normalised-space delta to µT for a device-independent unit on display side.
+    // FIT_NORM = 4096 counts; g_mag_lsb_per_uT ≈ 68.42 LSB/µT.
+    pkt.fit_delta = (g_mag_lsb_per_uT > 0)
+                  ? g_magFit.delta * FIT_NORM / g_mag_lsb_per_uT
+                  : 0.0f;
+}
+
+void magBinCalDumpCSV(void* filePtr) {
+    if (!g_binSamples || !filePtr) return;
+    File& f = *reinterpret_cast<File*>(filePtr);
+    f.println("mx,my,mz");
+    for (int i = 0; i < g_binSampleCount; i++) {
+        f.printf("%d,%d,%d\n", g_binSamples[i].x, g_binSamples[i].y, g_binSamples[i].z);
+    }
+    Serial.printf("[BIN_CAL] Wrote %d samples to CSV\n", g_binSampleCount);
+}
+
+void magBinCalEnd() {
+    if (g_binSamples) {
+        free(g_binSamples);
+        g_binSamples = nullptr;
+    }
+    magFit2DReset();
+    g_binCalActive    = false;
+    g_binSampleCount  = 0;
+    g_binCalBinCount  = 0;
+    g_lastComputedBin = -1;
+    g_lastPitchDeg    = 0.0f;
+    g_lastHdgDeg      = 0.0f;
+    memset(g_binCounts,     0, sizeof(g_binCounts));
+    memset(g_binHasSample,  0, sizeof(g_binHasSample));
+    memset(g_binLastSample, 0, sizeof(g_binLastSample));
 }
 
 // ----------- Gyroscope Calibration -----------

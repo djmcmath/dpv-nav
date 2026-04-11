@@ -55,13 +55,22 @@ static constexpr bool FLOW_LOG_ENABLE  = false;   // set to false to disable flo
 
 // ---- Calibration mode tracking -----------------------------------------------
 // cal_mode in NavPacket:
-//   0 = quick mag cal (hard-iron)
-//   1 = full mag cal  (soft-iron collection)
+//   0 = (legacy) quick mag cal hard-iron
+//   1 = (legacy) full mag cal soft-iron collection
 //   2 = speed cal — waiting for flow
 //   3 = speed cal — run in progress
 //   4 = speed cal — result ready, awaiting display accept/reject
+//   5 = baseline mag cal (bin-aware)
+//   6 = mounted mag cal (bin-aware)
 static bool    gInCal    = false;
 static uint8_t gCalMode  = 0;
+
+// Bin-aware cal: interval tracking for CalProgressPacket (2 Hz)
+static constexpr uint32_t CAL_PROGRESS_INTERVAL_MS = 500;
+static uint32_t gLastCalProgressMs = 0;
+
+// CSV output file path for active bin cal (set when cal starts)
+static const char* gBinCalCsvPath = nullptr;
 
 // ---- Speed calibration state ------------------------------------------------
 static uint16_t gSpeedCalDist_ft     = 300;    // target distance selected by user
@@ -247,6 +256,13 @@ void loop() {
     imu::readAccel_g_raw_cal(accelRaw, accel);
     imu::readGyro_rad_s_raw_cal(gyroRaw, gyro);
     imu::readMag_raw_cal(magRaw, mag);  // magRaw = uncalibrated µT, mag = calibrated µT
+    // Logical-frame raw counts (axis map applied) for bin cal CSV export.
+    // The calibration JSON must be in the same frame that readMag() reads in,
+    // which is post-axis-map (logical frame).  readMagRaw_SensorFrame() is WRONG
+    // here — it would store sensor-frame counts and cause the Python-derived bias
+    // to have the wrong sign for axes that the map negates (Y in this board's map).
+    imu::Vec3i16 magRaw_logical{};
+    imu::readMagRaw(magRaw_logical);
 
     // --- AHRS update --------------------------------------------------------
     // The mag axis map {+1,-2,+3} puts mag Y in left-handed frame (positive=Left)
@@ -488,22 +504,64 @@ void loop() {
 
     // --- Calibration tick and completion detection ---------------------------
     if (gInCal) {
-        if (gCalMode == 0) {
-            // Quick cal (non-blocking hard-iron sweep)
+        if (gCalMode == 5 || gCalMode == 6) {
+            // Bin-aware mag cal (baseline=5, mounted=6)
+            // Feed current raw mag sample into the bin collector
+            imu::magBinCalTick(pitchDeg, headingDeg, magRaw_logical);
+
+            // Emit CalProgressPacket at 2 Hz
+            if (nowMs - gLastCalProgressMs >= CAL_PROGRESS_INTERVAL_MS) {
+                gLastCalProgressMs = nowMs;
+                CalProgressPacket cpkt{};
+                imu::magBinCalGetProgress(cpkt);
+                char calBuf[512];
+                size_t cn = calProgressPacketToBytes(cpkt, calBuf, sizeof(calBuf));
+                if (cn > 0) Serial1.write(calBuf, cn);
+            }
+
+            // Check completion
+            if (imu::magBinCalIsComplete()) {
+                // Send final CalProgressPacket with complete=true immediately —
+                // don't wait for the 2 Hz timer, or the display may never see it.
+                {
+                    CalProgressPacket cpkt{};
+                    imu::magBinCalGetProgress(cpkt);  // complete=true, all bins green
+                    char calBuf[512];
+                    size_t cn = calProgressPacketToBytes(cpkt, calBuf, sizeof(calBuf));
+                    if (cn > 0) Serial1.write(calBuf, cn);
+                    Serial.println("[BIN_CAL] Sent completion packet");
+                }
+
+                Serial.println("[BIN_CAL] All bins green — dumping CSV");
+                if (gBinCalCsvPath) {
+                    File f = LittleFS.open(gBinCalCsvPath, FILE_WRITE);
+                    if (f) {
+                        imu::magBinCalDumpCSV(&f);
+                        f.close();
+                        Serial.printf("[BIN_CAL] CSV saved to %s\n", gBinCalCsvPath);
+                    } else {
+                        Serial.printf("[BIN_CAL] ERROR: could not open %s\n", gBinCalCsvPath);
+                    }
+                }
+                imu::magBinCalEnd();
+                gInCal   = false;
+                sysState = SystemState::READY;
+                Serial.println("[BIN_CAL] Cal complete, returning to READY");
+            }
+        } else if (gCalMode == 0) {
+            // Quick cal (non-blocking hard-iron sweep, legacy)
             if (imu::magCalNBTick()) {
-                // Done — save result and return to previous nav state
                 imu::magCalNBGetResult(magCal);
-                storage::saveMagCalibration("/mag_cal.json", magCal);
+                storage::saveMagCalibration(storage::MAG_LEGACY_FILE, magCal);
                 gInCal   = false;
                 sysState = SystemState::READY;
                 Serial.println("[CAL] Quick cal saved, returning to READY");
             }
         } else if (gCalMode == 1) {
-            // Full cal (soft-iron data collection via mag_cal::)
+            // Full cal (soft-iron data collection via mag_cal::, legacy)
             if (mag_cal::isCollecting()) {
                 mag_cal::logSample();
             } else {
-                // Collection finished (auto-stopped by duration)
                 gInCal   = false;
                 sysState = SystemState::READY;
                 Serial.println("[CAL] Full cal collection done, returning to READY");
@@ -615,15 +673,19 @@ void loop() {
 // ===========================================================================
 
 static void loadCalibration() {
-    // Magnetometer
-    if (storage::loadMagCalibration("/mag_cal.json", magCal)) {
+    // Magnetometer — try two-stage chain (mag_base.json + mag_mount.json),
+    // falling back to legacy mag_cal.json, then blocking sweep as last resort.
+    bool hasBase = false, hasMount = false;
+    if (storage::loadMagCalibrationChain(magCal, hasBase, hasMount)) {
         imu::setMagCalibration(magCal);
         gBootFlags |= BOOT_MAG_CAL_OK;
-        Serial.println("Mag calibration loaded from LittleFS");
+        Serial.printf("Mag cal loaded: base=%d mount=%d\n", hasBase, hasMount);
     } else {
+        //TODO: this legacy fallback is no longer ideal, since it blocks for 90 seconds and doesn't provide any progress feedback. Better to implement a non-blocking sweep with progress reporting, like the mag_bin_cal does.
+        //TODO: make this better.  Fall back to a baseline mediocre calibration, set "calibration quality" to "poor", let the user cal when they can.
         Serial.println("No mag calibration found — running min/max sweep (90 s)");
         imu::calibrateMagnetometer(magCal, 90000);
-        storage::saveMagCalibration("/mag_cal.json", magCal);
+        storage::saveMagCalibration(storage::MAG_LEGACY_FILE, magCal);
     }
 
     // Gyroscope
@@ -828,11 +890,29 @@ static void handleDisplayCmd() {
                         break;
                     }
                     case DisplayCmd::START_FULL_CAL:
-                        Serial.println("CMD: START_FULL_CAL (120s soft-iron data collection)");
+                        Serial.println("CMD: START_FULL_CAL (legacy 120s soft-iron data collection)");
                         sysState = SystemState::CALIBRATION;
                         gInCal   = true;
                         gCalMode = 1;
                         mag_cal::startCollection(180000);
+                        break;
+                    case DisplayCmd::START_BASELINE_CAL:
+                        Serial.println("CMD: START_BASELINE_CAL (bin-aware, off-scooter)");
+                        sysState = SystemState::CALIBRATION;
+                        gInCal   = true;
+                        gCalMode = 5;
+                        gBinCalCsvPath = "/mag_baseline_samples.csv";
+                        gLastCalProgressMs = 0;
+                        imu::magBinCalBegin(false);
+                        break;
+                    case DisplayCmd::START_MOUNTED_CAL:
+                        Serial.println("CMD: START_MOUNTED_CAL (bin-aware, on-scooter)");
+                        sysState = SystemState::CALIBRATION;
+                        gInCal   = true;
+                        gCalMode = 6;
+                        gBinCalCsvPath = "/mag_mounted_samples.csv";
+                        gLastCalProgressMs = 0;
+                        imu::magBinCalBegin(true);
                         break;
                     case DisplayCmd::START_SPEED_CAL: {
                         gSpeedCalDist_ft = parseSpeedCalDist(cmdBuf, cmdPos);

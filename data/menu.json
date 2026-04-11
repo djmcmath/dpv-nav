@@ -21,8 +21,8 @@
     {
       "title": "CAL",
       "items": [
-        {"label": "Quick cal", "act": 5},
-        {"label": "Full cal", "act": 6},
+        {"label": "Baseline", "act": 5},
+        {"label": "Mounted", "act": 6},
         {"label": "Speed cal", "act": 7}
       ]
     },

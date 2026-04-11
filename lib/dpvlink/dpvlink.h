@@ -80,9 +80,46 @@ struct DebugPacket {
 };
 
 // ---------------------------------------------------------------------------
+// Calibration progress packet  (sent at ~2 Hz during active mag cal)
+// ---------------------------------------------------------------------------
+
+// Which calibration type is running
+enum class CalType : uint8_t {
+    BASELINE = 0,  // full sphere, unit off-scooter
+    MOUNTED  = 1,  // limited range, unit on scooter
+};
+
+// Named phases — only COLLECT is active now; foundation for guided mode
+enum class CalPhase : uint8_t {
+    COLLECT = 0,  // collect samples until bins are green
+    // future: INSTRUCT, VALIDATE, COMPLETE
+};
+
+struct CalProgressPacket {
+    uint8_t  cal_type;          // CalType enum value
+    uint8_t  phase;             // CalPhase enum value
+    uint8_t  bins_green;        // count of bins at green threshold
+    uint8_t  bins_total;        // total bins (60 baseline, 36 mounted)
+    bool     complete;          // true when all bins green (CSV being dumped)
+    uint8_t  bin_counts[60];    // sample count per bin, capped at 255 (baseline uses all 60; mounted uses first 36)
+    int8_t   current_bin;       // bin index of current device orientation (-1 if unmappable)
+    float    cur_pitch_deg;     // actual AHRS pitch at packet-send time (for orientation readout)
+    float    cur_hdg_deg;       // actual heading at packet-send time (for orientation readout)
+
+    // Incremental 2-D ellipse fit quality (updated each GetProgress call, ~2 Hz)
+    // Reflects circularity of XY plane data in calibrated space — the quantity
+    // that directly determines heading accuracy.
+    bool  fit_valid;        // true once ≥8 samples and a valid ellipse solution exists
+    float fit_hdg_err_deg;  // estimated heading error from XY ellipticity (degrees);
+                            // converges toward the expected error of the resulting cal
+    float fit_delta;        // centre shift since last solve, in µT;
+                            // converges toward 0 as data stabilises (solution converged)
+};
+
+// ---------------------------------------------------------------------------
 // Packet type discriminator (JSON "t" field)
 // ---------------------------------------------------------------------------
-enum class PacketType : uint8_t { UNKNOWN = 0, NAV, DEBUG };
+enum class PacketType : uint8_t { UNKNOWN = 0, NAV, DEBUG, CAL_PROGRESS };
 
 PacketType identifyPacket(const char* buf, size_t len);
 
@@ -100,7 +137,9 @@ enum class DisplayCmd : uint8_t {
     NAV_OUTBOUND   = 10,  // select outbound waypoint as destination
     NAV_HOME       = 11,  // select power-on position as home/destination
     MARK_POSITION  = 12,  // mark current position in logs
-    START_FULL_CAL = 13,  // start 120s mag cal data collection
+    START_FULL_CAL    = 13,  // (legacy) start 120s mag cal data collection
+    START_BASELINE_CAL = 23, // start baseline (off-scooter) mag cal data collection
+    START_MOUNTED_CAL  = 24, // start mounted (on-scooter) mag cal data collection
     START_SPEED_CAL      = 14, // start speed calibration (with embedded dist_ft field)
     TOGGLE_GPS_POS       = 15, // toggle GPS position usage
     TOGGLE_GPS_SPD       = 16, // toggle GPS speed usage
@@ -125,6 +164,9 @@ enum class DisplayCmd : uint8_t {
 
 size_t navPacketToBytes(const NavPacket& pkt, char* buf, size_t bufLen);
 bool   bytesToNavPacket(const char* buf, size_t len, NavPacket& out);
+
+size_t calProgressPacketToBytes(const CalProgressPacket& pkt, char* buf, size_t bufLen);
+bool   bytesToCalProgressPacket(const char* buf, size_t len, CalProgressPacket& out);
 
 size_t debugPacketToBytes(const DebugPacket& pkt, char* buf, size_t bufLen);
 bool   bytesToDebugPacket(const char* buf, size_t len, DebugPacket& out);

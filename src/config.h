@@ -59,6 +59,55 @@ constexpr uint32_t DEBUG_SEND_INTERVAL_MS = 200;  // 5 Hz
 constexpr uint32_t NVS_POS_SAVE_INTERVAL_MS = 30000;  // 30 seconds
 
 // ---------------------------------------------------------------------------
+// Magnetometer calibration bin parameters
+// ---------------------------------------------------------------------------
+
+// Sample threshold per bin — green = fully covered, yellow = partial, red = sparse
+constexpr uint8_t MAG_CAL_BIN_GREEN_THRESHOLD  = 15;  // samples for "green" (fully covered)
+constexpr uint8_t MAG_CAL_BIN_YELLOW_THRESHOLD = 5;   // samples for "yellow" (partial)
+
+// Baseline cal: 12 heading sectors × 5 elevation bands = 60 bins
+// Elevation bands (degrees pitch): <-60, -60..-30, -30..+30 (level), +30..+60, >+60
+constexpr int MAG_CAL_BASELINE_HDG_SECTORS = 12;
+constexpr int MAG_CAL_BASELINE_ELEV_BANDS  = 5;
+constexpr int MAG_CAL_BASELINE_BINS        = MAG_CAL_BASELINE_HDG_SECTORS * MAG_CAL_BASELINE_ELEV_BANDS;  // 60
+
+// Mounted cal: 12 heading sectors × 3 elevation bands = 36 bins
+// Elevation bands (degrees pitch): -30..-15, -15..+15 (level), +15..+30 (and beyond threshold)
+constexpr int MAG_CAL_MOUNTED_HDG_SECTORS  = 12;
+constexpr int MAG_CAL_MOUNTED_ELEV_BANDS   = 3;
+constexpr int MAG_CAL_MOUNTED_BINS         = MAG_CAL_MOUNTED_HDG_SECTORS * MAG_CAL_MOUNTED_ELEV_BANDS;  // 36
+
+// Elevation band boundaries (degrees, applied to AHRS pitch)
+// Baseline: [-90, -60, -30, +30, +60, +90]  → 5 bands
+// Mounted:  any pitch outside [-30, +30] range snaps to upper/lower band (no >60° band)
+constexpr float MAG_CAL_ELEV_L2 = -60.0f;  // boundary between lowest and low band
+constexpr float MAG_CAL_ELEV_L1 = -30.0f;  // boundary between low and level band
+constexpr float MAG_CAL_ELEV_H1 = +30.0f;  // boundary between level and high band
+constexpr float MAG_CAL_ELEV_H2 = +60.0f;  // boundary between high and highest band
+
+// Weight for out-of-range samples in mounted cal fit (pitch beyond ±30°)
+// 0.0 = exclude, 1.0 = full weight
+constexpr float MAG_CAL_MOUNTED_OOR_WEIGHT = 0.25f;
+
+// Weighted completion thresholds — number of green sectors required per elevation row.
+// The level row must be fully covered; tilted rows allow partial coverage because
+// DPV operation is primarily horizontal and extreme orientations are hard to achieve.
+// Rationale: ±60° samples constrain the magnetometer Z-axis response, which matters
+// less for near-horizontal DPV operation. Collecting any samples at extreme tilt
+// still improves fit quality; requiring 100% is unnecessary.
+//
+//   Level (0°):     12/12 = 100%  — must be fully covered for reliable horizontal heading
+//   ±30° rows:      11/12 ≈ 92%  — one missed sector per tilt row is acceptable
+//   ±60° rows:       9/12 = 75%  — three missed sectors at extreme tilt is acceptable
+constexpr int MAG_CAL_SECTORS_LEVEL   = 12;  // 100% — level row
+constexpr int MAG_CAL_SECTORS_MID     = 11;  // ~92% — ±30° rows
+constexpr int MAG_CAL_SECTORS_EXTREME =  3;  //  25% — ±60° rows (baseline only)
+// Note: extreme rows need only 3/12 sectors because DPV operation rarely exceeds ±45°
+// pitch.  A handful of extreme-tilt samples is enough to constrain the Z-axis of the
+// ellipsoid fit without requiring sustained upside-down maneuvers.
+
+// ---------------------------------------------------------------------------
 // Speed calibration thresholds
 // ---------------------------------------------------------------------------
 

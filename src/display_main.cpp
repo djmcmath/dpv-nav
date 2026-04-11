@@ -14,7 +14,7 @@
 #include <dpvlink.h>
 
 // ---- Link receive state ----------------------------------------------------
-static char rxBuf[256];
+static char rxBuf[512];  // enlarged for CalProgressPacket (60-bin JSON can be ~300 bytes)
 static size_t rxPos = 0;
 static NavPacket lastNav{};
 static bool navValid = false;
@@ -22,6 +22,13 @@ static uint32_t lastNavMs = 0;
 
 static DebugPacket lastDebug{};
 static bool debugValid = false;
+
+static CalProgressPacket lastCalProgress{};
+static bool calProgressValid  = false;
+static uint32_t lastCalProgressMs = 0;
+static constexpr uint32_t CAL_COMPLETE_HOLD_MS = 3000;  // show "DONE" for 3 s then return
+static uint32_t calCompleteShownMs = 0;
+static bool calCompleteHolding = false;
 
 // ---- Link transmit buffer --------------------------------------------------
 static char txBuf[64];
@@ -117,6 +124,23 @@ void setup() {
 
     display::reinit();
     Serial.println("Display device ready — waiting for nav data");
+}
+
+// Returns a copy of pkt with heading/bearing adjusted for the current heading
+// mode (true vs. magnetic). Nav device always sends true heading; when the user
+// selects magnetic, subtract declination here and clear FLAG_TRUE_HEADING.
+static NavPacket applyHeadingMode(NavPacket pkt) {
+    if (!menu::settings().trueHeading) {
+        auto wrap360 = [](float d) {
+            while (d < 0.0f)    d += 360.0f;
+            while (d >= 360.0f) d -= 360.0f;
+            return d;
+        };
+        pkt.heading_deg      = wrap360(pkt.heading_deg      - DEFAULT_DECLINATION_DEG);
+        pkt.bearing_home_deg = wrap360(pkt.bearing_home_deg - DEFAULT_DECLINATION_DEG);
+        pkt.flags &= ~FLAG_TRUE_HEADING;
+    }
+    return pkt;
 }
 
 // ===========================================================================
@@ -227,6 +251,27 @@ void loop() {
         if (now - lastDisplayMs >= DISPLAY_INTERVAL_MS) {
             lastDisplayMs = now;
 
+            // Bin cal complete: hold DONE screen for CAL_COMPLETE_HOLD_MS then return
+            if (calCompleteHolding) {
+                display::showCalGrid(lastCalProgress,
+                                     lastCalProgress.cal_type == (uint8_t)CalType::MOUNTED
+                                         ? "MOUNTED CAL" : "BASELINE CAL");
+                if (now - calCompleteShownMs >= CAL_COMPLETE_HOLD_MS) {
+                    calCompleteHolding = false;
+                    calProgressValid   = false;
+                    display::clear();
+                }
+                return;
+            }
+
+            // Active bin cal progress grid — takes priority over all other rendering
+            if (calProgressValid) {
+                display::showCalGrid(lastCalProgress,
+                                     lastCalProgress.cal_type == (uint8_t)CalType::MOUNTED
+                                         ? "MOUNTED CAL" : "BASELINE CAL");
+                return;
+            }
+
             // Speed cal distance selection overrides everything (pre-nav-device)
             if (gSpeedCalPhase == SpeedCalPhase::DIST_SELECT) {
                 display::showSpeedCalDistSelect(gSpeedCalDist_ft);
@@ -234,7 +279,7 @@ void loop() {
 
             SystemState navState = static_cast<SystemState>(lastNav.system_state);
             if (navState == SystemState::CALIBRATION) {
-                // Dispatch by cal_mode: 0/1 = mag cal, 2/3/4 = speed cal
+                // Dispatch by cal_mode: 0/1 = mag cal (legacy), 2/3/4 = speed cal
                 if (lastNav.cal_mode <= 1) {
                     display::showCal(lastNav.cal_remaining_s,
                                      lastNav.cal_coverage_pct,
@@ -251,9 +296,10 @@ void loop() {
                                                 lastNav.speed_cal_k_proposed,
                                                 gSpeedCalChoice);
                 }
+                // cal_mode 5/6 (bin cal): rendered via CalProgressPacket above
             } else if (menu::isOpen()) {
                 // Menu is open — draw top row, then menu overlay, then flush (no-op)
-                display::showNavTop(lastNav);
+                display::showNavTop(applyHeadingMode(lastNav));
                 menu::render();
                 display::flush();
             } else {
@@ -261,7 +307,7 @@ void loop() {
                 if (menu::settings().debugMode && debugValid) {
                     display::showDebug(lastDebug);
                 } else {
-                    display::showNav(lastNav);
+                    display::showNav(applyHeadingMode(lastNav));
                 }
             }
             } // end else (not DIST_SELECT)
@@ -297,9 +343,6 @@ static void processNavLine() {
             }
             // Advance speed cal phase based on cal_mode from nav device.
             // Only advance forward — never reset backward on a single packet.
-            // A stale NavPacket (sent before nav processed START_SPEED_CAL) would
-            // show ns=READY while the display is already in WAITING, so we must
-            // not reset on a single non-CALIBRATION packet.
             SystemState ns = static_cast<SystemState>(lastNav.system_state);
             if (ns == SystemState::CALIBRATION) {
                 if (lastNav.cal_mode == 3 &&
@@ -313,11 +356,28 @@ static void processNavLine() {
                     Serial.println("[SPEED_CAL] result ready — showing accept/reject");
                 }
             }
+            // If nav device returns to READY after bin cal, clear our cal state
+            if (ns != SystemState::CALIBRATION && calProgressValid) {
+                if (!calCompleteHolding) {
+                    calProgressValid = false;
+                }
+            }
         }
     } else if (ptype == PacketType::DEBUG) {
         if (bytesToDebugPacket(rxBuf, rxPos, lastDebug)) {
             debugValid = true;
             lastNavMs = millis();
+        }
+    } else if (ptype == PacketType::CAL_PROGRESS) {
+        if (bytesToCalProgressPacket(rxBuf, rxPos, lastCalProgress)) {
+            calProgressValid   = true;
+            lastCalProgressMs  = millis();
+            lastNavMs          = millis();  // keep link-alive timer refreshed
+            if (lastCalProgress.complete && !calCompleteHolding) {
+                calCompleteHolding  = true;
+                calCompleteShownMs  = millis();
+                Serial.println("[CAL_GRID] Complete — holding DONE screen");
+            }
         }
     }
 }

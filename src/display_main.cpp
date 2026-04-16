@@ -5,6 +5,7 @@
 // Both buttons held 2s: display reinit (SPI re-init + clear, no reboot).
 
 #include <Arduino.h>
+#include <esp_sleep.h>
 
 #include "board_pins.h"
 #include "config.h"
@@ -63,6 +64,7 @@ enum class SpeedCalPhase : uint8_t {
     NONE,         // not in speed cal
     DIST_SELECT,  // user choosing target distance
     WAITING,      // waiting for DPV flow to start
+    COUNTDOWN,    // manual countdown to start (user long-pressed BTN2)
     RUNNING,      // run in progress (nav drives timer via cal_mode=3)
     RESULT,       // accept/reject result (nav drives cal_mode=4)
 };
@@ -70,6 +72,8 @@ enum class SpeedCalPhase : uint8_t {
 static SpeedCalPhase gSpeedCalPhase      = SpeedCalPhase::NONE;
 static uint16_t      gSpeedCalDist_ft    = 300;  // selected distance
 static uint8_t       gSpeedCalChoice     = 0;    // 0=RESET+ACCEPT, 1=ACCEPT, 2=REJECT
+static uint32_t      gCountdownStartMs   = 0;    // millis() when countdown begins
+static constexpr uint32_t COUNTDOWN_TOTAL_MS = 5000;  // 5 second countdown
 
 // ---- Button debounce -------------------------------------------------------
 static constexpr uint32_t DEBOUNCE_MS   = 50;
@@ -91,10 +95,28 @@ static ButtonState btn2{BUTTON2_PIN, true, false, 0, 0, false};
 static char usbBuf[64];
 static size_t usbPos = 0;
 
+// ---- Power-off / deep sleep ------------------------------------------------
+// Both buttons (active-LOW) must be held simultaneously to wake.
+// ext1 wakes on ALL_LOW: the ESP32 wakes when all configured pins are LOW.
+// After waking we re-check that both pins stay LOW for WAKE_HOLD_MS; if
+// either releases we go back to sleep immediately.
+static constexpr uint64_t SLEEP_WAKE_PIN_MASK =
+    (1ULL << BUTTON1_PIN) | (1ULL << BUTTON2_PIN);
+static constexpr uint32_t WAKE_HOLD_MS = 600;   // both-buttons hold to confirm wake
+
+// Enter ESP32 deep sleep.  Never returns.
+static void enterDeepSleep() {
+    Serial.println("[SLEEP] entering deep sleep");
+    Serial.flush();
+    esp_sleep_enable_ext1_wakeup(SLEEP_WAKE_PIN_MASK, ESP_EXT1_WAKEUP_ALL_LOW);
+    esp_deep_sleep_start();
+}
+
 // ---- Forward declarations --------------------------------------------------
 static void processNavLine();
 static void processUsbCmd();
 static void sendCmd(DisplayCmd cmd);
+static void sendSpeedCalStart(uint16_t dist_ft);
 static void updateButton(ButtonState& b);
 static void handleButtons();
 
@@ -102,6 +124,41 @@ static void handleButtons();
 void setup() {
     Serial.begin(115200);
     Serial.println("\n=== DPV-NAV (display device) ===");
+
+    // ---- Wake-from-deep-sleep check ----------------------------------------
+    // Buttons are configured as INPUT in the lines below; read them now using
+    // direct INPUT mode since pinMode hasn't been called yet — but the GPIO
+    // pad default is INPUT, so digitalRead is safe here.
+    if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT1) {
+        Serial.println("[WAKE] woke from deep sleep via EXT1");
+        // Require both buttons held for WAKE_HOLD_MS to confirm intentional wake.
+        // If either releases before that, go straight back to sleep.
+        pinMode(BUTTON1_PIN, INPUT);
+        pinMode(BUTTON2_PIN, INPUT);
+        uint32_t wakeStart = millis();
+        bool confirmed = true;
+        while (millis() - wakeStart < WAKE_HOLD_MS) {
+            if (digitalRead(BUTTON1_PIN) == HIGH || digitalRead(BUTTON2_PIN) == HIGH) {
+                confirmed = false;
+                break;
+            }
+            delay(10);
+        }
+        if (!confirmed) {
+            Serial.println("[WAKE] only one button — going back to sleep");
+            Serial.flush();
+            enterDeepSleep();
+        }
+        Serial.println("[WAKE] both buttons confirmed — booting");
+        // Send a wake byte to the nav device over Serial1 so it exits deep sleep.
+        // (Nav device is configured to wake on its LINK_RX_PIN going LOW, which
+        // happens on the UART start bit of this transmission.)
+        Serial1.begin(LINK_BAUD, SERIAL_8N1, LINK_RX_PIN, LINK_TX_PIN);
+        Serial1.write('\n');   // single byte — just needs the start bit low edge
+        Serial1.flush();
+        // Serial1 will be re-initialized below in the normal setup path.
+        Serial1.end();
+    }
 
     // Serial link from nav device
     Serial1.begin(LINK_BAUD, SERIAL_8N1, LINK_RX_PIN, LINK_TX_PIN);
@@ -183,9 +240,36 @@ void loop() {
     // --- Menu timeout check -------------------------------------------------
     menu::tick();
 
-    // --- If menu just closed, check for pending speed cal or force redraw ---
+    // --- If menu just closed, check for pending actions or force redraw ------
     if (menuWasOpen && !menu::isOpen()) {
         menuWasOpen = false;
+
+        if (menu::isPendingPowerOff()) {
+            menu::clearPowerOffPending();
+            // Tell the nav device to save state and sleep.
+            sendCmd(DisplayCmd::POWER_OFF);
+            // "Powering off" animation: 5 dots, one per second.
+            display::clear();
+            constexpr uint16_t CLR_WHITE = 0xFFFF;
+            for (int dots = 1; dots <= 5; dots++) {
+                display::clear();
+                char buf[20];
+                snprintf(buf, sizeof(buf), "Powering off");
+                display::drawText(4, 108, buf, CLR_WHITE, 2);
+                // Draw dots accumulated so far
+                char dotBuf[8];
+                for (int i = 0; i < dots; i++) dotBuf[i] = '.';
+                dotBuf[dots] = '\0';
+                display::drawText(4, 140, dotBuf, CLR_WHITE, 2);
+                display::flush();
+                delay(1000);
+            }
+            display::clear();
+            display::flush();
+            enterDeepSleep();
+            // never returns
+        }
+
         if (menu::isPendingSpeedCal()) {
             menu::clearSpeedCalPending();
             gSpeedCalPhase   = SpeedCalPhase::DIST_SELECT;
@@ -275,6 +359,20 @@ void loop() {
             // Speed cal distance selection overrides everything (pre-nav-device)
             if (gSpeedCalPhase == SpeedCalPhase::DIST_SELECT) {
                 display::showSpeedCalDistSelect(gSpeedCalDist_ft);
+            } else if (gSpeedCalPhase == SpeedCalPhase::COUNTDOWN) {
+                // Countdown in progress — show countdown timer and auto-send START when done
+                uint32_t elapsedMs = now - gCountdownStartMs;
+                if (elapsedMs >= COUNTDOWN_TOTAL_MS) {
+                    // Countdown complete — send START_SPEED_CAL and return to WAITING
+                    sendSpeedCalStart(gSpeedCalDist_ft);
+                    gSpeedCalPhase = SpeedCalPhase::WAITING;
+                    Serial.println("[SPEED_CAL] Countdown complete, sent START_SPEED_CAL");
+                } else {
+                    // Still counting down — show remaining seconds (5, 4, 3, 2, 1, GO!)
+                    uint32_t remainingMs = COUNTDOWN_TOTAL_MS - elapsedMs;
+                    int secondsRemaining = (int)((remainingMs + 999) / 1000);  // round up
+                    display::showSpeedCalCountdown(secondsRemaining);
+                }
             } else {
 
             SystemState navState = static_cast<SystemState>(lastNav.system_state);
@@ -485,6 +583,22 @@ static void handleButtons() {
             btn2.fired = true;
             sendSpeedCalStart(gSpeedCalDist_ft);
             gSpeedCalPhase = SpeedCalPhase::WAITING;
+        }
+        return;
+    }
+
+    // --- Speed cal: waiting for flow (or manual countdown) --------------------
+    if (gSpeedCalPhase == SpeedCalPhase::WAITING || gSpeedCalPhase == SpeedCalPhase::COUNTDOWN) {
+        // BTN2: long press starts manual countdown
+        if (btn2.pressed && !btn2.fired) {
+            uint32_t held = now - btn2.pressStartMs;
+            if (held >= LONG_PRESS_MS && gSpeedCalPhase == SpeedCalPhase::WAITING) {
+                // Transition to COUNTDOWN
+                gCountdownStartMs = now;
+                gSpeedCalPhase = SpeedCalPhase::COUNTDOWN;
+                btn2.fired = true;
+                Serial.println("[SPEED_CAL] Long-press BTN2: starting manual countdown");
+            }
         }
         return;
     }

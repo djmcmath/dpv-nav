@@ -1,11 +1,15 @@
 #include "web_server.h"
+#include "wifi_manager.h"
 #include <WebServer.h>
 #include <WiFi.h>
 #include <LittleFS.h>
+#include <DNSServer.h>
+#include <ESPmDNS.h>
 
 namespace web {
 
 static WebServer server(80);
+static DNSServer dnsServer;
 
 // --------------- embedded HTML page ---------------
 
@@ -49,6 +53,17 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
   .waypoint .btn-clear { background: #e63946; color: #fff; }
   .waypoint .btn-clear:hover { background: #ff4d5a; }
   #wpstatus { margin-top: .5rem; font-size: .9rem; color: #72efdd; }
+  .wifisec { margin-top: 1.5rem; padding: 1rem; background: #16213e; border-radius: 8px; }
+  .wifisec .row { margin: .4rem 0; }
+  .wifisec label { display: inline-block; width: 3.5rem; }
+  .wifisec input[type=text], .wifisec input[type=password] {
+    width: 14rem; padding: .3rem .5rem; border: 1px solid #333;
+    border-radius: 4px; background: #1a1a2e; color: #e0e0e0; font-size: .95rem; }
+  .wifisec button { background: #4cc9f0; color: #1a1a2e; border: none; padding: .4rem 1rem;
+    border-radius: 4px; cursor: pointer; font-weight: bold; margin-right: .5rem; }
+  .wifisec button:hover { background: #72efdd; }
+  #wifista { color: #aaa; font-size: .85rem; margin: .4rem 0 .6rem; }
+  #wifistat2 { margin-top: .4rem; font-size: .9rem; color: #72efdd; }
 </style>
 </head>
 <body>
@@ -75,6 +90,19 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
     <button class="btn-clear" onclick="clearWp()">Clear</button>
   </div>
   <div id="wpstatus"></div>
+</div>
+<div class="wifisec">
+  <b>WiFi Networks</b>
+  <div id="wifista">Loading...</div>
+  <table style="width:100%;border-collapse:collapse;margin-bottom:.5rem">
+    <thead><tr><th style="text-align:left;color:#4cc9f0;padding:.4rem .5rem">SSID</th><th></th></tr></thead>
+    <tbody id="netbody"><tr><td colspan="2">Loading...</td></tr></tbody>
+  </table>
+  <div style="margin-top:.6rem"><b style="font-size:.9rem">Add / Update Network</b></div>
+  <div class="row"><label>SSID:</label><input type="text" id="netssid" placeholder="Network name" autocomplete="off"></div>
+  <div class="row"><label>Pass:</label><input type="password" id="netpass" placeholder="Password" autocomplete="new-password"></div>
+  <div class="row"><button onclick="addNet()">Save</button></div>
+  <div id="wifistat2"></div>
 </div>
 <script>
 async function load() {
@@ -147,12 +175,80 @@ async function clearWp() {
     document.getElementById('wpstatus').textContent = 'Waypoint cleared';
   }
 }
+async function loadWifi() {
+  try {
+    const [nets, status] = await Promise.all([
+      fetch('/api/wifi-networks').then(r => r.json()),
+      fetch('/api/wifi-status').then(r => r.json())
+    ]);
+    const sta = document.getElementById('wifista');
+    sta.textContent = status.sta_connected
+      ? 'STA: connected to "' + status.sta_ssid + '" \u2014 ' + status.sta_ip
+      : 'STA: not connected (AP: ' + status.ap_ip + ')';
+    const tb = document.getElementById('netbody');
+    if (!nets.length) {
+      tb.innerHTML = '<tr><td colspan="2" style="padding:.4rem .5rem;color:#aaa">No networks configured</td></tr>';
+      return;
+    }
+    tb.innerHTML = nets.map(n =>
+      '<tr>' +
+      '<td style="padding:.4rem .5rem">' + n.ssid + '</td>' +
+      '<td style="padding:.4rem .5rem"><button class="btn btn-del" onclick="removeNet(\'' +
+        n.ssid.replace(/'/g, "\\'") + '\')">Remove</button></td>' +
+      '</tr>'
+    ).join('');
+  } catch(e) { document.getElementById('wifista').textContent = 'Error loading WiFi info'; }
+}
+async function addNet() {
+  const ssid = document.getElementById('netssid').value.trim();
+  const pass = document.getElementById('netpass').value;
+  const s = document.getElementById('wifistat2');
+  if (!ssid) { s.textContent = 'Enter an SSID'; return; }
+  const r = await fetch('/api/wifi-networks', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ssid, pass})
+  });
+  s.textContent = r.ok ? 'Network saved' : 'Save failed';
+  if (r.ok) {
+    document.getElementById('netssid').value = '';
+    document.getElementById('netpass').value = '';
+    loadWifi();
+  }
+}
+async function removeNet(ssid) {
+  if (!confirm('Remove network "' + ssid + '"?')) return;
+  const r = await fetch('/api/wifi-networks?ssid=' + encodeURIComponent(ssid), {method: 'DELETE'});
+  document.getElementById('wifistat2').textContent = r.ok ? 'Removed' : 'Remove failed';
+  loadWifi();
+}
 load();
 loadWp();
+loadWifi();
 </script>
 </body>
 </html>
 )rawliteral";
+
+// --------------- captive portal handlers ---------------
+// Return the exact success responses each OS expects so devices consider
+// connectivity confirmed — no popup, no "weak security" warning, stays connected.
+
+static void handleIosConnectivity() {
+    // iOS/macOS: captive.apple.com/hotspot-detect.html and /library/test/success.html
+    server.send(200, "text/html",
+        "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>");
+}
+
+static void handleAndroidConnectivity() {
+    // Android: connectivitycheck.gstatic.com/generate_204 (expects empty 204)
+    server.send(204, "text/plain", "");
+}
+
+static void handleWindowsConnectivity() {
+    // Windows NCSI: www.msftconnecttest.com/connecttest.txt
+    server.send(200, "text/plain", "Microsoft Connect Test");
+}
 
 // --------------- route handlers ---------------
 
@@ -210,7 +306,13 @@ static void handleDownload() {
         server.send(404, "text/plain", "File not found");
         return;
     }
+    // Extract just the filename (strip leading path components)
+    String filename = path;
+    int slash = path.lastIndexOf('/');
+    if (slash >= 0) filename = path.substring(slash + 1);
+
     File f = LittleFS.open(path, "r");
+    server.sendHeader("Content-Disposition", "attachment; filename=\"" + filename + "\"");
     server.streamFile(f, "application/octet-stream");
     f.close();
 }
@@ -323,18 +425,114 @@ static void handleDeleteWaypoint() {
     server.send(200, "text/plain", "OK");
 }
 
+// --------------- WiFi network management ---------------
+
+static void handleGetWifiNetworks() {
+    server.send(200, "application/json", wifi::getNetworksJson());
+}
+
+static void handleAddWifiNetwork() {
+    if (!server.hasArg("plain")) {
+        server.send(400, "text/plain", "Missing body");
+        return;
+    }
+    String body = server.arg("plain");
+
+    // Extract ssid and pass from JSON body (simple manual parse — no full JSON lib needed here)
+    auto extractField = [&](const char* key) -> String {
+        String token = String("\"") + key + "\"";
+        int idx = body.indexOf(token);
+        if (idx < 0) return "";
+        int colon = body.indexOf(':', idx + token.length());
+        if (colon < 0) return "";
+        int start = body.indexOf('"', colon + 1);
+        if (start < 0) return "";
+        int end = body.indexOf('"', start + 1);
+        if (end < 0) return "";
+        return body.substring(start + 1, end);
+    };
+
+    String ssid = extractField("ssid");
+    String pass = extractField("pass");
+    if (ssid.isEmpty()) {
+        server.send(400, "text/plain", "Missing ssid");
+        return;
+    }
+    if (ssid.length() > 63 || pass.length() > 63) {
+        server.send(400, "text/plain", "ssid/pass too long");
+        return;
+    }
+    if (!wifi::addNetwork(ssid.c_str(), pass.c_str())) {
+        server.send(500, "text/plain", "Network list full");
+        return;
+    }
+    server.send(200, "text/plain", "OK");
+}
+
+static void handleRemoveWifiNetwork() {
+    if (!server.hasArg("ssid")) {
+        server.send(400, "text/plain", "Missing 'ssid' parameter");
+        return;
+    }
+    String ssid = server.arg("ssid");
+    wifi::removeNetwork(ssid.c_str());
+    server.send(200, "text/plain", "OK");
+}
+
+static void handleWifiStatus() {
+    String json = "{\"ap_ip\":\"";
+    json += wifi::ip().toString();
+    json += "\",\"sta_connected\":";
+    json += wifi::isStaConnected() ? "true" : "false";
+    json += ",\"sta_ssid\":\"";
+    json += wifi::staSSID();
+    json += "\",\"sta_ip\":\"";
+    json += wifi::isStaConnected() ? wifi::staIP().toString() : "";
+    json += "\"}";
+    server.send(200, "application/json", json);
+}
+
 // --------------- public API ---------------
 
 void init() {
+    // Wildcard DNS: resolves every hostname to the AP IP.
+    // Combined with the OS-specific handlers below, devices silently confirm
+    // connectivity and stay connected.  Also makes tern.nav work in any browser.
+    dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
+    dnsServer.start(53, "*", wifi::ip());
+
+    // mDNS: makes tern.local resolve via the proper mDNS protocol on
+    // iOS, macOS, and Windows 10+, including when connected via STA.
+    if (MDNS.begin("tern")) {
+        MDNS.addService("http", "tcp", 80);
+        Serial.println("[Web] mDNS started: tern.local");
+    } else {
+        Serial.println("[Web] mDNS start failed");
+    }
+
+    // Captive-portal connectivity checks — each OS probes a well-known URL
+    // when joining a network; return the exact expected response so the device
+    // treats this as a normal internet connection (Option B: invisible, no popup).
+    server.on("/hotspot-detect.html",       HTTP_GET, handleIosConnectivity);
+    server.on("/library/test/success.html", HTTP_GET, handleIosConnectivity);
+    server.on("/generate_204",              HTTP_GET, handleAndroidConnectivity);
+    server.on("/gen_204",                   HTTP_GET, handleAndroidConnectivity);
+    server.on("/connecttest.txt",           HTTP_GET, handleWindowsConnectivity);
+    server.on("/ncsi.txt",                  HTTP_GET, handleWindowsConnectivity);
+
     server.on("/",            HTTP_GET,  handleIndex);
     server.on("/api/files",   HTTP_GET,  handleFileList);
     server.on("/api/fs-info", HTTP_GET,  handleFsInfo);
     server.on("/api/download",HTTP_GET,  handleDownload);
     server.on("/api/delete",  HTTP_GET,  handleDelete);
     server.on("/api/upload",  HTTP_POST, handleUploadComplete, handleUpload);
-    server.on("/api/waypoint",HTTP_GET,  handleGetWaypoint);
-    server.on("/api/waypoint",HTTP_POST, handleSetWaypoint);
-    server.on("/api/waypoint",HTTP_DELETE, handleDeleteWaypoint);
+    server.on("/api/waypoint",      HTTP_GET,    handleGetWaypoint);
+    server.on("/api/waypoint",      HTTP_POST,   handleSetWaypoint);
+    server.on("/api/waypoint",      HTTP_DELETE, handleDeleteWaypoint);
+    server.on("/api/wifi-networks", HTTP_GET,    handleGetWifiNetworks);
+    server.on("/api/wifi-networks", HTTP_POST,   handleAddWifiNetwork);
+    server.on("/api/wifi-networks", HTTP_DELETE, handleRemoveWifiNetwork);
+    server.on("/api/wifi-status",   HTTP_GET,    handleWifiStatus);
     server.onNotFound([]() {
         Serial.printf("[Web] 404: %s %s\n", server.method() == HTTP_GET ? "GET" : "POST",
                       server.uri().c_str());
@@ -345,6 +543,7 @@ void init() {
 }
 
 void update() {
+    dnsServer.processNextRequest();
     server.handleClient();
 }
 

@@ -5,6 +5,8 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <LittleFS.h>
+#include <time.h>
+#include <esp_sleep.h>
 
 #include "board_pins.h"
 #include "config.h"
@@ -200,6 +202,12 @@ void setup() {
         sysState = SystemState::READY;
     }
 
+    // Set local timezone (Seattle / Pacific Time).
+    // Must be done before wifi::init() so the NTP callback picks it up,
+    // and before any GPS-based clock sync in the loop.
+    setenv("TZ", "PST8PDT,M3.2.0,M11.1.0", 1);
+    tzset();
+
     // WiFi + web server — always start, even if IMU failed.
     // Placed after calibration so blocking cal doesn't starve the connection.
     wifi::init();
@@ -291,6 +299,37 @@ void loop() {
 
     GpsFix fix = gps::getFix();
     bool gpsFresh = fix.has_fix && (millis() - fix.fix_age_ms) < GPS_FIX_STALE_MS;
+
+    // --- GPS clock sync (one-shot) -------------------------------------------
+    // Sync system clock from GPS UTC when we first get a valid position fix
+    // with a parsed date/time. Only runs if NTP hasn't already set the clock
+    // (i.e., time(nullptr) < Nov 2023, which an unsynced ESP32 never exceeds).
+    {
+        static bool gGpsTimeSynced = false;
+        if (!gGpsTimeSynced && fix.has_fix && fix.has_time) {
+            if (time(nullptr) < 1700000000L) {
+                // mktime() interprets struct tm as local time; temporarily
+                // switch to UTC to compute the correct UTC epoch, then restore.
+                struct tm t{};
+                t.tm_year  = (2000 + fix.utc_year) - 1900;
+                t.tm_mon   = fix.utc_month - 1;
+                t.tm_mday  = fix.utc_day;
+                t.tm_hour  = fix.utc_hour;
+                t.tm_min   = fix.utc_minute;
+                t.tm_sec   = fix.utc_second;
+                t.tm_isdst = 0;
+                setenv("TZ", "UTC0", 1); tzset();
+                time_t utcEpoch = mktime(&t);
+                setenv("TZ", "PST8PDT,M3.2.0,M11.1.0", 1); tzset();
+                struct timeval tv{ .tv_sec = utcEpoch, .tv_usec = 0 };
+                settimeofday(&tv, nullptr);
+                Serial.printf("[GPS] Clock set: %04d-%02d-%02d %02d:%02d:%02d UTC\n",
+                              2000 + fix.utc_year, fix.utc_month, fix.utc_day,
+                              fix.utc_hour, fix.utc_minute, fix.utc_second);
+            }
+            gGpsTimeSynced = true;  // attempt only once regardless of outcome
+        }
+    }
 
     if (gpsFresh) {
         float cogRad = fix.course_deg * (M_PI / 180.0f);
@@ -568,8 +607,8 @@ void loop() {
             }
         } else if (gCalMode == 2) {
             // Speed cal — WAITING: watch for flow to exceed start threshold
-            float flowSpd = flow::getSpeed_ms();
-            if (flowSpd >= SPEED_CAL_START_THRESHOLD_MS) {
+            float flowFreq = flow::getFrequency_hz();
+            if (flowFreq >= SPEED_CAL_START_THRESHOLD_HZ) {
                 // Flow detected — start the run
                 gCalMode             = 3;
                 gSpeedCalStartMs     = millis();
@@ -732,6 +771,7 @@ static void sendNavPacket(float heading, float pitch, float roll,
     pkt.system_state     = static_cast<uint8_t>(sysState);
     pkt.gps_fix_quality  = fix.fix_quality;
     pkt.gps_satellites   = fix.satellites;
+    pkt.gps_signal_bars  = gps::computeSignalBars(fix);
     pkt.uptime_ms        = millis();
 
     uint8_t flags = 0;
@@ -1008,6 +1048,24 @@ static void handleDisplayCmd() {
                         }
                         nvs_nav::save(currentNavNvsState());
                         break;
+                    case DisplayCmd::POWER_OFF: {
+                        Serial.println("CMD: POWER_OFF — saving state and entering deep sleep");
+                        // Persist current position and toggle states before sleeping.
+                        {
+                            nav::Position pos = nav::getPosition();
+                            nvs_nav::savePosition(pos.x_m, pos.y_m);
+                        }
+                        nvs_nav::save(currentNavNvsState());
+                        // Power down GPS (fix is retained by module's backup battery).
+                        gps::setEnabled(false);
+                        Serial.flush();
+                        // Wake when the display device sends a byte over the serial link:
+                        // the UART start bit pulls LINK_RX_PIN LOW, triggering ext0.
+                        esp_sleep_enable_ext0_wakeup(
+                            static_cast<gpio_num_t>(LINK_RX_PIN), 0 /* wake on LOW */);
+                        esp_deep_sleep_start();
+                        break;  // unreachable — silences compiler warning
+                    }
                     default:
                         break;
                 }

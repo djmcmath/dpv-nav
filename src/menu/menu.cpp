@@ -24,7 +24,8 @@ static SendCmdFn gSendCmd = nullptr;
 
 static bool gDiveMode = false;  // Op mode toggle state (display-side tracking)
 static uint8_t gLogLevel = 0;  // Log level tracking (0=OFF, 1=LOW, 2=HIGH)
-static bool gSpeedCalPending = false;  // true after user selects "Speed cal"
+static bool gSpeedCalPending  = false;  // true after user selects "Speed cal"
+static bool gPowerOffPending  = false;  // true after user selects "OFF"
 
 // Nav-device toggle states (updated from NavPacket flags)
 static bool gGpsPosEnabled = true;
@@ -73,15 +74,17 @@ static void loadDefaults() {
     // Root menu (index 0)
     auto& root = submenus[0];
     strncpy(root.title, "MENU", MENU_LABEL_LEN);
-    root.count = 4;
-    strncpy(root.items[0].label, "Nav", MENU_LABEL_LEN);
-    root.items[0].action = Action::SUBMENU; root.items[0].submenuIdx = 1;
-    strncpy(root.items[1].label, "Cal", MENU_LABEL_LEN);
-    root.items[1].action = Action::SUBMENU; root.items[1].submenuIdx = 2;
-    strncpy(root.items[2].label, "Input", MENU_LABEL_LEN);
-    root.items[2].action = Action::SUBMENU; root.items[2].submenuIdx = 3;
-    strncpy(root.items[3].label, "Display", MENU_LABEL_LEN);
-    root.items[3].action = Action::SUBMENU; root.items[3].submenuIdx = 4;
+    root.count = 5;
+    strncpy(root.items[0].label, "OFF", MENU_LABEL_LEN);
+    root.items[0].action = Action::POWER_OFF; root.items[0].submenuIdx = -1;
+    strncpy(root.items[1].label, "Nav", MENU_LABEL_LEN);
+    root.items[1].action = Action::SUBMENU; root.items[1].submenuIdx = 1;
+    strncpy(root.items[2].label, "Cal", MENU_LABEL_LEN);
+    root.items[2].action = Action::SUBMENU; root.items[2].submenuIdx = 2;
+    strncpy(root.items[3].label, "Input", MENU_LABEL_LEN);
+    root.items[3].action = Action::SUBMENU; root.items[3].submenuIdx = 3;
+    strncpy(root.items[4].label, "Display", MENU_LABEL_LEN);
+    root.items[4].action = Action::SUBMENU; root.items[4].submenuIdx = 4;
 
     // NAV submenu (index 1)
     auto& nav = submenus[1];
@@ -332,6 +335,10 @@ static void executeAction(Action act) {
             if (gSendCmd) gSendCmd(DisplayCmd::TOGGLE_OP_MODE);
             Serial.print("[MENU] Op Mode: "); Serial.println(gDiveMode ? "DIVE" : "SURFACE");
             break;
+        case Action::POWER_OFF:
+            gPowerOffPending = true;
+            Serial.println("[MENU] POWER_OFF: entering power-off sequence");
+            break;
         default:
             break;
     }
@@ -507,6 +514,14 @@ bool isPendingSpeedCal() {
 
 void clearSpeedCalPending() {
     gSpeedCalPending = false;
+}
+
+bool isPendingPowerOff() {
+    return gPowerOffPending;
+}
+
+void clearPowerOffPending() {
+    gPowerOffPending = false;
 }
 
 }  // namespace menu

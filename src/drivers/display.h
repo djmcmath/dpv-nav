@@ -74,6 +74,9 @@ void showCalGrid(const struct CalProgressPacket& pkt, const char* title);
 void showSpeedCalDistSelect(uint16_t dist_ft);
 // Waiting for flow — DPV not yet moving.
 void showSpeedCalWaiting();
+// Manual countdown to force-start: secondsRemaining = 5..1 (shows "GO!" at 0, but
+// caller transitions away before rendering 0).
+void showSpeedCalCountdown(int secondsRemaining);
 // Run in progress — show large elapsed-time counter.
 void showSpeedCalRunning(uint16_t elapsed_s, uint16_t dist_ft);
 // Accept/reject result screen.

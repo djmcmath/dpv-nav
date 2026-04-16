@@ -20,7 +20,8 @@ static constexpr uint16_t COLOR_GREEN  = 0x07E0;
 static constexpr uint16_t COLOR_BLUE   = 0x001F;
 static constexpr uint16_t COLOR_CYAN   = 0x07FF;
 static constexpr uint16_t COLOR_YELLOW = 0xFFE0;
-static constexpr uint16_t COLOR_GRAY   = 0x7BEF;
+static constexpr uint16_t COLOR_GRAY     = 0x7BEF;
+static constexpr uint16_t COLOR_DIM_GRAY = 0x2104;  // very dark gray for empty signal bars
 
 // 40 MHz SPI — ST7789 is stable at this rate on ESP32 with short traces
 #define SPI_CLOCK_HZ 40000000
@@ -57,7 +58,7 @@ struct NavCache {
     bool    gridDrawn     = false;  // false → force full draw on next showNav()
     bool    bottomDirty   = false;  // true → bottom half overwritten by menu, needs redraw
     // Status bar
-    uint8_t gpsFixQuality = 0xFF;
+    uint8_t gpsSignalBars = 0xFF;   // 0–4 computed signal bar count
     uint8_t statusFlags   = 0xFF;   // relevant flag bits (WiFi, P, S)
     // BRG cell
     bool    hasHome       = false;
@@ -241,17 +242,32 @@ static void drawStatusBar(const NavPacket& pkt) {
     tft.setCursor(122, 4);
     tft.print("WiFi");
 
-    uint16_t gpsColor;
-    if (pkt.gps_fix_quality >= 2) {
-        gpsColor = COLOR_GREEN;
-    } else if (pkt.gps_fix_quality == 1) {
-        gpsColor = COLOR_YELLOW;
-    } else {
-        gpsColor = COLOR_RED;
-    }
-    tft.setTextColor(gpsColor, COLOR_BLACK);
+    // GPS label: grey when both GPS usage flags are off (dive mode), white otherwise.
+    bool gpsEnabled = (pkt.flags & (FLAG_GPS_POS_ENABLED | FLAG_GPS_SPD_ENABLED)) != 0;
+    uint16_t gpsLabelColor = gpsEnabled ? COLOR_WHITE : COLOR_GRAY;
+    tft.setTextColor(gpsLabelColor, COLOR_BLACK);
     tft.setCursor(207, 4);
     tft.print("GPS");
+
+    // Signal bars: 4 bottom-aligned rectangles, growing taller left-to-right.
+    // Active bars (within pkt.gps_signal_bars) drawn in label color; empty in dim gray.
+    // Layout: bar 0 at x=246, each bar 3px wide, 2px gap → bar 3 ends at x=263.
+    static constexpr int   BAR_X0         = 246;
+    static constexpr int   BAR_W          = 3;
+    static constexpr int   BAR_GAP        = 2;
+    static constexpr int   BAR_BOTTOM_Y   = 21;
+    static constexpr int   BAR_HEIGHTS[4] = { 5, 9, 13, 17 };
+
+    int numBars = pkt.gps_signal_bars;  // 0–4
+    for (int i = 0; i < 4; i++) {
+        int x = BAR_X0 + i * (BAR_W + BAR_GAP);
+        int h = BAR_HEIGHTS[i];
+        int y = BAR_BOTTOM_Y - h + 1;
+        uint16_t barColor = (i < numBars) ? gpsLabelColor : COLOR_DIM_GRAY;
+        tft.fillRect(x, y, BAR_W, h, barColor);
+        // Clear pixels above the bar (shorter bar may leave old taller-bar pixels)
+        if (y > 1) tft.fillRect(x, 1, BAR_W, y - 1, COLOR_BLACK);
+    }
 
     uint16_t posColor = (pkt.flags & FLAG_GPS_POS_ENABLED) ? COLOR_WHITE : COLOR_GRAY;
     tft.setTextColor(posColor, COLOR_BLACK);
@@ -453,7 +469,7 @@ void showNav(const NavPacket& pkt) {
 #endif
 
     // Determine which elements changed — evaluate all before updating cache
-    bool statusChanged  = (statFlags != navCache.statusFlags || pkt.gps_fix_quality != navCache.gpsFixQuality);
+    bool statusChanged  = (statFlags != navCache.statusFlags || pkt.gps_signal_bars != navCache.gpsSignalBars);
     bool brgChanged     = (bearingInt != navCache.bearingInt || hasHome != navCache.hasHome || trueHdg != navCache.trueHeading);
     bool rngChanged     = (distCm != navCache.distCm        || hasHome != navCache.hasHome);
     bool hdgChanged     = (headingInt != navCache.headingInt || trueHdg != navCache.trueHeading);
@@ -470,7 +486,7 @@ void showNav(const NavPacket& pkt) {
 
     // Update cache
     navCache.statusFlags   = statFlags;
-    navCache.gpsFixQuality = pkt.gps_fix_quality;
+    navCache.gpsSignalBars = pkt.gps_signal_bars;
     navCache.hasHome       = hasHome;
     navCache.trueHeading   = trueHdg;
     navCache.bearingInt    = bearingInt;
@@ -526,10 +542,10 @@ void showNavTop(const NavPacket& pkt) {
     int  distCm     = hasHome ? (int)(pkt.distance_home_m * 100.0f) : -1;
     uint8_t statFlags = pkt.flags & (FLAG_WIFI_ENABLED | FLAG_GPS_POS_ENABLED | FLAG_GPS_SPD_ENABLED);
 
-    if (statFlags != navCache.statusFlags || pkt.gps_fix_quality != navCache.gpsFixQuality) {
+    if (statFlags != navCache.statusFlags || pkt.gps_signal_bars != navCache.gpsSignalBars) {
         drawStatusBar(pkt);
         navCache.statusFlags   = statFlags;
-        navCache.gpsFixQuality = pkt.gps_fix_quality;
+        navCache.gpsSignalBars = pkt.gps_signal_bars;
     }
     if (bearingInt != navCache.bearingInt || hasHome != navCache.hasHome || trueHdg != navCache.trueHeading) {
         drawBearing(pkt);
@@ -905,6 +921,44 @@ void showSpeedCalWaiting() {
     tft.print("Start moving");
     tft.setCursor(4, 156);
     tft.print("to begin run");
+
+    tft.setTextSize(1);
+    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+    tft.setCursor(4, 210);
+    tft.print("Hold BTN2 to force start");
+}
+
+// ---------------------------------------------------------------------------
+// Manual countdown to force-start speed calibration.
+// Layout (320×240):
+//   y=  4  "SPEED CAL"          cyan, size 2
+//   y= 40  "STARTING IN"        yellow, size 2
+//   y= 80  countdown digit      white, size 5 (centered ~x=128)
+// ---------------------------------------------------------------------------
+void showSpeedCalCountdown(int secondsRemaining) {
+    if (!tftReady) return;
+    invalidateNavCache();
+    tft.fillScreen(COLOR_BLACK);
+
+    tft.setTextSize(2);
+    tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
+    tft.setCursor(4, 4);
+    tft.print("SPEED CAL");
+
+    tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
+    tft.setCursor(4, 40);
+    tft.print("STARTING IN");
+
+    // Big centred countdown digit
+    tft.setTextSize(5);
+    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+    char buf[4];
+    snprintf(buf, sizeof(buf), "%d", secondsRemaining);
+    // each char is 5*6=30px wide; centre in 320px
+    int charW = 5 * 6;
+    int x = (320 - (int)strlen(buf) * charW) / 2;
+    tft.setCursor(x, 90);
+    tft.print(buf);
 }
 
 // ---------------------------------------------------------------------------

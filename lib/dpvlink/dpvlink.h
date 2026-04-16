@@ -25,8 +25,9 @@ struct NavPacket {
     float    pos_y_m;           // meters north of home (or start)
     uint8_t  system_state;      // SystemState enum value
     uint8_t  flags;             // see FLAG_* constants below
-    uint8_t  gps_fix_quality;   // 0=none, 1=GPS, 2=DGPS
+    uint8_t  gps_fix_quality;   // 0=none, 1=GPS, 2=DGPS  (GGA quality field)
     uint8_t  gps_satellites;    // number of satellites in fix
+    uint8_t  gps_signal_bars;   // 0–4 signal quality bars (computed by nav device)
     uint32_t uptime_ms;
     uint8_t  cal_remaining_s;   // seconds remaining in active calibration (0 otherwise)
     uint8_t  cal_coverage_pct;  // calibration coverage/completeness 0-100
@@ -149,6 +150,7 @@ enum class DisplayCmd : uint8_t {
     SPEED_CAL_ACCEPT_RESET = 20, // accept result and reset history to single measurement
     SPEED_CAL_ACCEPT       = 21, // accept result and add to rolling history
     SPEED_CAL_REJECT       = 22, // reject result, discard measurement
+    POWER_OFF              = 25, // save state and enter deep sleep
 };
 
 // ---------------------------------------------------------------------------

@@ -1,7 +1,9 @@
 #include "logging.h"
+#include "../config.h"
 #include <Arduino.h>
 #include <LittleFS.h>
 #include <cstdio>
+#include <time.h>
 
 namespace logging {
 
@@ -82,10 +84,10 @@ static void cleanupOldLogs() {
 static void writeHeader() {
     if (!gLogFile) return;
     if (gLevel == LogLevel::LEVEL_LOW) {
-        gLogFile.print("timestamp_ms,heading_deg,speed_ms,speed_src,"
+        gLogFile.print("timestamp_ms,local_time,heading_deg,speed_ms,speed_src,"
                        "pos_x_m,pos_y_m,lat,lon,pos_src\n");
     } else if (gLevel == LogLevel::LEVEL_HIGH) {
-        gLogFile.print("timestamp_ms,heading_deg,speed_ms,speed_src,"
+        gLogFile.print("timestamp_ms,local_time,heading_deg,speed_ms,speed_src,"
                        "pos_x_m,pos_y_m,lat,lon,pos_src,"
                        "mag_x_raw,mag_y_raw,mag_z_raw,"
                        "accel_x_raw,accel_y_raw,accel_z_raw,"
@@ -202,17 +204,34 @@ bool isLogging() {
 void log(const LogData& d) {
     if (!gReady || gLevel == LogLevel::LEVEL_OFF || !gLogFile) return;
 
-    // LOW level logs at 1 Hz — skip calls that arrive faster than that.
-    if (gLevel == LogLevel::LEVEL_LOW) {
-        static uint32_t lastLowLogMs = 0;
+    // Throttle log rate per level.
+    {
+        static uint32_t lastLowLogMs  = 0;
+        static uint32_t lastHighLogMs = 0;
         uint32_t now = millis();
-        if (now - lastLowLogMs < 1000) return;
-        lastLowLogMs = now;
+        if (gLevel == LogLevel::LEVEL_LOW) {
+            if (now - lastLowLogMs < LOG_LOW_INTERVAL_MS) return;
+            lastLowLogMs = now;
+        } else if (gLevel == LogLevel::LEVEL_HIGH) {
+            if (now - lastHighLogMs < LOG_HIGH_INTERVAL_MS) return;
+            lastHighLogMs = now;
+        }
+    }
+
+    // Format local time if the system clock has been set (GPS or NTP).
+    // An unsynced ESP32 sits near epoch 0; any time >= Nov 2023 is real.
+    char localTimeBuf[24] = "";  // empty = no valid time source
+    time_t now_t = time(nullptr);
+    if (now_t >= 1700000000L) {
+        struct tm tm_info{};
+        localtime_r(&now_t, &tm_info);
+        strftime(localTimeBuf, sizeof(localTimeBuf), "%Y-%m-%dT%H:%M:%S", &tm_info);
     }
 
     // Common columns (LOW and HIGH)
-    gLogFile.printf("%lu,%.2f,%.3f,%c,%.2f,%.2f,%.8f,%.8f,%c",
+    gLogFile.printf("%lu,%s,%.2f,%.3f,%c,%.2f,%.2f,%.8f,%.8f,%c",
                     d.timestamp_ms,
+                    localTimeBuf,
                     d.heading_deg,
                     d.speed_ms,
                     d.gpsSpeed ? 'G' : 'F',

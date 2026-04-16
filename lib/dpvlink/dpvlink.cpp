@@ -41,6 +41,7 @@ size_t navPacketToBytes(const NavPacket& pkt, char* buf, size_t bufLen) {
     doc["fl"]   = pkt.flags;
     doc["gq"]   = pkt.gps_fix_quality;
     doc["gs"]   = pkt.gps_satellites;
+    doc["gb"]   = pkt.gps_signal_bars;
     doc["up"]   = pkt.uptime_ms;
     // Cal progress fields — only serialize when calibration is active (saves bandwidth)
     if (pkt.cal_remaining_s > 0 || pkt.cal_coverage_pct > 0 || pkt.cal_mode > 0) {
@@ -82,6 +83,7 @@ bool bytesToNavPacket(const char* buf, size_t len, NavPacket& out) {
     out.flags            = doc["fl"]  | (uint8_t)0;
     out.gps_fix_quality  = doc["gq"]  | (uint8_t)0;
     out.gps_satellites   = doc["gs"]  | (uint8_t)0;
+    out.gps_signal_bars  = doc["gb"]  | (uint8_t)0;
     out.uptime_ms        = doc["up"]  | (uint32_t)0;
     out.cal_remaining_s      = doc["cr"]  | (uint8_t)0;
     out.cal_coverage_pct     = doc["cp"]  | (uint8_t)0;

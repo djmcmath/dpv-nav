@@ -3,6 +3,7 @@
     {
       "title": "MENU",
       "items": [
+        {"label": "OFF", "act": 17},
         {"label": "NAV", "sub": 1},
         {"label": "CAL", "sub": 2},
         {"label": "INPUT", "sub": 3},

@@ -1,12 +1,11 @@
 // display_main.cpp — Display device entry point
-// Receives NavPacket from nav device over Serial1, renders on SSD1351 OLED.
+// Receives NavPacket from nav device over Serial1, renders on ST7789 TFT (320x240).
 // Reads buttons and sends DisplayCmd back to nav device.
 // Menu system: BTN1 opens/cycles, BTN2 selects, 15s idle timeout.
 // Both buttons held 2s: display reinit (SPI re-init + clear, no reboot).
 
 #include <Arduino.h>
-#include <Wire.h>
-#include <Adafruit_MCP23X17.h>
+#include <esp_sleep.h>
 
 #include "board_pins.h"
 #include "config.h"
@@ -15,12 +14,8 @@
 #include "nav/state.h"
 #include <dpvlink.h>
 
-// ---- Hardware --------------------------------------------------------------
-static Adafruit_MCP23X17 mcp;
-static bool mcpOk = false;
-
 // ---- Link receive state ----------------------------------------------------
-static char rxBuf[256];
+static char rxBuf[512];  // enlarged for CalProgressPacket (60-bin JSON can be ~300 bytes)
 static size_t rxPos = 0;
 static NavPacket lastNav{};
 static bool navValid = false;
@@ -28,6 +23,13 @@ static uint32_t lastNavMs = 0;
 
 static DebugPacket lastDebug{};
 static bool debugValid = false;
+
+static CalProgressPacket lastCalProgress{};
+static bool calProgressValid  = false;
+static uint32_t lastCalProgressMs = 0;
+static constexpr uint32_t CAL_COMPLETE_HOLD_MS = 3000;  // show "DONE" for 3 s then return
+static uint32_t calCompleteShownMs = 0;
+static bool calCompleteHolding = false;
 
 // ---- Link transmit buffer --------------------------------------------------
 static char txBuf[64];
@@ -41,8 +43,16 @@ static uint32_t lastDisplayMs  = 0;
 static uint32_t lastCounterMs  = 0;
 static uint32_t lastReinitMs   = 0;
 static uint32_t idleCounter    = 0;
-static bool     everConnected  = false;
 static bool     wasLinkDead    = false;
+
+// ---- Boot phase state machine -----------------------------------------------
+// WAITING  → loop shows "Waiting..." counter until first NavPacket
+// STATUS   → shows nav-device boot results for BOOT_STATUS_HOLD_MS, then DONE
+// DONE     → normal nav/cal/menu rendering
+enum class BootPhase : uint8_t { WAITING, STATUS, DONE };
+static BootPhase gBootPhase     = BootPhase::WAITING;
+static uint32_t  gBootShowMs    = 0;
+static constexpr uint32_t BOOT_STATUS_HOLD_MS = 4000;
 
 // Track whether we need to redraw nav after menu closes
 static bool menuWasOpen = false;
@@ -54,6 +64,7 @@ enum class SpeedCalPhase : uint8_t {
     NONE,         // not in speed cal
     DIST_SELECT,  // user choosing target distance
     WAITING,      // waiting for DPV flow to start
+    COUNTDOWN,    // manual countdown to start (user long-pressed BTN2)
     RUNNING,      // run in progress (nav drives timer via cal_mode=3)
     RESULT,       // accept/reject result (nav drives cal_mode=4)
 };
@@ -61,6 +72,8 @@ enum class SpeedCalPhase : uint8_t {
 static SpeedCalPhase gSpeedCalPhase      = SpeedCalPhase::NONE;
 static uint16_t      gSpeedCalDist_ft    = 300;  // selected distance
 static uint8_t       gSpeedCalChoice     = 0;    // 0=RESET+ACCEPT, 1=ACCEPT, 2=REJECT
+static uint32_t      gCountdownStartMs   = 0;    // millis() when countdown begins
+static constexpr uint32_t COUNTDOWN_TOTAL_MS = 5000;  // 5 second countdown
 
 // ---- Button debounce -------------------------------------------------------
 static constexpr uint32_t DEBOUNCE_MS   = 50;
@@ -82,10 +95,28 @@ static ButtonState btn2{BUTTON2_PIN, true, false, 0, 0, false};
 static char usbBuf[64];
 static size_t usbPos = 0;
 
+// ---- Power-off / deep sleep ------------------------------------------------
+// Both buttons (active-LOW) must be held simultaneously to wake.
+// ext1 wakes on ALL_LOW: the ESP32 wakes when all configured pins are LOW.
+// After waking we re-check that both pins stay LOW for WAKE_HOLD_MS; if
+// either releases we go back to sleep immediately.
+static constexpr uint64_t SLEEP_WAKE_PIN_MASK =
+    (1ULL << BUTTON1_PIN) | (1ULL << BUTTON2_PIN);
+static constexpr uint32_t WAKE_HOLD_MS = 600;   // both-buttons hold to confirm wake
+
+// Enter ESP32 deep sleep.  Never returns.
+static void enterDeepSleep() {
+    Serial.println("[SLEEP] entering deep sleep");
+    Serial.flush();
+    esp_sleep_enable_ext1_wakeup(SLEEP_WAKE_PIN_MASK, ESP_EXT1_WAKEUP_ALL_LOW);
+    esp_deep_sleep_start();
+}
+
 // ---- Forward declarations --------------------------------------------------
 static void processNavLine();
 static void processUsbCmd();
 static void sendCmd(DisplayCmd cmd);
+static void sendSpeedCalStart(uint16_t dist_ft);
 static void updateButton(ButtonState& b);
 static void handleButtons();
 
@@ -94,6 +125,41 @@ void setup() {
     Serial.begin(115200);
     Serial.println("\n=== DPV-NAV (display device) ===");
 
+    // ---- Wake-from-deep-sleep check ----------------------------------------
+    // Buttons are configured as INPUT in the lines below; read them now using
+    // direct INPUT mode since pinMode hasn't been called yet — but the GPIO
+    // pad default is INPUT, so digitalRead is safe here.
+    if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT1) {
+        Serial.println("[WAKE] woke from deep sleep via EXT1");
+        // Require both buttons held for WAKE_HOLD_MS to confirm intentional wake.
+        // If either releases before that, go straight back to sleep.
+        pinMode(BUTTON1_PIN, INPUT);
+        pinMode(BUTTON2_PIN, INPUT);
+        uint32_t wakeStart = millis();
+        bool confirmed = true;
+        while (millis() - wakeStart < WAKE_HOLD_MS) {
+            if (digitalRead(BUTTON1_PIN) == HIGH || digitalRead(BUTTON2_PIN) == HIGH) {
+                confirmed = false;
+                break;
+            }
+            delay(10);
+        }
+        if (!confirmed) {
+            Serial.println("[WAKE] only one button — going back to sleep");
+            Serial.flush();
+            enterDeepSleep();
+        }
+        Serial.println("[WAKE] both buttons confirmed — booting");
+        // Send a wake byte to the nav device over Serial1 so it exits deep sleep.
+        // (Nav device is configured to wake on its LINK_RX_PIN going LOW, which
+        // happens on the UART start bit of this transmission.)
+        Serial1.begin(LINK_BAUD, SERIAL_8N1, LINK_RX_PIN, LINK_TX_PIN);
+        Serial1.write('\n');   // single byte — just needs the start bit low edge
+        Serial1.flush();
+        // Serial1 will be re-initialized below in the normal setup path.
+        Serial1.end();
+    }
+
     // Serial link from nav device
     Serial1.begin(LINK_BAUD, SERIAL_8N1, LINK_RX_PIN, LINK_TX_PIN);
 
@@ -101,45 +167,37 @@ void setup() {
     pinMode(BUTTON1_PIN, INPUT);
     pinMode(BUTTON2_PIN, INPUT);
 
-    // OLED display — init before I2C (matches working init order)
+    // TFT display (ST7789)
     bool displayOk = display::init();
     Serial.print("Display init: ");
     Serial.println(displayOk ? "OK" : "FAIL");
 
-    // I2C bus + MCP23017 backlight
-    Wire.begin(SDA_PIN, SCL_PIN);
-    mcpOk = mcp.begin_I2C(MCP23017_ADDR, &Wire);
-    if (mcpOk) {
-        mcp.pinMode(MCP_BACKLIGHT_PIN, OUTPUT);
-        mcp.digitalWrite(MCP_BACKLIGHT_PIN, HIGH);
-        Serial.println("Backlight ON");
-    } else {
-        Serial.println("WARNING: MCP23017 not found — skipping backlight");
-    }
-
-    // Self-test: R/G/B color fills then summary text
-    display::reinit(); 
-    display::clear();
+    // Self-test: R/G/B color fills + "DPV-Nav" splash
     display::selfTest();
-    delay(500);
-
-    // Boot status lines
     display::clear();
-    display::statusLine("Display", displayOk);
-    display::statusLine("Backlight", mcpOk);
-    display::statusLine("Link", false);
-    delay(500);
 
     // Initialize menu system
     menu::init(sendCmd);
 
-    // Re-init display after all hardware setup (I2C/MCP init can disrupt SPI state)
     display::reinit();
-    display::clear();
     Serial.println("Display device ready — waiting for nav data");
+}
 
-    // Auto-start random text self-test (direct OLED writes, no canvas)
-    //display::startRandomTextTest(100);
+// Returns a copy of pkt with heading/bearing adjusted for the current heading
+// mode (true vs. magnetic). Nav device always sends true heading; when the user
+// selects magnetic, subtract declination here and clear FLAG_TRUE_HEADING.
+static NavPacket applyHeadingMode(NavPacket pkt) {
+    if (!menu::settings().trueHeading) {
+        auto wrap360 = [](float d) {
+            while (d < 0.0f)    d += 360.0f;
+            while (d >= 360.0f) d -= 360.0f;
+            return d;
+        };
+        pkt.heading_deg      = wrap360(pkt.heading_deg      - DEFAULT_DECLINATION_DEG);
+        pkt.bearing_home_deg = wrap360(pkt.bearing_home_deg - DEFAULT_DECLINATION_DEG);
+        pkt.flags &= ~FLAG_TRUE_HEADING;
+    }
+    return pkt;
 }
 
 // ===========================================================================
@@ -182,9 +240,36 @@ void loop() {
     // --- Menu timeout check -------------------------------------------------
     menu::tick();
 
-    // --- If menu just closed, check for pending speed cal or force redraw ---
+    // --- If menu just closed, check for pending actions or force redraw ------
     if (menuWasOpen && !menu::isOpen()) {
         menuWasOpen = false;
+
+        if (menu::isPendingPowerOff()) {
+            menu::clearPowerOffPending();
+            // Tell the nav device to save state and sleep.
+            sendCmd(DisplayCmd::POWER_OFF);
+            // "Powering off" animation: 5 dots, one per second.
+            display::clear();
+            constexpr uint16_t CLR_WHITE = 0xFFFF;
+            for (int dots = 1; dots <= 5; dots++) {
+                display::clear();
+                char buf[20];
+                snprintf(buf, sizeof(buf), "Powering off");
+                display::drawText(4, 108, buf, CLR_WHITE, 2);
+                // Draw dots accumulated so far
+                char dotBuf[8];
+                for (int i = 0; i < dots; i++) dotBuf[i] = '.';
+                dotBuf[dots] = '\0';
+                display::drawText(4, 140, dotBuf, CLR_WHITE, 2);
+                display::flush();
+                delay(1000);
+            }
+            display::clear();
+            display::flush();
+            enterDeepSleep();
+            // never returns
+        }
+
         if (menu::isPendingSpeedCal()) {
             menu::clearSpeedCalPending();
             gSpeedCalPhase   = SpeedCalPhase::DIST_SELECT;
@@ -203,32 +288,96 @@ void loop() {
     if (now - lastReinitMs >= REINIT_INTERVAL_MS) {
         lastReinitMs = now;
         display::reinit();
-        // reinit re-pushes the canvas buffer, so display content is restored
+        // reinit re-initializes SSD controller and SPI speed
     }
 
     // --- Update display -------------------------------------------------------
     // Skip normal rendering while any self-test is running
     if (display::isRandomRectTestActive() || display::isRandomTextTestActive()) return;
 
+    if (gBootPhase == BootPhase::WAITING) {
+        // No nav contact yet — show animated "Waiting..." counter at 1 Hz
+        if (now - lastCounterMs >= COUNTER_INTERVAL_MS) {
+            lastCounterMs = now;
+            idleCounter++;
+            char buf[22];
+            snprintf(buf, sizeof(buf), "Waiting... %lus", (unsigned long)idleCounter);
+            display::drawText(4, 44, buf, 0x07E0, 1);
+            display::flush();
+        }
+        return;
+    }
+
+    if (gBootPhase == BootPhase::STATUS) {
+        // Show boot status screen until hold time expires; re-render at 4 Hz
+        // to keep it visible (display::showBootStatus was already called on first packet).
+        if (now - lastDisplayMs >= DISPLAY_INTERVAL_MS) {
+            lastDisplayMs = now;
+            display::showBootStatus(lastNav.boot_flags);
+        }
+        if (now - gBootShowMs >= BOOT_STATUS_HOLD_MS) {
+            gBootPhase = BootPhase::DONE;
+            wasLinkDead = false;
+            display::clear();
+        }
+        return;
+    }
+
+    // --- BootPhase::DONE — normal operation ----------------------------------
     bool linkAlive = navValid && (now - lastNavMs < NAV_TIMEOUT_MS);
 
     if (linkAlive) {
-        // Transitioning from dead → alive: wipe the "NO LINK" screen
         if (wasLinkDead) {
             wasLinkDead = false;
+            display::clear();
         }
         // Live data — render at 4 Hz
         if (now - lastDisplayMs >= DISPLAY_INTERVAL_MS) {
             lastDisplayMs = now;
 
+            // Bin cal complete: hold DONE screen for CAL_COMPLETE_HOLD_MS then return
+            if (calCompleteHolding) {
+                display::showCalGrid(lastCalProgress,
+                                     lastCalProgress.cal_type == (uint8_t)CalType::MOUNTED
+                                         ? "MOUNTED CAL" : "BASELINE CAL");
+                if (now - calCompleteShownMs >= CAL_COMPLETE_HOLD_MS) {
+                    calCompleteHolding = false;
+                    calProgressValid   = false;
+                    display::clear();
+                }
+                return;
+            }
+
+            // Active bin cal progress grid — takes priority over all other rendering
+            if (calProgressValid) {
+                display::showCalGrid(lastCalProgress,
+                                     lastCalProgress.cal_type == (uint8_t)CalType::MOUNTED
+                                         ? "MOUNTED CAL" : "BASELINE CAL");
+                return;
+            }
+
             // Speed cal distance selection overrides everything (pre-nav-device)
             if (gSpeedCalPhase == SpeedCalPhase::DIST_SELECT) {
                 display::showSpeedCalDistSelect(gSpeedCalDist_ft);
+            } else if (gSpeedCalPhase == SpeedCalPhase::COUNTDOWN) {
+                // Countdown in progress — show countdown timer and auto-send START when done
+                uint32_t elapsedMs = now - gCountdownStartMs;
+                if (elapsedMs >= COUNTDOWN_TOTAL_MS) {
+                    // Countdown complete — send START_SPEED_CAL and return to WAITING
+                    sendSpeedCalStart(gSpeedCalDist_ft);
+                    gSpeedCalPhase = SpeedCalPhase::WAITING;
+                    Serial.println("[SPEED_CAL] Countdown complete, sent START_SPEED_CAL");
+                } else {
+                    // Still counting down — show remaining seconds (5, 4, 3, 2, 1, GO!)
+                    uint32_t remainingMs = COUNTDOWN_TOTAL_MS - elapsedMs;
+                    int secondsRemaining = (int)((remainingMs + 999) / 1000);  // round up
+                    display::showSpeedCalCountdown(secondsRemaining);
+                }
             } else {
 
             SystemState navState = static_cast<SystemState>(lastNav.system_state);
             if (navState == SystemState::CALIBRATION) {
-                // Dispatch by cal_mode: 0/1 = mag cal, 2/3/4 = speed cal
+                // Dispatch by cal_mode: 0/1 = mag cal (legacy), 2/3/4 = speed cal
                 if (lastNav.cal_mode <= 1) {
                     display::showCal(lastNav.cal_remaining_s,
                                      lastNav.cal_coverage_pct,
@@ -245,9 +394,10 @@ void loop() {
                                                 lastNav.speed_cal_k_proposed,
                                                 gSpeedCalChoice);
                 }
+                // cal_mode 5/6 (bin cal): rendered via CalProgressPacket above
             } else if (menu::isOpen()) {
-                // Menu is open — draw top row to canvas, then menu, then flush once
-                display::showNavTop(lastNav);
+                // Menu is open — draw top row, then menu overlay, then flush (no-op)
+                display::showNavTop(applyHeadingMode(lastNav));
                 menu::render();
                 display::flush();
             } else {
@@ -255,23 +405,13 @@ void loop() {
                 if (menu::settings().debugMode && debugValid) {
                     display::showDebug(lastDebug);
                 } else {
-                    display::showNav(lastNav);
+                    display::showNav(applyHeadingMode(lastNav));
                 }
             }
             } // end else (not DIST_SELECT)
         }
-    } else if (!everConnected) {
-        // Never received nav data — show idle uptime counter at 1 Hz
-        if (now - lastCounterMs >= COUNTER_INTERVAL_MS) {
-            lastCounterMs = now;
-            idleCounter++;
-            char buf[22];
-            snprintf(buf, sizeof(buf), "Waiting... %lus", (unsigned long)idleCounter);
-            display::drawText(4, 44, buf, 0x07E0, 1);
-            display::flush();
-        }
     } else {
-        // Was connected but link dropped
+        // Link dropped
         if (!wasLinkDead) {
             wasLinkDead = true;
             display::clear();
@@ -294,11 +434,13 @@ static void processNavLine() {
             navValid  = true;
             lastNavMs = millis();
             menu::updateNavState(lastNav.flags);
-            if (!everConnected) {
-                everConnected = true;
-                display::clear();
+            if (gBootPhase == BootPhase::WAITING) {
+                gBootPhase  = BootPhase::STATUS;
+                gBootShowMs = millis();
+                display::showBootStatus(lastNav.boot_flags);
             }
-            // Advance speed cal phase based on cal_mode from nav device
+            // Advance speed cal phase based on cal_mode from nav device.
+            // Only advance forward — never reset backward on a single packet.
             SystemState ns = static_cast<SystemState>(lastNav.system_state);
             if (ns == SystemState::CALIBRATION) {
                 if (lastNav.cal_mode == 3 &&
@@ -311,21 +453,28 @@ static void processNavLine() {
                     gSpeedCalChoice  = 0;
                     Serial.println("[SPEED_CAL] result ready — showing accept/reject");
                 }
-            } else if (ns != SystemState::CALIBRATION &&
-                       (gSpeedCalPhase == SpeedCalPhase::WAITING ||
-                        gSpeedCalPhase == SpeedCalPhase::RUNNING)) {
-                // Nav device exited calibration unexpectedly
-                gSpeedCalPhase = SpeedCalPhase::NONE;
-                display::clear();
+            }
+            // If nav device returns to READY after bin cal, clear our cal state
+            if (ns != SystemState::CALIBRATION && calProgressValid) {
+                if (!calCompleteHolding) {
+                    calProgressValid = false;
+                }
             }
         }
     } else if (ptype == PacketType::DEBUG) {
         if (bytesToDebugPacket(rxBuf, rxPos, lastDebug)) {
             debugValid = true;
             lastNavMs = millis();
-            if (!everConnected) {
-                everConnected = true;
-                display::clear();
+        }
+    } else if (ptype == PacketType::CAL_PROGRESS) {
+        if (bytesToCalProgressPacket(rxBuf, rxPos, lastCalProgress)) {
+            calProgressValid   = true;
+            lastCalProgressMs  = millis();
+            lastNavMs          = millis();  // keep link-alive timer refreshed
+            if (lastCalProgress.complete && !calCompleteHolding) {
+                calCompleteHolding  = true;
+                calCompleteShownMs  = millis();
+                Serial.println("[CAL_GRID] Complete — holding DONE screen");
             }
         }
     }
@@ -434,6 +583,22 @@ static void handleButtons() {
             btn2.fired = true;
             sendSpeedCalStart(gSpeedCalDist_ft);
             gSpeedCalPhase = SpeedCalPhase::WAITING;
+        }
+        return;
+    }
+
+    // --- Speed cal: waiting for flow (or manual countdown) --------------------
+    if (gSpeedCalPhase == SpeedCalPhase::WAITING || gSpeedCalPhase == SpeedCalPhase::COUNTDOWN) {
+        // BTN2: long press starts manual countdown
+        if (btn2.pressed && !btn2.fired) {
+            uint32_t held = now - btn2.pressStartMs;
+            if (held >= LONG_PRESS_MS && gSpeedCalPhase == SpeedCalPhase::WAITING) {
+                // Transition to COUNTDOWN
+                gCountdownStartMs = now;
+                gSpeedCalPhase = SpeedCalPhase::COUNTDOWN;
+                btn2.fired = true;
+                Serial.println("[SPEED_CAL] Long-press BTN2: starting manual countdown");
+            }
         }
         return;
     }

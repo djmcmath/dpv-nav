@@ -3,6 +3,7 @@
     {
       "title": "MENU",
       "items": [
+        {"label": "OFF", "act": 17},
         {"label": "NAV", "sub": 1},
         {"label": "CAL", "sub": 2},
         {"label": "INPUT", "sub": 3},
@@ -21,8 +22,8 @@
     {
       "title": "CAL",
       "items": [
-        {"label": "Quick cal", "act": 5},
-        {"label": "Full cal", "act": 6},
+        {"label": "Baseline", "act": 5},
+        {"label": "Mounted", "act": 6},
         {"label": "Speed cal", "act": 7}
       ]
     },

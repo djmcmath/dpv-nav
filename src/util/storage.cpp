@@ -2,8 +2,13 @@
 #include <LittleFS.h>
 #include <Arduino.h>
 #include <cstdio>
+#include <math.h>
 
 namespace storage {
+
+// Forward declarations for static helpers defined later in the file
+static bool parseJsonMagCalib(const char* json, MagCalib& cal);
+static bool parseJsonCalib3(const char* json, Calib3& cal);
 
 // Helper: Ensure LittleFS is mounted
 static bool ensureLittleFS() {
@@ -310,6 +315,112 @@ static bool parseJsonMagCalib(const char* json, MagCalib& cal) {
 
   //Serial.println("[STORAGE] Successfully parsed magnetometer calibration JSON");
   return true;
+}
+
+bool loadMagCalibrationChain(MagCalib& effectiveCal, bool& hasBase, bool& hasMount) {
+    hasBase  = false;
+    hasMount = false;
+
+    MagCalib base{};
+    // Identity defaults
+    base.bias = {0, 0, 0};
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++)
+            base.softIron[i][j] = (i == j) ? 1.0f : 0.0f;
+
+    MagCalib mount{};
+    mount.bias = {0, 0, 0};
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++)
+            mount.softIron[i][j] = (i == j) ? 1.0f : 0.0f;
+
+    // Try to load base calibration
+    if (loadMagCalibration(MAG_BASE_FILE, base)) {
+        hasBase = true;
+        Serial.println("[STORAGE] mag_base.json loaded");
+    } else {
+        // Fall back to legacy file
+        if (loadMagCalibration(MAG_LEGACY_FILE, base)) {
+            hasBase = true;
+            Serial.println("[STORAGE] Legacy mag_cal.json loaded as base");
+        }
+    }
+
+    // Try to load mounted correction (only meaningful if base loaded)
+    if (hasBase && loadMagCalibration(MAG_MOUNT_FILE, mount)) {
+        hasMount = true;
+        Serial.println("[STORAGE] mag_mount.json loaded");
+    }
+
+    if (!hasBase) {
+        Serial.println("[STORAGE] No mag calibration files found — uncalibrated");
+        // Return identity (no calibration)
+        effectiveCal = base;
+        return false;
+    }
+
+    if (!hasMount) {
+        // Only base: effective cal is just base
+        effectiveCal = base;
+        return true;
+    }
+
+    // Compose: corrected = M_mount * (M_base * (raw - b_base) - b_mount)
+    // Rewrite as: corrected = M_mount*M_base * raw - M_mount*M_base*b_base - M_mount*b_mount
+    // Define:  M_eff = M_mount * M_base
+    //          b_eff = b_base + M_base_inv * b_mount   (so M_eff*(raw-b_eff) = full chain)
+    //
+    // To pre-compose: we store M_eff and b_eff in a single MagCalib.
+
+    // M_eff = M_mount * M_base  (row-vector convention: result[i][j] = sum_k M_mount[i][k]*M_base[k][j])
+    float M_eff[3][3] = {};
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++)
+            for (int k = 0; k < 3; k++)
+                M_eff[i][j] += mount.softIron[i][k] * base.softIron[k][j];
+
+    // b_mount is in base-corrected space.  Convert to raw space:
+    // b_eff = b_base + M_base_inv * b_mount
+    // Solve M_base * delta = b_mount  →  delta = M_base_inv * b_mount
+    // Simple 3×3 Cramer's rule inversion:
+    float A[3][3];
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++)
+            A[i][j] = base.softIron[i][j];
+
+    float det = A[0][0]*(A[1][1]*A[2][2]-A[1][2]*A[2][1])
+              - A[0][1]*(A[1][0]*A[2][2]-A[1][2]*A[2][0])
+              + A[0][2]*(A[1][0]*A[2][1]-A[1][1]*A[2][0]);
+
+    float bm[3] = { mount.bias.x, mount.bias.y, mount.bias.z };
+    float delta[3] = {};
+    if (fabsf(det) > 1e-9f) {
+        float invDet = 1.0f / det;
+        float inv[3][3];
+        inv[0][0] =  (A[1][1]*A[2][2] - A[1][2]*A[2][1]) * invDet;
+        inv[0][1] = -(A[0][1]*A[2][2] - A[0][2]*A[2][1]) * invDet;
+        inv[0][2] =  (A[0][1]*A[1][2] - A[0][2]*A[1][1]) * invDet;
+        inv[1][0] = -(A[1][0]*A[2][2] - A[1][2]*A[2][0]) * invDet;
+        inv[1][1] =  (A[0][0]*A[2][2] - A[0][2]*A[2][0]) * invDet;
+        inv[1][2] = -(A[0][0]*A[1][2] - A[0][2]*A[1][0]) * invDet;
+        inv[2][0] =  (A[1][0]*A[2][1] - A[1][1]*A[2][0]) * invDet;
+        inv[2][1] = -(A[0][0]*A[2][1] - A[0][1]*A[2][0]) * invDet;
+        inv[2][2] =  (A[0][0]*A[1][1] - A[0][1]*A[1][0]) * invDet;
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++)
+                delta[i] += inv[i][j] * bm[j];
+    }
+
+    effectiveCal.bias.x = base.bias.x + delta[0];
+    effectiveCal.bias.y = base.bias.y + delta[1];
+    effectiveCal.bias.z = base.bias.z + delta[2];
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++)
+            effectiveCal.softIron[i][j] = M_eff[i][j];
+
+    Serial.printf("[STORAGE] Composed cal chain: base+mount → b_eff=(%.2f,%.2f,%.2f)\n",
+                  effectiveCal.bias.x, effectiveCal.bias.y, effectiveCal.bias.z);
+    return true;
 }
 
 bool saveCalib3(const char* filename, const Calib3& cal) {

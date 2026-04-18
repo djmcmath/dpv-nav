@@ -394,12 +394,18 @@ def compute_residuals(samples, bias, soft_iron, avg_radius):
 def load_csv(filename):
     """Load magnetometer samples from CSV file.
 
-    Accepts two formats:
-    1. Simple format: X,Y,Z raw counts (one sample per line, optional header)
+    Both formats return data in **logical frame** (axis map already applied):
+
+    1. Simple format: X,Y,Z raw counts (one sample per line, optional header).
+       Written by magBinCalDumpCSV(), which stores readMagRaw() output (post-axis-map).
+
     2. Nav logger format: full log CSV with many columns. Detected by the presence
-       of "mag_x_raw" in the header. Extracts mag_x/y/z_raw (µT), converts to raw
-       counts (×68.42 LSB/µT), and undoes the axis map (negate Y, since magMap.y=-2)
-       to put data in the same frame as simple-format calibration CSVs.
+       of "mag_x_raw" in the header. Extracts mag_x/y/z_raw (µT), converts to counts.
+       mag_x_raw is logged from readMag_raw_cal() which calls readMagRaw() internally,
+       so the axis map is already applied — data is in logical frame.
+
+    In both cases the output is in logical frame (post-axis-map counts), which is what
+    readMag() expects when applying the stored calibration at runtime.
     """
     with open(filename, 'r') as f:
         header = f.readline().strip()
@@ -412,11 +418,12 @@ def load_csv(filename):
         iy = header_cols.index('mag_y_raw')
         iz = header_cols.index('mag_z_raw')
         data = np.loadtxt(filename, delimiter=',', skiprows=1, usecols=(ix, iy, iz))
-        mag_ut = data  # µT, raw sensor values (no axis map applied in logger)
-        # Convert µT → raw sensor counts (same frame as mag_cal_collect.cpp readMagRaw)
+        # mag_x/y/z_raw in µT, logical frame (readMag_raw_cal → readMagRaw → axis map applied)
+        mag_ut = data
+        # Convert µT → raw logical-frame counts
         LSB_PER_UT = 68.42
         counts = mag_ut * LSB_PER_UT
-        print(f"  (nav-log format detected: extracted mag_x/y/z_raw, converted to raw counts)")
+        print(f"  (nav-log format detected: extracted mag_x/y/z_raw, converted to logical-frame counts)")
         return counts
 
     try:
@@ -434,14 +441,18 @@ def load_csv(filename):
 
 def deduplicate(samples):
     """
-    Remove consecutive and exact duplicate samples.
+    Remove exact duplicate samples.
 
-    The ESP32 logs at 100 Hz while the device may be stationary, producing
-    runs of 8-10 identical rows per orientation. These duplicates bias the
-    ellipsoid fit toward heavily-sampled orientations without adding geometric
-    information. Removing them gives each distinct orientation equal weight.
+    Duplicates are now rejected at collection time on the device (imu.cpp
+    magBinCalTick checks each new sample against the last accepted sample for
+    that bin before storing it).  This function is kept as a safety net for
+    CSV files collected with older firmware that did not have runtime dedup.
     """
     unique = np.unique(samples, axis=0)
+    n_removed = len(samples) - len(unique)
+    if n_removed > 0:
+        print(f"  [dedup] Removed {n_removed} exact duplicate rows from legacy CSV "
+              f"({len(unique)} unique samples remain)")
     return unique
 
 
@@ -467,50 +478,159 @@ def save_json_calibration(filename, bias, soft_iron):
     print(f"\nSaved calibration to {filename}")
 
 
-def main():
-    if len(sys.argv) < 2:
-        print("Usage: python mag_calibration.py <spherical.csv> [flat_rotation.csv]")
-        print("\nspherical.csv  — samples from full 3D rotation (all orientations)")
-        print("flat_rotation.csv — optional: samples from flat 360° yaw rotation only")
-        print("                    when provided, refines horizontal-plane bias offset")
-        print("\nCSV format: X,Y,Z (raw magnetometer readings, one sample per line)")
-        sys.exit(1)
+def compute_mounted_correction(mounted_samples, base_bias, base_soft_iron):
+    """
+    Solve for mounted-cal correction (M_mount, b_mount) from base-corrected residuals.
 
-    input_file = sys.argv[1]
-    flat_file = sys.argv[2] if len(sys.argv) >= 3 else None
-    output_file = "mag_cal.json"
+    Inputs:
+        mounted_samples  — (N, 3) raw logical-frame counts from mounted cal CSV
+        base_bias        — (3,) b_base from mag_base.json
+        base_soft_iron   — (3, 3) M_base from mag_base.json
+
+    Returns:
+        b_mount     — (3,) hard-iron offset in base-corrected space (b_z always 0)
+        M_mount     — (3, 3) soft-iron correction in base-corrected space (s_z always 1)
+        info        — diagnostic dict
+
+    Transform chain: corrected = M_mount * (M_base * (raw - b_base) - b_mount)
+
+    Constrained fit — only b_x, b_y, s_x, s_y are solved:
+      b_z = 0, s_z = 1 (locked)
+    Mounted cal only covers ±30° pitch, which is insufficient to constrain the Z
+    axis reliably.  Solving b_z / s_z from sparse, asymmetric vertical data would
+    produce noisy corrections that hurt heading accuracy more than they help.
+
+    Both b_x/b_y and s_x/s_y are regularized toward their priors (0 and 1) via a
+    weighted-prior blend: estimate = (raw * n + prior * LAMBDA) / (n + LAMBDA).
+    This prevents extreme corrections when the mounted cal dataset is small.
+
+    b_x, b_y are estimated via an algebraic 2D circle fit (more robust than
+    min/max midpoint for the heading-critical horizontal axes).
+    """
+    # Regularization strengths, in "equivalent prior sample counts".
+    # At n = 100 samples: bias shrinkage ~33%, scale shrinkage ~33%.
+    # At n = 500 samples: shrinkage ~9%.  Adjust if data is routinely sparse/dense.
+    LAMBDA_BIAS  = 50.0
+    LAMBDA_SCALE = 50.0
+
+    # Apply base calibration to all mounted samples
+    base_corrected = (base_soft_iron @ (mounted_samples - base_bias).T).T  # (N, 3)
+    n = len(base_corrected)
+
+    # --- Hard-iron offset: b_x, b_y only; b_z locked to 0 ---
+    # 2D algebraic circle fit on X,Y is more accurate than min/max midpoint:
+    # it's not thrown off by azimuth gaps and handles full or partial coverage.
+    b_x_raw, b_y_raw, r_flat = fit_circle_2d(base_corrected[:, :2])
+
+    # Regularize toward 0: b_reg = b_raw * n / (n + LAMBDA)
+    b_x = b_x_raw * n / (n + LAMBDA_BIAS)
+    b_y = b_y_raw * n / (n + LAMBDA_BIAS)
+    b_mount = np.array([b_x, b_y, 0.0])
+
+    # --- Scale correction: s_x, s_y only; s_z locked to 1 ---
+    # Solve A*u^2 + C*v^2 = 1 with known centre (2-parameter algebraic LS fit).
+    # More robust than per-axis RMS: RMS is biased when samples cluster near
+    # 0°/180° vs 90°/270° (common in hand-collected mounted-cal data because
+    # operators tend to hold one heading longer while turning around).
+    # The algebraic fit uses all samples optimally via normal equations.
+    centered = base_corrected - b_mount
+    u = centered[:, 0]
+    v = centered[:, 1]
+    M22 = np.array([
+        [np.sum(u**4),        np.sum(u**2 * v**2)],
+        [np.sum(u**2 * v**2), np.sum(v**4)       ],
+    ])
+    rhs22 = np.array([np.sum(u**2), np.sum(v**2)])
+    scale_method = "algebraic"
+    rx = ry = 1.0  # fallback values
+    try:
+        Ac = np.linalg.solve(M22, rhs22)  # [A, C]
+        if Ac[0] > 0 and Ac[1] > 0:
+            rx = 1.0 / np.sqrt(Ac[0])
+            ry = 1.0 / np.sqrt(Ac[1])
+        else:
+            raise ValueError("non-positive semi-axis")
+    except Exception:
+        # Fallback: per-axis RMS (less accurate for skewed distributions)
+        rms_xy = np.sqrt(np.mean(centered[:, :2]**2, axis=0))
+        rx, ry = rms_xy[0], rms_xy[1]
+        scale_method = "RMS (algebraic fallback)"
+        print("  WARNING: algebraic scale fit failed — using per-axis RMS fallback")
+
+    avg_r_fit = (rx + ry) / 2.0
+    s_xy_raw = np.array([avg_r_fit / rx, avg_r_fit / ry])
+
+    # Regularize toward 1: s_reg = (s_raw * n + 1.0 * LAMBDA) / (n + LAMBDA)
+    s_xy_reg = (s_xy_raw * n + LAMBDA_SCALE) / (n + LAMBDA_SCALE)
+    scale = np.array([s_xy_reg[0], s_xy_reg[1], 1.0])
+    M_mount = np.diag(scale)
+
+    # Heading error estimate from XY ellipticity (before correction)
+    diff_rc = abs(rx - ry)
+    hdg_err_raw = float(np.degrees(np.arctan2(diff_rc, avg_r_fit))) if avg_r_fit > 0 else 0.0
+
+    # Diagnostics (residuals after applying the full correction)
+    corrected_final = (M_mount @ centered.T).T
+    magnitudes = np.linalg.norm(corrected_final, axis=1)
+    avg_r = np.mean(magnitudes)
+    errors = magnitudes - avg_r
+    rms_err = np.sqrt(np.mean(errors**2))
+
+    info = {
+        'n_samples': n,
+        'b_mount': b_mount,
+        'b_raw': np.array([b_x_raw, b_y_raw, 0.0]),
+        'scale': scale,
+        'scale_raw': np.array([s_xy_raw[0], s_xy_raw[1], 1.0]),
+        'r_flat': r_flat,
+        'rx': rx, 'ry': ry,
+        'hdg_err_raw_deg': hdg_err_raw,
+        'scale_method': scale_method,
+        'avg_radius': avg_r,
+        'rms_error': rms_err,
+        'rms_pct': 100.0 * rms_err / avg_r if avg_r > 0 else float('nan'),
+    }
+
+    return b_mount, M_mount, info
+
+
+def load_json_calibration(filename):
+    """Load MagCalib JSON produced by save_json_calibration()."""
+    with open(filename, 'r') as f:
+        d = json.load(f)
+    bias = np.array([d['bias']['x'], d['bias']['y'], d['bias']['z']])
+    si = d['softIron']
+    soft_iron = np.array([[si[r][c] for c in range(3)] for r in range(3)])
+    return bias, soft_iron
+
+
+def run_baseline(args):
+    """Handle --mode baseline: full ellipsoid fit → mag_base.json"""
+    input_file = args.input
+    flat_file   = args.flat
+    output_file = args.output or "mag_base.json"
 
     print(f"Loading samples from {input_file}...")
     samples = load_csv(input_file)
     print(f"Loaded {len(samples)} samples")
 
-    samples_dedup = deduplicate(samples)
-    n_removed = len(samples) - len(samples_dedup)
-    if n_removed > 0:
-        print(f"De-duplicated: removed {n_removed} exact duplicate rows "
-              f"({len(samples_dedup)} unique locations remain)")
-        samples = samples_dedup
+    samples = deduplicate(samples)
 
     if len(samples) < 100:
-        print("WARNING: Less than 100 samples. Recommend at least 500 samples for accurate calibration.")
+        print("WARNING: Less than 100 samples. Recommend at least 500 for accurate calibration.")
 
     flat_samples = None
-    if flat_file is not None:
+    if flat_file:
         print(f"\nLoading flat-rotation samples from {flat_file}...")
         flat_samples = load_csv(flat_file)
-        flat_dedup = deduplicate(flat_samples)
-        n_flat_removed = len(flat_samples) - len(flat_dedup)
-        if n_flat_removed > 0:
-            print(f"De-duplicated: removed {n_flat_removed} rows "
-                  f"({len(flat_dedup)} unique locations remain)")
-            flat_samples = flat_dedup
+        flat_samples = deduplicate(flat_samples)
         print(f"Loaded {len(flat_samples)} flat-rotation samples")
 
     print("\nFitting ellipsoid...")
     bias, soft_iron, info = compute_calibration(samples, flat_samples=flat_samples)
 
     print("\n" + "="*60)
-    print("MAGNETOMETER CALIBRATION RESULTS")
+    print("BASELINE CALIBRATION RESULTS")
     print("="*60)
 
     print(f"\nHard-Iron Offset (bias):")
@@ -523,58 +643,32 @@ def main():
         print(f"  [{soft_iron[i, 0]:8.6f}, {soft_iron[i, 1]:8.6f}, {soft_iron[i, 2]:8.6f}]")
 
     print(f"\nDiagnostics:")
-    print(f"  Number of samples: {info['num_samples']}")
+    print(f"  Samples: {info['num_samples']}")
     print(f"  Ellipsoid center: [{info['center'][0]:.2f}, {info['center'][1]:.2f}, {info['center'][2]:.2f}]")
-    print(f"  Ellipsoid radii: [{info['radii'][0]:.2f}, {info['radii'][1]:.2f}, {info['radii'][2]:.2f}]")
-    print(f"  Average radius: {info['avg_radius']:.2f}")
+    print(f"  Ellipsoid radii:  [{info['radii'][0]:.2f}, {info['radii'][1]:.2f}, {info['radii'][2]:.2f}]")
+    print(f"  Average radius:   {info['avg_radius']:.2f}")
 
-    if np.isnan(info['radii_variation']):
-        print(f"  Radii variation: N/A (calculation failed)")
-    else:
+    if not np.isnan(info['radii_variation']):
         print(f"  Radii variation: {info['radii_variation']*100:.2f}%")
+        if info['radii_variation'] > 0.1:
+            print(f"  WARNING: High variation — rotate through more orientations.")
 
-    if not np.isnan(info['radii_variation']) and info['radii_variation'] > 0.1:
-        print(f"\n  WARNING: High radii variation ({info['radii_variation']*100:.1f}%) suggests poor sample distribution.")
-        print(f"           Rotate device through ALL orientations during calibration.")
-
-    # Residual analysis
     residuals = compute_residuals(samples, bias, soft_iron, info['avg_radius'])
-    print(f"\nResiduals (calibrated point distance from reference sphere):")
-    print(f"  Reference radius:  {info['avg_radius']:.2f}")
-    print(f"  Mean magnitude:    {residuals['mean_magnitude']:.2f}")
-    print(f"  Std of magnitude:  {residuals['std_magnitude']:.2f}")
-    print(f"  RMS error:         {residuals['rms_error']:.2f}  ({residuals['rms_pct']:.2f}%)")
-    print(f"  Max |error|:       {residuals['max_abs_error']:.2f}  ({residuals['max_abs_pct']:.2f}%)")
+    print(f"\nResiduals:")
+    print(f"  RMS error:  {residuals['rms_error']:.2f}  ({residuals['rms_pct']:.2f}%)")
+    print(f"  Max |error|: {residuals['max_abs_error']:.2f}  ({residuals['max_abs_pct']:.2f}%)")
     if residuals['rms_pct'] < 2.0:
-        print(f"  Quality:           GOOD (<2% RMS)")
+        print(f"  Quality: GOOD (<2% RMS)")
     elif residuals['rms_pct'] < 5.0:
-        print(f"  Quality:           ACCEPTABLE (2-5% RMS) — usable but more coverage helps")
+        print(f"  Quality: ACCEPTABLE (2-5% RMS)")
     else:
-        print(f"  Quality:           POOR (>5% RMS) — recollect with fuller sphere coverage")
+        print(f"  Quality: POOR (>5% RMS) — recollect with fuller sphere coverage")
 
-    # Heading accuracy analysis (requires flat rotation data)
     if flat_samples is not None:
         print("\n" + "="*60)
         print("HEADING ACCURACY ANALYSIS (flat device)")
         print("="*60)
-
         LSB_PER_UT = 68.42
-
-        # Azimuth coverage of flat data (12 x 30-degree sectors)
-        centered_flat = flat_samples[:, :2] - np.array([bias[0], bias[1]])
-        azimuths = np.degrees(np.arctan2(centered_flat[:, 1], centered_flat[:, 0])) % 360.0
-        n_bins = 12
-        bin_counts = np.zeros(n_bins, dtype=int)
-        for az in azimuths:
-            bin_counts[int(az / (360.0 / n_bins)) % n_bins] += 1
-        covered_bins = np.sum(bin_counts > 0)
-        print(f"\n  Flat rotation azimuth coverage: {covered_bins}/{n_bins} sectors "
-              f"({100 * covered_bins // n_bins}%)")
-        if covered_bins < n_bins:
-            missing = [f"{i*30}-{i*30+30}deg" for i in range(n_bins) if bin_counts[i] == 0]
-            print(f"  Missing sectors: {', '.join(missing)}")
-
-        # Apply calibration to flat samples and measure calibrated circle
         cal_flat = (soft_iron @ (flat_samples - bias).T).T
         cx_cal = (np.max(cal_flat[:, 0]) + np.min(cal_flat[:, 0])) / 2.0
         cy_cal = (np.max(cal_flat[:, 1]) + np.min(cal_flat[:, 1])) / 2.0
@@ -583,42 +677,137 @@ def main():
         r_avg_2d = (r_x + r_y) / 2.0
         center_offset = np.sqrt(cx_cal**2 + cy_cal**2)
         roundness = min(r_x, r_y) / max(r_x, r_y) if max(r_x, r_y) > 0 else 0.0
-
         heading_err_offset = (np.degrees(np.arcsin(min(1.0, center_offset / r_avg_2d)))
                               if r_avg_2d > 0 else 0.0)
         ellipticity_err = (np.degrees(np.arctan(abs(r_x - r_y) / r_avg_2d))
                            if r_avg_2d > 0 else 0.0)
         total_err = heading_err_offset + ellipticity_err
-
-        print(f"\n  Calibrated flat circle (counts / uT):")
+        print(f"\n  Calibrated flat circle:")
         print(f"  Center: ({cx_cal:+.1f} / {cx_cal/LSB_PER_UT:+.3f} uT,  "
-              f"{cy_cal:+.1f} / {cy_cal/LSB_PER_UT:+.3f} uT)  (ideal: 0, 0)")
-        print(f"  Radius: X={r_x:.1f} ({r_x/LSB_PER_UT:.2f} uT)  "
-              f"Y={r_y:.1f} ({r_y/LSB_PER_UT:.2f} uT)")
-        print(f"  Roundness: {roundness:.3f}  (ideal: 1.000)")
-
+              f"{cy_cal:+.1f} / {cy_cal/LSB_PER_UT:+.3f} uT)")
+        print(f"  Radius: X={r_x:.1f}  Y={r_y:.1f}   Roundness={roundness:.3f}")
         print(f"\n  Heading accuracy estimate:")
-        print(f"  From circle offset:  +/-{heading_err_offset:.1f} deg max")
-        print(f"  From ellipticity:    +/-{ellipticity_err:.1f} deg max")
+        print(f"  From circle offset:  +/-{heading_err_offset:.1f} deg")
+        print(f"  From ellipticity:    +/-{ellipticity_err:.1f} deg")
         print(f"  Total (worst case):  +/-{total_err:.1f} deg")
         if total_err < 2.0:
-            print(f"  Rating: EXCELLENT (<2 deg expected error)")
+            print(f"  Rating: EXCELLENT")
         elif total_err < 5.0:
-            print(f"  Rating: GOOD (2-5 deg expected error)")
+            print(f"  Rating: GOOD")
         else:
-            print(f"  Rating: POOR (>5 deg) -- recollect flat data or more sphere coverage")
+            print(f"  Rating: POOR — recollect flat data or more sphere coverage")
 
     print("\n" + "="*60)
-
-    # Save to JSON
     save_json_calibration(output_file, bias, soft_iron)
-
     print(f"\nNext steps:")
-    print(f"  1. Copy {output_file} to data/ in the project root")
-    print(f"  2. Run: pio run -e nav -t uploadfs")
-    print(f"     WARNING: uploadfs reformats LittleFS — gyro/accel cal files will be wiped.")
-    print(f"     Re-run accel/gyro calibration after uploading, or copy those files into data/ first.")
-    print(f"  3. Reboot ESP32 — it will load /mag_cal.json automatically")
+    print(f"  1. Upload {output_file} to device as /calib/mag_base.json")
+    print(f"  2. Mount unit on scooter, run 'Mounted cal' from menu")
+    print(f"  3. Download /mag_mounted_samples.csv, run:")
+    print(f"     python mag_calibration.py --mode mounted --base {output_file} <mounted.csv>")
+
+
+def run_mounted(args):
+    """Handle --mode mounted: solve M_mount/b_mount correction → mag_mount.json"""
+    if not args.base:
+        print("ERROR: --mode mounted requires --base <mag_base.json>")
+        sys.exit(1)
+    if not args.input:
+        print("ERROR: --mode mounted requires <mounted_samples.csv>")
+        sys.exit(1)
+
+    output_file = args.output or "mag_mount.json"
+
+    print(f"Loading base calibration from {args.base}...")
+    base_bias, base_soft_iron = load_json_calibration(args.base)
+    print(f"  b_base: X={base_bias[0]:.2f}  Y={base_bias[1]:.2f}  Z={base_bias[2]:.2f}")
+
+    print(f"\nLoading mounted cal samples from {args.input}...")
+    raw_samples = load_csv(args.input)
+    raw_samples = deduplicate(raw_samples)
+    print(f"  {len(raw_samples)} samples after dedup")
+
+    if len(raw_samples) < 50:
+        print("WARNING: Very few samples — mounted cal may be inaccurate.")
+
+    print("\nSolving mounted correction (diagonal soft-iron, full hard-iron)...")
+    b_mount, M_mount, info = compute_mounted_correction(raw_samples, base_bias, base_soft_iron)
+
+    print("\n" + "="*60)
+    print("MOUNTED CALIBRATION CORRECTION RESULTS")
+    print("="*60)
+    print(f"\nMounted hard-iron offset (b_mount, in base-corrected space):")
+    print(f"  X: {b_mount[0]:+8.4f}  (raw: {info['b_raw'][0]:+.4f})")
+    print(f"  Y: {b_mount[1]:+8.4f}  (raw: {info['b_raw'][1]:+.4f})")
+    print(f"  Z:     0.0000  (locked — insufficient vertical coverage to constrain)")
+    print(f"\nMounted soft-iron correction (M_mount, diagonal):")
+    for i in range(3):
+        print(f"  [{M_mount[i, 0]:8.6f}, {M_mount[i, 1]:8.6f}, {M_mount[i, 2]:8.6f}]")
+    LSB_PER_UT = 68.42
+    print(f"\nDiagnostics:")
+    print(f"  Samples: {info['n_samples']}  |  Scale fit method: {info['scale_method']}")
+    print(f"  Flat circle radius (base-corrected): {info['r_flat']:.2f} counts  ({info['r_flat']/LSB_PER_UT:.2f} µT)")
+    print(f"  XY semi-axes (algebraic):  rx={info['rx']:.2f}  ry={info['ry']:.2f}  ratio={info['ry']/info['rx']:.3f}")
+    print(f"  Ellipticity heading error (pre-correction): ±{info['hdg_err_raw_deg']:.1f}°")
+    print(f"  Per-axis scale (raw):        X={info['scale_raw'][0]:.4f}  Y={info['scale_raw'][1]:.4f}  Z=1.0000 (locked)")
+    print(f"  Per-axis scale (regularized): X={info['scale'][0]:.4f}  Y={info['scale'][1]:.4f}  Z=1.0000 (locked)")
+    print(f"  RMS error (after correction): {info['rms_error']:.2f}  ({info['rms_pct']:.2f}%)")
+
+    # Sanity check: if M_mount is close to identity, mounting effect is small
+    deviation = np.max(np.abs(info['scale'][:2] - 1.0))
+    if deviation < 0.02:
+        print(f"\n  NOTE: Scale correction < 2% — scooter's soft-iron effect is small.")
+        print(f"        Mounted cal primarily provides b_mount (hard-iron) correction.")
+    elif deviation > 0.15:
+        hdg_e = info['hdg_err_raw_deg']
+        print(f"\n  NOTE: Scale correction > 15% (ellipticity ±{hdg_e:.1f}°).")
+        print(f"        This level of XY asymmetry is plausible for a DPV with strong")
+        print(f"        motor/battery fields.  Verify by checking heading accuracy after upload.")
+
+    print("\n" + "="*60)
+    save_json_calibration(output_file, b_mount, M_mount)
+    print(f"\nNext steps:")
+    print(f"  1. Upload {output_file} to device as /calib/mag_mount.json")
+    print(f"  2. Reboot device — it will apply the full base+mount correction chain")
+    print(f"     corrected = M_mount * (M_base * (raw - b_base) - b_mount)")
+
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Magnetometer calibration tool for DPV-Nav.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Modes:
+  baseline  Full ellipsoid fit for off-scooter calibration → mag_base.json
+            Usage: python mag_calibration.py --mode baseline <samples.csv> [--flat flat.csv]
+
+  mounted   Solve correction from base-corrected residuals → mag_mount.json
+            Usage: python mag_calibration.py --mode mounted --base mag_base.json <mounted.csv>
+
+Transform chain applied on device:
+  corrected = M_mount * (M_base * (raw - b_base) - b_mount)
+""")
+    parser.add_argument('input', nargs='?', help='Input CSV file (samples)')
+    parser.add_argument('--mode', choices=['baseline', 'mounted'], default='baseline',
+                        help='Calibration mode (default: baseline)')
+    parser.add_argument('--flat', metavar='FLAT_CSV',
+                        help='(baseline mode) Flat-rotation CSV for horizontal bias refinement')
+    parser.add_argument('--base', metavar='BASE_JSON',
+                        help='(mounted mode) mag_base.json from previous baseline cal')
+    parser.add_argument('--output', '-o', metavar='OUTPUT_JSON',
+                        help='Output JSON filename (default: mag_base.json or mag_mount.json)')
+
+    args = parser.parse_args()
+
+    if not args.input:
+        parser.print_help()
+        sys.exit(1)
+
+    if args.mode == 'baseline':
+        run_baseline(args)
+    elif args.mode == 'mounted':
+        run_mounted(args)
 
 
 if __name__ == "__main__":

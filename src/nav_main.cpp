@@ -5,6 +5,8 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <LittleFS.h>
+#include <time.h>
+#include <esp_sleep.h>
 
 #include "board_pins.h"
 #include "config.h"
@@ -44,21 +46,33 @@ static uint32_t lastLoopUs    = 0;
 static uint32_t lastSendMs    = 0;
 static uint32_t lastDiagMs    = 0;
 static uint32_t lastPosSaveMs = 0;
-static constexpr uint32_t SEND_INTERVAL_MS = 100;  // 10 Hz link rate
-static constexpr uint32_t LOOP_INTERVAL_US = 10000; // 100 Hz loop rate gate
-static constexpr uint32_t DIAG_INTERVAL_MS = 1000;  // 0.2 Hz sensor diagnostics
+static uint32_t lastFlowLogMs = 0;
+static constexpr uint32_t SEND_INTERVAL_MS     = 100;   // 10 Hz link rate
+static constexpr uint32_t LOOP_INTERVAL_US     = 10000; // 100 Hz loop rate gate
+static constexpr uint32_t DIAG_INTERVAL_MS     = 1000;  // 1 Hz sensor diagnostics
+static constexpr uint32_t FLOW_LOG_INTERVAL_MS = 250;   // 4 Hz flow debug logging
 static constexpr bool FULL_DIAG_ENABLE = false;  // set to false to disable periodic diagnostic prints
 static constexpr bool GPS_DIAG_ENABLE  = true;   // GPS position/speed/COG coherence diagnostics
+static constexpr bool FLOW_LOG_ENABLE  = false;   // set to false to disable flow debug logging
 
 // ---- Calibration mode tracking -----------------------------------------------
 // cal_mode in NavPacket:
-//   0 = quick mag cal (hard-iron)
-//   1 = full mag cal  (soft-iron collection)
+//   0 = (legacy) quick mag cal hard-iron
+//   1 = (legacy) full mag cal soft-iron collection
 //   2 = speed cal — waiting for flow
 //   3 = speed cal — run in progress
 //   4 = speed cal — result ready, awaiting display accept/reject
+//   5 = baseline mag cal (bin-aware)
+//   6 = mounted mag cal (bin-aware)
 static bool    gInCal    = false;
 static uint8_t gCalMode  = 0;
+
+// Bin-aware cal: interval tracking for CalProgressPacket (2 Hz)
+static constexpr uint32_t CAL_PROGRESS_INTERVAL_MS = 500;
+static uint32_t gLastCalProgressMs = 0;
+
+// CSV output file path for active bin cal (set when cal starts)
+static const char* gBinCalCsvPath = nullptr;
 
 // ---- Speed calibration state ------------------------------------------------
 static uint16_t gSpeedCalDist_ft     = 300;    // target distance selected by user
@@ -71,6 +85,9 @@ static bool     gSpeedCalHdgPrimed   = false;
 static float    gSpeedCalKExisting   = 0.0f;
 static float    gSpeedCalKProposed   = 0.0f;
 static uint16_t gSpeedCalElapsedS    = 0;
+
+// ---- Boot status flags (set during setup, sent in every NavPacket) ---------
+static uint8_t gBootFlags = 0;
 
 // ---- Toggle states (shared between command handler and sendNavPacket) ------
 static bool gGpsPosEnabled = DEFAULT_USE_GPS_POSITION;
@@ -150,13 +167,15 @@ void setup() {
         sysState = SystemState::ERROR;
     } else {
         Serial.println("IMU init OK");
+        gBootFlags |= BOOT_IMU_OK;
 
-        // Load or run calibration
+        // Load or run calibration (sets BOOT_*_CAL_OK flags)
         loadCalibration();
 
         // GPS
         if (gps::init()) {
             Serial.println("GPS init OK");
+            gBootFlags |= BOOT_GPS_OK;
         } else {
             Serial.println("WARNING: GPS init failed");
         }
@@ -182,6 +201,12 @@ void setup() {
 
         sysState = SystemState::READY;
     }
+
+    // Set local timezone (Seattle / Pacific Time).
+    // Must be done before wifi::init() so the NTP callback picks it up,
+    // and before any GPS-based clock sync in the loop.
+    setenv("TZ", "PST8PDT,M3.2.0,M11.1.0", 1);
+    tzset();
 
     // WiFi + web server — always start, even if IMU failed.
     // Placed after calibration so blocking cal doesn't starve the connection.
@@ -239,6 +264,13 @@ void loop() {
     imu::readAccel_g_raw_cal(accelRaw, accel);
     imu::readGyro_rad_s_raw_cal(gyroRaw, gyro);
     imu::readMag_raw_cal(magRaw, mag);  // magRaw = uncalibrated µT, mag = calibrated µT
+    // Logical-frame raw counts (axis map applied) for bin cal CSV export.
+    // The calibration JSON must be in the same frame that readMag() reads in,
+    // which is post-axis-map (logical frame).  readMagRaw_SensorFrame() is WRONG
+    // here — it would store sensor-frame counts and cause the Python-derived bias
+    // to have the wrong sign for axes that the map negates (Y in this board's map).
+    imu::Vec3i16 magRaw_logical{};
+    imu::readMagRaw(magRaw_logical);
 
     // --- AHRS update --------------------------------------------------------
     // The mag axis map {+1,-2,+3} puts mag Y in left-handed frame (positive=Left)
@@ -267,6 +299,37 @@ void loop() {
 
     GpsFix fix = gps::getFix();
     bool gpsFresh = fix.has_fix && (millis() - fix.fix_age_ms) < GPS_FIX_STALE_MS;
+
+    // --- GPS clock sync (one-shot) -------------------------------------------
+    // Sync system clock from GPS UTC when we first get a valid position fix
+    // with a parsed date/time. Only runs if NTP hasn't already set the clock
+    // (i.e., time(nullptr) < Nov 2023, which an unsynced ESP32 never exceeds).
+    {
+        static bool gGpsTimeSynced = false;
+        if (!gGpsTimeSynced && fix.has_fix && fix.has_time) {
+            if (time(nullptr) < 1700000000L) {
+                // mktime() interprets struct tm as local time; temporarily
+                // switch to UTC to compute the correct UTC epoch, then restore.
+                struct tm t{};
+                t.tm_year  = (2000 + fix.utc_year) - 1900;
+                t.tm_mon   = fix.utc_month - 1;
+                t.tm_mday  = fix.utc_day;
+                t.tm_hour  = fix.utc_hour;
+                t.tm_min   = fix.utc_minute;
+                t.tm_sec   = fix.utc_second;
+                t.tm_isdst = 0;
+                setenv("TZ", "UTC0", 1); tzset();
+                time_t utcEpoch = mktime(&t);
+                setenv("TZ", "PST8PDT,M3.2.0,M11.1.0", 1); tzset();
+                struct timeval tv{ .tv_sec = utcEpoch, .tv_usec = 0 };
+                settimeofday(&tv, nullptr);
+                Serial.printf("[GPS] Clock set: %04d-%02d-%02d %02d:%02d:%02d UTC\n",
+                              2000 + fix.utc_year, fix.utc_month, fix.utc_day,
+                              fix.utc_hour, fix.utc_minute, fix.utc_second);
+            }
+            gGpsTimeSynced = true;  // attempt only once regardless of outcome
+        }
+    }
 
     if (gpsFresh) {
         float cogRad = fix.course_deg * (M_PI / 180.0f);
@@ -455,6 +518,16 @@ void loop() {
         mStatN = 0;  // reset for next window
     }
 
+    // --- Flow sensor debug at 4 Hz -----------------------------------------
+    if (FLOW_LOG_ENABLE && (nowMs - lastFlowLogMs >= FLOW_LOG_INTERVAL_MS)) {
+        lastFlowLogMs = nowMs;
+        Serial.printf("[FLOW] pulses=%u  freq=%.2f Hz  raw=%.4f lpm  speed=%.4f m/s\n",
+                      flow::getLastPulseCount(),
+                      flow::getFrequency_hz(),
+                      flow::getFlowRate_lpm(),
+                      flow::getSpeed_ms());
+    }
+
 #if ENABLE_DEBUG_PACKET
     // --- Send DebugPacket at debug rate ------------------------------------
     static uint32_t lastDebugSendMs = 0;
@@ -470,30 +543,72 @@ void loop() {
 
     // --- Calibration tick and completion detection ---------------------------
     if (gInCal) {
-        if (gCalMode == 0) {
-            // Quick cal (non-blocking hard-iron sweep)
+        if (gCalMode == 5 || gCalMode == 6) {
+            // Bin-aware mag cal (baseline=5, mounted=6)
+            // Feed current raw mag sample into the bin collector
+            imu::magBinCalTick(pitchDeg, headingDeg, magRaw_logical);
+
+            // Emit CalProgressPacket at 2 Hz
+            if (nowMs - gLastCalProgressMs >= CAL_PROGRESS_INTERVAL_MS) {
+                gLastCalProgressMs = nowMs;
+                CalProgressPacket cpkt{};
+                imu::magBinCalGetProgress(cpkt);
+                char calBuf[512];
+                size_t cn = calProgressPacketToBytes(cpkt, calBuf, sizeof(calBuf));
+                if (cn > 0) Serial1.write(calBuf, cn);
+            }
+
+            // Check completion
+            if (imu::magBinCalIsComplete()) {
+                // Send final CalProgressPacket with complete=true immediately —
+                // don't wait for the 2 Hz timer, or the display may never see it.
+                {
+                    CalProgressPacket cpkt{};
+                    imu::magBinCalGetProgress(cpkt);  // complete=true, all bins green
+                    char calBuf[512];
+                    size_t cn = calProgressPacketToBytes(cpkt, calBuf, sizeof(calBuf));
+                    if (cn > 0) Serial1.write(calBuf, cn);
+                    Serial.println("[BIN_CAL] Sent completion packet");
+                }
+
+                Serial.println("[BIN_CAL] All bins green — dumping CSV");
+                if (gBinCalCsvPath) {
+                    File f = LittleFS.open(gBinCalCsvPath, FILE_WRITE);
+                    if (f) {
+                        imu::magBinCalDumpCSV(&f);
+                        f.close();
+                        Serial.printf("[BIN_CAL] CSV saved to %s\n", gBinCalCsvPath);
+                    } else {
+                        Serial.printf("[BIN_CAL] ERROR: could not open %s\n", gBinCalCsvPath);
+                    }
+                }
+                imu::magBinCalEnd();
+                gInCal   = false;
+                sysState = SystemState::READY;
+                Serial.println("[BIN_CAL] Cal complete, returning to READY");
+            }
+        } else if (gCalMode == 0) {
+            // Quick cal (non-blocking hard-iron sweep, legacy)
             if (imu::magCalNBTick()) {
-                // Done — save result and return to previous nav state
                 imu::magCalNBGetResult(magCal);
-                storage::saveMagCalibration("/mag_cal.json", magCal);
+                storage::saveMagCalibration(storage::MAG_LEGACY_FILE, magCal);
                 gInCal   = false;
                 sysState = SystemState::READY;
                 Serial.println("[CAL] Quick cal saved, returning to READY");
             }
         } else if (gCalMode == 1) {
-            // Full cal (soft-iron data collection via mag_cal::)
+            // Full cal (soft-iron data collection via mag_cal::, legacy)
             if (mag_cal::isCollecting()) {
                 mag_cal::logSample();
             } else {
-                // Collection finished (auto-stopped by duration)
                 gInCal   = false;
                 sysState = SystemState::READY;
                 Serial.println("[CAL] Full cal collection done, returning to READY");
             }
         } else if (gCalMode == 2) {
             // Speed cal — WAITING: watch for flow to exceed start threshold
-            float flowSpd = flow::getSpeed_ms();
-            if (flowSpd >= SPEED_CAL_START_THRESHOLD_MS) {
+            float flowFreq = flow::getFrequency_hz();
+            if (flowFreq >= SPEED_CAL_START_THRESHOLD_HZ) {
                 // Flow detected — start the run
                 gCalMode             = 3;
                 gSpeedCalStartMs     = millis();
@@ -597,22 +712,30 @@ void loop() {
 // ===========================================================================
 
 static void loadCalibration() {
-    // Magnetometer
-    if (storage::loadMagCalibration("/mag_cal.json", magCal)) {
+    // Magnetometer — try two-stage chain (mag_base.json + mag_mount.json),
+    // falling back to legacy mag_cal.json, then blocking sweep as last resort.
+    bool hasBase = false, hasMount = false;
+    if (storage::loadMagCalibrationChain(magCal, hasBase, hasMount)) {
         imu::setMagCalibration(magCal);
-        Serial.println("Mag calibration loaded from LittleFS");
+        gBootFlags |= BOOT_MAG_CAL_OK;
+        Serial.printf("Mag cal loaded: base=%d mount=%d\n", hasBase, hasMount);
     } else {
+        //TODO: this legacy fallback is no longer ideal, since it blocks for 90 seconds and doesn't provide any progress feedback. Better to implement a non-blocking sweep with progress reporting, like the mag_bin_cal does.
+        //TODO: make this better.  Fall back to a baseline mediocre calibration, set "calibration quality" to "poor", let the user cal when they can.
         Serial.println("No mag calibration found — running min/max sweep (90 s)");
         imu::calibrateMagnetometer(magCal, 90000);
-        storage::saveMagCalibration("/mag_cal.json", magCal);
+        storage::saveMagCalibration(storage::MAG_LEGACY_FILE, magCal);
     }
 
     // Gyroscope
     if (storage::loadCalib3("/gyro_cal.json", gyroCal)) {
         imu::setGyroCalibration(gyroCal);
+        gBootFlags |= BOOT_GYRO_CAL_OK;
         Serial.println("Gyro calibration loaded from LittleFS");
     } else {
+        delay(2500);  //give the user a second to realize what's happened
         Serial.println("No gyro calibration found — sampling at rest (10 s)");
+        delay(2500);  //give the user a second to realize what's happened
         imu::calibrateGyroscope(gyroCal, 10000);
         storage::saveCalib3("/gyro_cal.json", gyroCal);
     }
@@ -620,9 +743,12 @@ static void loadCalibration() {
     // Accelerometer
     if (storage::loadCalib3("/accel_cal.json", accelCal)) {
         imu::setAccelCalibration(accelCal);
+        gBootFlags |= BOOT_ACCEL_CAL_OK;
         Serial.println("Accel calibration loaded from LittleFS");
     } else {
+        delay(2500);  //give the user a second to realize what's happened
         Serial.println("No accel calibration found — 6-point cal");
+        delay(2500);  //give the user a second to realize what's happened
         imu::calibrateAccelerometer(accelCal, 2500);
         storage::saveCalib3("/accel_cal.json", accelCal);
     }
@@ -645,6 +771,7 @@ static void sendNavPacket(float heading, float pitch, float roll,
     pkt.system_state     = static_cast<uint8_t>(sysState);
     pkt.gps_fix_quality  = fix.fix_quality;
     pkt.gps_satellites   = fix.satellites;
+    pkt.gps_signal_bars  = gps::computeSignalBars(fix);
     pkt.uptime_ms        = millis();
 
     uint8_t flags = 0;
@@ -655,7 +782,8 @@ static void sendNavPacket(float heading, float pitch, float roll,
     if (gWifiEnabled)   flags |= FLAG_WIFI_ENABLED;
     if (gGpsSpdEnabled) flags |= FLAG_GPS_SPD_ENABLED;
     flags |= (static_cast<uint8_t>(logging::getLevel()) << FLAG_LOG_LEVEL_SHIFT) & FLAG_LOG_LEVEL_MASK;
-    pkt.flags = flags;
+    pkt.flags      = flags;
+    pkt.boot_flags = gBootFlags;
 
     // Pack calibration progress when in CALIBRATION state
     if (sysState == SystemState::CALIBRATION && gInCal) {
@@ -802,11 +930,29 @@ static void handleDisplayCmd() {
                         break;
                     }
                     case DisplayCmd::START_FULL_CAL:
-                        Serial.println("CMD: START_FULL_CAL (120s soft-iron data collection)");
+                        Serial.println("CMD: START_FULL_CAL (legacy 120s soft-iron data collection)");
                         sysState = SystemState::CALIBRATION;
                         gInCal   = true;
                         gCalMode = 1;
                         mag_cal::startCollection(180000);
+                        break;
+                    case DisplayCmd::START_BASELINE_CAL:
+                        Serial.println("CMD: START_BASELINE_CAL (bin-aware, off-scooter)");
+                        sysState = SystemState::CALIBRATION;
+                        gInCal   = true;
+                        gCalMode = 5;
+                        gBinCalCsvPath = "/mag_baseline_samples.csv";
+                        gLastCalProgressMs = 0;
+                        imu::magBinCalBegin(false);
+                        break;
+                    case DisplayCmd::START_MOUNTED_CAL:
+                        Serial.println("CMD: START_MOUNTED_CAL (bin-aware, on-scooter)");
+                        sysState = SystemState::CALIBRATION;
+                        gInCal   = true;
+                        gCalMode = 6;
+                        gBinCalCsvPath = "/mag_mounted_samples.csv";
+                        gLastCalProgressMs = 0;
+                        imu::magBinCalBegin(true);
                         break;
                     case DisplayCmd::START_SPEED_CAL: {
                         gSpeedCalDist_ft = parseSpeedCalDist(cmdBuf, cmdPos);
@@ -902,6 +1048,24 @@ static void handleDisplayCmd() {
                         }
                         nvs_nav::save(currentNavNvsState());
                         break;
+                    case DisplayCmd::POWER_OFF: {
+                        Serial.println("CMD: POWER_OFF — saving state and entering deep sleep");
+                        // Persist current position and toggle states before sleeping.
+                        {
+                            nav::Position pos = nav::getPosition();
+                            nvs_nav::savePosition(pos.x_m, pos.y_m);
+                        }
+                        nvs_nav::save(currentNavNvsState());
+                        // Power down GPS (fix is retained by module's backup battery).
+                        gps::setEnabled(false);
+                        Serial.flush();
+                        // Wake when the display device sends a byte over the serial link:
+                        // the UART start bit pulls LINK_RX_PIN LOW, triggering ext0.
+                        esp_sleep_enable_ext0_wakeup(
+                            static_cast<gpio_num_t>(LINK_RX_PIN), 0 /* wake on LOW */);
+                        esp_deep_sleep_start();
+                        break;  // unreachable — silences compiler warning
+                    }
                     default:
                         break;
                 }

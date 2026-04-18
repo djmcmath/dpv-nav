@@ -24,7 +24,8 @@ static SendCmdFn gSendCmd = nullptr;
 
 static bool gDiveMode = false;  // Op mode toggle state (display-side tracking)
 static uint8_t gLogLevel = 0;  // Log level tracking (0=OFF, 1=LOW, 2=HIGH)
-static bool gSpeedCalPending = false;  // true after user selects "Speed cal"
+static bool gSpeedCalPending  = false;  // true after user selects "Speed cal"
+static bool gPowerOffPending  = false;  // true after user selects "OFF"
 
 // Nav-device toggle states (updated from NavPacket flags)
 static bool gGpsPosEnabled = true;
@@ -38,12 +39,12 @@ static DisplaySettings gSettings = {
     .trueHeading = true,
 };
 
-// Display coordinates for menu area
-// Layout: separator line at y=54, title at y=56 (size 1),
-//         single large item at y=70 (size 2, one item at a time)
-constexpr int MENU_SEP_Y  = 54;
-constexpr int TITLE_Y     = 56;
-constexpr int ITEM_Y      = 70;   // size 2 text = 16px tall, fits in 70..86
+// Display coordinates for menu area (320×240 ST7789)
+// Layout: separator line at y=132 (= DIV_Y_MID), title at y=135 (size 2),
+//         single large item at y=162 (size 3, one item at a time)
+constexpr int MENU_SEP_Y  = 132;
+constexpr int TITLE_Y     = 135;
+constexpr int ITEM_Y      = 162;  // size 3 text = 24px tall, fits in 162..186
 
 // Colors
 constexpr uint16_t CLR_CYAN   = 0x07FF;
@@ -56,8 +57,8 @@ constexpr uint16_t CLR_BLUE   = 0x001F;
 // ---------------------------------------------------------------------------
 // Render cache — only re-send SPI bytes when content actually changes.
 // ---------------------------------------------------------------------------
-static char prevTitle[22] = "";
-static char prevItem[22]  = "";
+static char prevTitle[27] = "";
+static char prevItem[18]  = "";
 
 static void invalidateMenuCache() {
     prevTitle[0] = '\0';
@@ -73,15 +74,17 @@ static void loadDefaults() {
     // Root menu (index 0)
     auto& root = submenus[0];
     strncpy(root.title, "MENU", MENU_LABEL_LEN);
-    root.count = 4;
-    strncpy(root.items[0].label, "Nav", MENU_LABEL_LEN);
-    root.items[0].action = Action::SUBMENU; root.items[0].submenuIdx = 1;
-    strncpy(root.items[1].label, "Cal", MENU_LABEL_LEN);
-    root.items[1].action = Action::SUBMENU; root.items[1].submenuIdx = 2;
-    strncpy(root.items[2].label, "Input", MENU_LABEL_LEN);
-    root.items[2].action = Action::SUBMENU; root.items[2].submenuIdx = 3;
-    strncpy(root.items[3].label, "Display", MENU_LABEL_LEN);
-    root.items[3].action = Action::SUBMENU; root.items[3].submenuIdx = 4;
+    root.count = 5;
+    strncpy(root.items[0].label, "OFF", MENU_LABEL_LEN);
+    root.items[0].action = Action::POWER_OFF; root.items[0].submenuIdx = -1;
+    strncpy(root.items[1].label, "Nav", MENU_LABEL_LEN);
+    root.items[1].action = Action::SUBMENU; root.items[1].submenuIdx = 1;
+    strncpy(root.items[2].label, "Cal", MENU_LABEL_LEN);
+    root.items[2].action = Action::SUBMENU; root.items[2].submenuIdx = 2;
+    strncpy(root.items[3].label, "Input", MENU_LABEL_LEN);
+    root.items[3].action = Action::SUBMENU; root.items[3].submenuIdx = 3;
+    strncpy(root.items[4].label, "Display", MENU_LABEL_LEN);
+    root.items[4].action = Action::SUBMENU; root.items[4].submenuIdx = 4;
 
     // NAV submenu (index 1)
     auto& nav = submenus[1];
@@ -102,10 +105,10 @@ static void loadDefaults() {
     auto& cal = submenus[2];
     strncpy(cal.title, "Cal", MENU_LABEL_LEN);
     cal.count = 4;
-    strncpy(cal.items[0].label, "Quick cal", MENU_LABEL_LEN);
-    cal.items[0].action = Action::CAL_QUICK; cal.items[0].submenuIdx = -1;
-    strncpy(cal.items[1].label, "Full cal", MENU_LABEL_LEN);
-    cal.items[1].action = Action::CAL_FULL; cal.items[1].submenuIdx = -1;
+    strncpy(cal.items[0].label, "Baseline", MENU_LABEL_LEN);
+    cal.items[0].action = Action::CAL_BASELINE; cal.items[0].submenuIdx = -1;
+    strncpy(cal.items[1].label, "Mounted", MENU_LABEL_LEN);
+    cal.items[1].action = Action::CAL_MOUNTED; cal.items[1].submenuIdx = -1;
     strncpy(cal.items[2].label, "Speed cal", MENU_LABEL_LEN);
     cal.items[2].action = Action::CAL_SPEED; cal.items[2].submenuIdx = -1;
     strncpy(cal.items[3].label, "..", MENU_LABEL_LEN);
@@ -276,13 +279,13 @@ static void executeAction(Action act) {
             if (gSendCmd) gSendCmd(DisplayCmd::MARK_POSITION);
             Serial.println("[MENU] MARK_POSITION");
             break;
-        case Action::CAL_QUICK:
-            if (gSendCmd) gSendCmd(DisplayCmd::START_MAG_CAL);
-            Serial.println("[MENU] CAL_QUICK (START_MAG_CAL)");
+        case Action::CAL_BASELINE:
+            if (gSendCmd) gSendCmd(DisplayCmd::START_BASELINE_CAL);
+            Serial.println("[MENU] CAL_BASELINE (START_BASELINE_CAL)");
             break;
-        case Action::CAL_FULL:
-            if (gSendCmd) gSendCmd(DisplayCmd::START_FULL_CAL);
-            Serial.println("[MENU] CAL_FULL (START_FULL_CAL)");
+        case Action::CAL_MOUNTED:
+            if (gSendCmd) gSendCmd(DisplayCmd::START_MOUNTED_CAL);
+            Serial.println("[MENU] CAL_MOUNTED (START_MOUNTED_CAL)");
             break;
         case Action::CAL_SPEED:
             gSpeedCalPending = true;  // signal display_main to enter distance selection
@@ -331,6 +334,10 @@ static void executeAction(Action act) {
             gDiveMode = !gDiveMode;
             if (gSendCmd) gSendCmd(DisplayCmd::TOGGLE_OP_MODE);
             Serial.print("[MENU] Op Mode: "); Serial.println(gDiveMode ? "DIVE" : "SURFACE");
+            break;
+        case Action::POWER_OFF:
+            gPowerOffPending = true;
+            Serial.println("[MENU] POWER_OFF: entering power-off sequence");
             break;
         default:
             break;
@@ -466,27 +473,27 @@ void render() {
     auto& sm = currentMenu();
 
     // Separator line
-    display::drawHLine(0, MENU_SEP_Y, 128, CLR_CYAN);
+    display::drawHLine(0, MENU_SEP_Y, 320, CLR_CYAN);
 
-    // Title (cached)
-    char titleBuf[22];
-    snprintf(titleBuf, sizeof(titleBuf), "%-21s", sm.title);
+    // Title (cached) — size 2, pad to 25 chars to clear previous content
+    char titleBuf[27];
+    snprintf(titleBuf, sizeof(titleBuf), "%-25s", sm.title);
     if (strcmp(titleBuf, prevTitle) != 0) {
-        display::drawText(1, TITLE_Y, titleBuf, CLR_CYAN, 1);
+        display::drawText(1, TITLE_Y, titleBuf, CLR_CYAN, 2);
         strncpy(prevTitle, titleBuf, sizeof(prevTitle));
     }
 
-    // Current item — large text, one item at a time
+    // Current item — size 3 large text, one item at a time
     auto& item = sm.items[selectedItem];
     char labelBuf[22];
     getDisplayLabel(item, labelBuf, sizeof(labelBuf));
 
-    // Pad to 10 chars (size 2 = 12px/char, 10 chars = 120px fits in 128px)
-    char itemBuf[12];
-    snprintf(itemBuf, sizeof(itemBuf), "%-10s", labelBuf);
+    // Pad to 16 chars (size 3 = 18px/char, 16 chars = 288px fits in 320px)
+    char itemBuf[18];
+    snprintf(itemBuf, sizeof(itemBuf), "%-16s", labelBuf);
 
     if (strcmp(itemBuf, prevItem) != 0) {
-        display::drawText(1, ITEM_Y, itemBuf, CLR_YELLOW, 2);
+        display::drawText(1, ITEM_Y, itemBuf, CLR_YELLOW, 3);
         strncpy(prevItem, itemBuf, sizeof(prevItem));
     }
 }
@@ -507,6 +514,14 @@ bool isPendingSpeedCal() {
 
 void clearSpeedCalPending() {
     gSpeedCalPending = false;
+}
+
+bool isPendingPowerOff() {
+    return gPowerOffPending;
+}
+
+void clearPowerOffPending() {
+    gPowerOffPending = false;
 }
 
 }  // namespace menu

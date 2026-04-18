@@ -51,7 +51,7 @@ MENU
 ├── CAL
 │   ├── Quick cal  — 30-second hard-iron magnetometer sweep (bias only, updates saved to LittleFS)
 │   ├── Full cal   — 120-second raw mag data collection for offline soft-iron ellipsoid fitting
-│   └── Speed cal  — flow meter speed calibration (stub)
+│   └── Speed cal  — interactive flow-meter k-factor calibration (swim a known distance)
 ├── INPUT
 │   ├── GPS Pos    — toggle GPS position on/off (shows current state)
 │   ├── GPS Spd    — toggle GPS speed on/off
@@ -67,6 +67,62 @@ MENU
 Toggle items show their current state (e.g., "Units: m", "Op Mode: SURF") and stay open after toggling. Non-toggle items (Home, Mark, Quick cal, Full cal) execute and close the menu.
 
 All toggle states (GPS Pos, GPS Spd, WiFi, Op Mode, Log level, and all Display settings) are saved to NVS immediately on change and restored on next boot.
+
+### Speed Calibration (CAL > Speed cal)
+
+Speed cal measures how accurately the flow sensor reports speed by swimming a known distance and timing it. The computed k-factor is saved and averaged with up to 5 previous runs.
+
+**Workflow:**
+
+1. Select **CAL > Speed cal** from the menu. The menu closes and a distance-selection screen appears:
+   ```
+   SPEED CAL
+   Set distance:
+       300 ft
+   BTN1: change
+   BTN2: confirm
+   ```
+2. Press **BTN1** to cycle through distances: 150 → 200 → 250 → 300 → 350 → 400 → 450 → 500 → 150 ft (wraps). Press **BTN2** to confirm.
+
+3. The display switches to a waiting screen. **Start the DPV** — the run begins automatically once the flow sensor detects motion above ~0.3 m/s.
+
+4. Swim the selected distance in a straight line at typical cruising speed. The display shows a large elapsed-time counter:
+   ```
+   SPEED CAL
+   RUNNING
+        47
+   300ft target
+   Stop=slow/turn
+   ```
+
+5. The run ends automatically when either:
+   - **Flow drops** below ~0.08 m/s (DPV stopped)
+   - **Heading changes > 90°** after at least 30 seconds of stable heading (cross the finish and swing the scooter to signal done)
+
+   Runs shorter than 5 seconds are discarded and the device returns to WAITING.
+
+6. The result screen appears:
+   ```
+   SPEED CAL
+   300ft  87s
+   Cur: 1.000
+   New: 1.156
+   ─────────────
+   > RESET+ACCEPT
+     ACCEPT
+     REJECT
+   ```
+   - **RESET+ACCEPT**: discard measurement history, start fresh with this single run
+   - **ACCEPT**: add this run to the rolling average (up to 6 measurements kept)
+   - **REJECT**: discard this result, return to navigation unchanged
+
+7. Press **BTN1** to cycle choices, **BTN2** to confirm. The active k-factor updates immediately.
+
+**Tips:**
+- A calm, straight stretch ≥150 ft works best — a pool lane, a wall, a pier
+- The longer the distance, the more accurate the result
+- After 3–6 runs the rolling average stabilises; use ACCEPT each time
+- Use RESET+ACCEPT when the DPV has been serviced or the impeller changed
 
 ### Calibration Progress Screen
 
@@ -181,8 +237,12 @@ Key settings in [src/config.h](../src/config.h):
 | `GPS_SOG_TRUST_FLOOR_KN` | 2.0 | SOG above this (knots) is always trusted |
 | `GPS_COG_COHERENCE_THRESH` | 0.85 | COG consistency required to trust mid-range SOG (0–1) |
 | `GPS_COG_EMA_ALPHA` | 0.3 | COG EMA smoothing factor (~3–4 sample window at 1 Hz) |
-| `FLOW_K_FACTOR` | 1.0 | Flow sensor pulses per L/min (calibrate to match sensor) |
-| `FLOW_CROSS_SECTION_M2` | 0.002 | Intake cross-section area in m² (calibrate to match DPV) |
+| `FLOW_K_FACTOR` | 1.0 | Flow sensor pulses per L/min — updated automatically by Speed cal |
+| `FLOW_CROSS_SECTION_M2` | 0.002 | Intake cross-section area in m² — set once to match DPV geometry |
+| `SPEED_CAL_START_THRESHOLD_MS` | 0.3 | Flow speed (m/s) to begin timing a speed cal run |
+| `SPEED_CAL_STOP_THRESHOLD_MS` | 0.08 | Flow speed (m/s) below which the run is considered complete |
+| `SPEED_CAL_HEADING_STOP_DEG` | 90 | Heading change (°) that signals end of run after 30+ seconds |
+| `SPEED_CAL_MIN_RUN_S` | 30 | Minimum run time (s) before heading-change stop is checked |
 | `DISPLAY_MODE` | 0 | Display mode: 0 = Navigation, 1 = Debug |
 | `DISPLAY_UNITS_IMPERIAL` | 0 | Units: 0 = metric (m, m/min), 1 = imperial (ft, ft/min) |
 | `ENABLE_DEBUG_PACKET` | 0 | Nav device sends DebugPacket: 0 = off, 1 = on |

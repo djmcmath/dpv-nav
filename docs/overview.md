@@ -30,3 +30,4 @@ v1 features (implemented):
 - Operational mode toggle: surface (GPS + WiFi active) vs dive (GPS + WiFi disabled), switchable at runtime via NAV > Op Mode
 - Menu system with JSON-configurable structure: NAV (outbound/home/mark/op mode), CAL (quick/full/speed), INPUT (GPS/WiFi/logging toggles), DISPLAY (mode/units/heading)
 - Menu loaded from `/menu.json` on LittleFS; hardcoded fallback if file missing
+- Interactive speed calibration: swim a known distance (150–500 ft), automatic run detection (flow threshold + heading-change stop), k-factor computed from total pulse count, rolling 6-run average stored to `/speed_cal.json`

@@ -25,8 +25,8 @@ enum class Action : uint8_t {
     NAV_OUTBOUND,
     NAV_HOME,
     NAV_MARK,
-    CAL_QUICK,
-    CAL_FULL,
+    CAL_BASELINE,       // bin-aware baseline (off-scooter) cal
+    CAL_MOUNTED,        // bin-aware mounted (on-scooter) cal
     CAL_SPEED,
     INPUT_GPS_POS,
     INPUT_GPS_SPD,
@@ -38,6 +38,7 @@ enum class Action : uint8_t {
     DISP_UNITS,         // m vs ft
     DISP_HDG_TYPE,      // mag vs true
     NAV_OP_MODE,        // dive vs surface (toggle GPS + WiFi)
+    POWER_OFF,          // save state and enter deep sleep
 };
 
 // ---------------------------------------------------------------------------
@@ -116,5 +117,10 @@ void updateNavState(uint8_t flags);
 // should enter distance-selection mode.  Cleared by clearSpeedCalPending().
 bool isPendingSpeedCal();
 void clearSpeedCalPending();
+
+// Returns true if the user just selected "OFF" and the display device
+// should begin the power-off sequence.  Cleared by clearPowerOffPending().
+bool isPendingPowerOff();
+void clearPowerOffPending();
 
 }  // namespace menu

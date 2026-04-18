@@ -90,7 +90,8 @@ src/
 ├── util/                      # Utilities
 │   ├── logging.cpp/h          # Data logging to LittleFS
 │   ├── storage.cpp/h          # Calibration save/load (JSON)
-│   └── nvs_state.cpp/h        # Runtime state persistence (ESP32 NVS: toggles, position)
+│   ├── nvs_state.cpp/h        # Runtime state persistence (ESP32 NVS: toggles, position)
+│   └── speed_cal.cpp/h        # Speed cal k-factor history (LittleFS /speed_cal.json, rolling 6-run average)
 └── types/
     └── types.h                # Core data types (Vec3i16, Vec3f, Calib3, MagCalib, etc.)
 lib/
@@ -286,6 +287,13 @@ MENU (root)
 
 Each submenu has an auto-generated ".." (back) item. Toggle items (GPS Pos, Units, Mode, Op Mode, etc.) show current state inline and stay open after toggle.
 
+**Speed cal** uses a multi-phase UI that takes over the display outside the menu system:
+1. Menu closes → display enters distance-selection mode (`SpeedCalPhase::DIST_SELECT` in display_main.cpp)
+2. BTN1 cycles distance (150–500 ft in 50 ft steps); BTN2 confirms and sends `START_SPEED_CAL` to nav device
+3. Nav device state machine: WAITING (cal_mode=2) → RUNNING (cal_mode=3) → RESULT (cal_mode=4)
+4. Display advances phase by watching cal_mode in incoming NavPackets (forward-only to avoid stale-packet race)
+5. RESULT screen: BTN1 cycles RESET+ACCEPT / ACCEPT / REJECT; BTN2 sends the chosen `DisplayCmd`
+
 **Op Mode (Dive/Surface):** Toggles operational mode. Surface mode (default at boot) keeps GPS and WiFi active. Dive mode disables both GPS processing and WiFi radio — suitable for underwater use where neither is available. Toggling back to surface re-initializes WiFi and GPS.
 
 ### Display Layout When Menu Is Open (128×96 OLED)
@@ -419,6 +427,7 @@ To force recalibration, delete the JSON files from LittleFS or use menu → CAL 
 - [src/util/storage.h](src/util/storage.h) — Calibration save/load (JSON to LittleFS)
 - [src/util/nvs_state.h](src/util/nvs_state.h) — Runtime state persistence (ESP32 NVS): `nvs_nav::` (toggle states, position) and `nvs_disp::` (display settings)
 - [src/util/logging.h](src/util/logging.h) — Data logging system (CSV-like format)
+- [src/util/speed_cal.h](src/util/speed_cal.h) — Speed cal k-factor history: `load()`, `save()`, `addMeasurement()`, `averageK()`, `reset()`
 - [docs/overview.md](docs/overview.md) — Project overview, architecture, feature summary
 - [docs/user-guide.md](docs/user-guide.md) — User-facing guide: boot, display, buttons, dive workflow
 - [docs/calibration-guide.md](docs/calibration-guide.md) — Sensor calibration (mag, gyro, accel) + persistence

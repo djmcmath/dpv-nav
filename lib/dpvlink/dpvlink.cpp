@@ -16,7 +16,8 @@ PacketType identifyPacket(const char* buf, size_t len) {
 
     const char* t = doc["t"] | "";
     if (t[0] == 'N') return PacketType::NAV;
-    if (t[0] == 'D') return PacketType::DEBUG;
+    if (t[0] == 'D' && t[1] == '\0') return PacketType::DEBUG;
+    if (t[0] == 'C') return PacketType::CAL_PROGRESS;
     // Backward compat: packets without "t" are assumed NavPacket
     if (doc["hdg"].is<float>()) return PacketType::NAV;
     return PacketType::UNKNOWN;
@@ -40,6 +41,7 @@ size_t navPacketToBytes(const NavPacket& pkt, char* buf, size_t bufLen) {
     doc["fl"]   = pkt.flags;
     doc["gq"]   = pkt.gps_fix_quality;
     doc["gs"]   = pkt.gps_satellites;
+    doc["gb"]   = pkt.gps_signal_bars;
     doc["up"]   = pkt.uptime_ms;
     // Cal progress fields — only serialize when calibration is active (saves bandwidth)
     if (pkt.cal_remaining_s > 0 || pkt.cal_coverage_pct > 0 || pkt.cal_mode > 0) {
@@ -54,6 +56,8 @@ size_t navPacketToBytes(const NavPacket& pkt, char* buf, size_t bufLen) {
         doc["sk"] = pkt.speed_cal_k_existing;
         doc["sp"] = pkt.speed_cal_k_proposed;
     }
+    // Boot flags — always send (display needs them for boot status screen)
+    if (pkt.boot_flags) doc["bf"] = pkt.boot_flags;
 
     size_t n = serializeJson(doc, buf, bufLen - 1);
     if (n == 0 || n >= bufLen - 1) return 0;
@@ -79,6 +83,7 @@ bool bytesToNavPacket(const char* buf, size_t len, NavPacket& out) {
     out.flags            = doc["fl"]  | (uint8_t)0;
     out.gps_fix_quality  = doc["gq"]  | (uint8_t)0;
     out.gps_satellites   = doc["gs"]  | (uint8_t)0;
+    out.gps_signal_bars  = doc["gb"]  | (uint8_t)0;
     out.uptime_ms        = doc["up"]  | (uint32_t)0;
     out.cal_remaining_s      = doc["cr"]  | (uint8_t)0;
     out.cal_coverage_pct     = doc["cp"]  | (uint8_t)0;
@@ -87,6 +92,7 @@ bool bytesToNavPacket(const char* buf, size_t len, NavPacket& out) {
     out.speed_cal_elapsed_s  = doc["se"]  | (uint16_t)0;
     out.speed_cal_k_existing = doc["sk"]  | 0.0f;
     out.speed_cal_k_proposed = doc["sp"]  | 0.0f;
+    out.boot_flags           = doc["bf"]  | (uint8_t)0;
     return true;
 }
 
@@ -156,6 +162,68 @@ bool bytesToDebugPacket(const char* buf, size_t len, DebugPacket& out) {
     out.raw_mag_heading_deg = doc["mh"] | 0.0f;
     out.pitch_deg          = doc["pi"] | 0.0f;
     out.roll_deg           = doc["ri"] | 0.0f;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// CalProgressPacket
+// ---------------------------------------------------------------------------
+size_t calProgressPacketToBytes(const CalProgressPacket& pkt, char* buf, size_t bufLen) {
+    JsonDocument doc;
+    doc["t"]   = "C";
+    doc["ct"]  = pkt.cal_type;
+    doc["ph"]  = pkt.phase;
+    doc["bg"]  = pkt.bins_green;
+    doc["bt"]  = pkt.bins_total;
+    doc["ok"]  = pkt.complete;
+    doc["cb"]  = pkt.current_bin;
+    doc["pp"]  = pkt.cur_pitch_deg;
+    doc["hh"]  = pkt.cur_hdg_deg;
+
+    // Encode bin counts as a JSON array
+    JsonArray bins = doc["bc"].to<JsonArray>();
+    for (int i = 0; i < pkt.bins_total; i++) {
+        bins.add(pkt.bin_counts[i]);
+    }
+
+    // Fit quality — only include when valid to save bandwidth
+    if (pkt.fit_valid) {
+        doc["fv"] = pkt.fit_valid;
+        doc["fe"] = pkt.fit_hdg_err_deg;
+        doc["fd"] = pkt.fit_delta;
+    }
+
+    size_t n = serializeJson(doc, buf, bufLen - 1);
+    if (n == 0 || n >= bufLen - 1) return 0;
+    buf[n]     = '\n';
+    buf[n + 1] = '\0';
+    return n + 1;
+}
+
+bool bytesToCalProgressPacket(const char* buf, size_t len, CalProgressPacket& out) {
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, buf, len);
+    if (err) return false;
+
+    out.cal_type   = doc["ct"]  | (uint8_t)0;
+    out.phase      = doc["ph"]  | (uint8_t)0;
+    out.bins_green = doc["bg"]  | (uint8_t)0;
+    out.bins_total = doc["bt"]  | (uint8_t)0;
+    out.complete      = doc["ok"]  | false;
+    out.current_bin   = doc["cb"]  | (int8_t)-1;
+    out.cur_pitch_deg = doc["pp"]  | 0.0f;
+    out.cur_hdg_deg   = doc["hh"]  | 0.0f;
+
+    JsonArray bins = doc["bc"];
+    int count = (int)out.bins_total;
+    if (count > 60) count = 60;
+    for (int i = 0; i < count; i++) {
+        out.bin_counts[i] = bins[i] | (uint8_t)0;
+    }
+
+    out.fit_valid       = doc["fv"]  | false;
+    out.fit_hdg_err_deg = doc["fe"]  | 0.0f;
+    out.fit_delta       = doc["fd"]  | 0.0f;
     return true;
 }
 

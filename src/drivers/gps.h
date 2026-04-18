@@ -22,4 +22,9 @@ GpsFix getFix();
 // Convenience: true if last parsed sentence had a valid fix.
 bool hasFix();
 
+// Compute a 0–4 signal quality bar count from a GpsFix.
+// Uses HDOP, fix type (2D/3D), and satellite count.
+// Scoring thresholds and weights are configured in config.h (GPS_SCORE_*/GPS_WEIGHT_*).
+uint8_t computeSignalBars(const GpsFix& fix);
+
 }

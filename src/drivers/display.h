@@ -4,10 +4,11 @@
 
 struct NavPacket;
 struct DebugPacket;
+struct CalProgressPacket;
 
 namespace display {
 
-// Initialize SPI bus and SSD1351 OLED.  Call once during setup.
+// Initialize SPI bus and ST7789 TFT (320x240 landscape).  Call once during setup.
 bool init();
 
 // Cycle through solid color fills to verify display is working.
@@ -51,17 +52,31 @@ void showNavTop(const NavPacket& pkt);
 // Calibrated sensor data, headings, pitch/roll.
 void showDebug(const DebugPacket& pkt);
 
+// Draw the nav-device boot status screen and flush to display.
+// Shows pass/fail for each subsystem (IMU, GPS, cal files).
+// boot_flags uses the BOOT_* bit constants from dpvlink.h.
+void showBootStatus(uint8_t boot_flags);
+
 // Draw a calibration progress screen and flush to display.
 //   remaining_s    — seconds left in the calibration
 //   coverage_pct   — 0-100 coverage/completeness indicator
 //   isFull         — true = soft-iron data collection, false = quick hard-iron sweep
 void showCal(uint8_t remaining_s, uint8_t coverage_pct, bool isFull);
 
+// Draw the bin-coverage calibration grid screen and flush to display.
+// Shows a color-coded heading × elevation grid (black/red/yellow/green per bin).
+//   pkt     — CalProgressPacket with bin counts and totals
+//   title   — short title string ("BASELINE CAL" or "MOUNTED CAL")
+void showCalGrid(const struct CalProgressPacket& pkt, const char* title);
+
 // Speed calibration screens (all flush to display).
 // Distance selection — user chooses how far they will swim.
 void showSpeedCalDistSelect(uint16_t dist_ft);
 // Waiting for flow — DPV not yet moving.
 void showSpeedCalWaiting();
+// Manual countdown to force-start: secondsRemaining = 5..1 (shows "GO!" at 0, but
+// caller transitions away before rendering 0).
+void showSpeedCalCountdown(int secondsRemaining);
 // Run in progress — show large elapsed-time counter.
 void showSpeedCalRunning(uint16_t elapsed_s, uint16_t dist_ft);
 // Accept/reject result screen.

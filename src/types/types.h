@@ -55,7 +55,16 @@ struct GpsFix {
   float course_deg;     // course over ground (degrees)
   float hdop;           // horizontal dilution of precision
   uint8_t satellites;   // number of satellites tracked
-  uint8_t fix_quality;  // 0=none, 1=GPS, 2=DGPS
+  uint8_t fix_quality;  // 0=none, 1=GPS, 2=DGPS  (from GGA)
+  uint8_t fix_type_3d;  // 1=no fix, 2=2D, 3=3D  (from GSA)
   bool has_fix;         // convenience flag
   uint32_t fix_age_ms;  // millis() at last valid fix
+  // UTC time from GPS (populated from NMEA RMC sentence)
+  uint8_t utc_year;     // 2-digit year (e.g. 25 for 2025); 0 if not yet parsed
+  uint8_t utc_month;    // 1-12
+  uint8_t utc_day;      // 1-31
+  uint8_t utc_hour;     // 0-23
+  uint8_t utc_minute;   // 0-59
+  uint8_t utc_second;   // 0-59
+  bool    has_time;     // true once GPS has parsed a valid date/time sentence
 };

@@ -174,7 +174,63 @@ Files are stored on LittleFS (ESP32 internal flash). Total calibration data is <
 
 ## Speed Calibration (Flow Sensor)
 
-Not automated. Requires field testing:
-1. Mark a known distance on the bottom (100–200 m of pre-measured line)
-2. Drive straight at typical cruising speed
-3. Tune `FLOW_K_FACTOR` and `FLOW_CROSS_SECTION_M2` in [config.h](../src/config.h) until integrated distance matches GPS or known distance
+Speed cal measures the flow sensor's k-factor (pulses per litre) by timing a swim over a known distance. Results are averaged across up to 6 runs and saved to `/speed_cal.json` on LittleFS.
+
+### How it works
+
+The flow sensor converts pulse frequency to speed using:
+```
+speed_ms = (freq_hz / k_factor) / 60 / 1000 / cross_section_m2
+```
+Speed cal solves for `k_factor` given the true distance and measured total pulses:
+```
+k_factor = total_pulses / (dist_m × 60 × 1000 × FLOW_CROSS_SECTION_M2)
+```
+Elapsed time cancels out — only total pulse count and true distance matter.
+
+### Calibration file
+
+```
+/speed_cal.json     — Rolling history of up to 6 k-factor measurements
+```
+
+Format:
+```json
+{ "n": 3, "k": [1.12, 1.09, 1.15] }
+```
+The active k-factor is the average of all stored values. On boot the nav device loads this file and applies the average. If the file is absent, `FLOW_K_FACTOR` from `config.h` is used.
+
+### Running a speed cal
+
+See **CAL > Speed cal** in the [User Guide](user-guide.md) for the full step-by-step workflow. In brief:
+
+1. Menu → **CAL > Speed cal**
+2. Select distance (150–500 ft, default 300 ft)
+3. Start DPV — timing begins automatically at flow ≥ 0.3 m/s
+4. Swim the distance; the run stops when flow drops or heading deviates > 90° after 30 s
+5. Accept (add to average), reset+accept (start fresh), or reject
+
+### Accept vs Reset+Accept
+
+| Option | When to use |
+|--------|-------------|
+| **ACCEPT** | Normal run — adds to rolling average of up to 6 measurements |
+| **RESET+ACCEPT** | DPV serviced, impeller changed, or first cal on a new installation — clears history so old measurements from different hardware don't pollute the average |
+| **REJECT** | Run was suspect (aborted early, DPV speed changed mid-run, etc.) |
+
+### Setting FLOW_CROSS_SECTION_M2
+
+`FLOW_CROSS_SECTION_M2` in `config.h` must be set to the physical intake cross-section of the DPV inlet before speed cal can give sensible k-factor values. Measure the inner diameter of the flow sensor mounting tube:
+```
+area = π × (diameter/2)²
+```
+A 50 mm diameter tube → 0.00196 m² ≈ 0.002 m². This constant is not calibrated automatically.
+
+### Troubleshooting
+
+| Problem | Fix |
+|---------|-----|
+| Run starts immediately before DPV is moving | Flow sensor may be picking up noise — raise `SPEED_CAL_START_THRESHOLD_MS` |
+| Run stops too early (mid-swim) | DPV deceleration triggered flow-drop stop — lower `SPEED_CAL_STOP_THRESHOLD_MS` slightly |
+| Proposed k-factor wildly different from existing | Check `FLOW_CROSS_SECTION_M2` is set correctly; verify distance selection was accurate |
+| `/speed_cal.json` not found on first run | Normal — an empty history is used silently; the file is created on first ACCEPT |

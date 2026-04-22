@@ -200,7 +200,7 @@ The quick cal (and the blocking `calibrateMagnetometer()`) only compute hard-iro
 3. **Ellipsoid Fitting** ([tools/mag_calibration.py](tools/mag_calibration.py)): Python script computes hard-iron + soft-iron matrix using least-squares
 4. **Import Calibration**: Upload generated `calib_mag_cal.json` to LittleFS or hardcode in `nav_main.cpp`
 
-See [docs/mag-calibration-workflow.md](docs/mag-calibration-workflow.md) for complete procedure. This workflow is essential for real-world DPV deployment where the magnetometer is mounted on the DPV with motors, batteries, and other magnetic sources.
+See [docs/calibration-guide.md](docs/calibration-guide.md) for complete procedure. This workflow is essential for real-world DPV deployment where the magnetometer is mounted on the DPV with motors, batteries, and other magnetic sources.
 
 ### NVS State Persistence
 
@@ -430,7 +430,6 @@ To force recalibration, delete the JSON files from LittleFS or use menu → CAL 
 - [src/util/speed_cal.h](src/util/speed_cal.h) — Speed cal k-factor history: `load()`, `save()`, `addMeasurement()`, `averageK()`, `reset()`
 - [docs/overview.md](docs/overview.md) — Project overview, architecture, feature summary
 - [docs/user-guide.md](docs/user-guide.md) — User-facing guide: boot, display, buttons, dive workflow
-- [docs/calibration-guide.md](docs/calibration-guide.md) — Sensor calibration (mag, gyro, accel) + persistence
-- [docs/mag-calibration-workflow.md](docs/mag-calibration-workflow.md) — Advanced soft-iron magnetometer calibration (ellipsoid fitting)
+- [docs/calibration-guide.md](docs/calibration-guide.md) — Sensor calibration (mag baseline + mounted two-stage workflow, gyro, accel, speed)
 - [docs/ahrs-orientation.md](docs/ahrs-orientation.md) — AHRS Mahony filter, Euler angles, heading
 - [docs/data-logging-guide.md](docs/data-logging-guide.md) — Data logging system (CSV to LittleFS)

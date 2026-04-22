@@ -4,7 +4,8 @@ This directory contains offline processing tools for calibration and data analys
 
 ## mag_calibration.py
 
-Python script for computing magnetometer soft-iron calibration from raw sensor data.
+Python script for computing magnetometer calibration from raw sensor samples. Supports
+the two-stage baseline + mounted workflow.
 
 ### Installation
 
@@ -14,50 +15,38 @@ pip install numpy scipy
 
 ### Usage
 
+**Baseline mode** (off-scooter, full sphere):
 ```bash
-python mag_calibration.py mag_samples.csv
+python mag_calibration.py --mode baseline mag_baseline_samples.csv
+python mag_calibration.py --mode baseline mag_baseline_samples.csv --flat mag_flat.csv
 ```
+Output: `mag_base.json`
 
-**Input:** CSV file with raw magnetometer samples (X,Y,Z columns)
-**Output:** `calib_mag_cal.json` containing hard-iron offset + soft-iron matrix
-
-### Example Output
-
+**Mounted mode** (on-scooter correction, requires baseline result):
+```bash
+python mag_calibration.py --mode mounted --base mag_base.json mag_mounted_samples.csv
 ```
-MAGNETOMETER CALIBRATION RESULTS
-====================================================================
-
-Hard-Iron Offset (bias):
-  X:  1600.50
-  Y: -2782.50
-  Z:  6671.00
-
-Soft-Iron Correction Matrix:
-  [ 0.950000,  0.012000, -0.008000]
-  [ 0.012000,  1.020000,  0.005000]
-  [-0.008000,  0.005000,  1.030000]
-
-Diagnostics:
-  Number of samples: 3000
-  Ellipsoid radii: [57.2, 59.8, 60.1]
-  Average radius: 59.0
-  Radii variation: 2.15%
-
-Saved calibration to calib_mag_cal.json
-```
+Output: `mag_mount.json`
 
 ### Quality Indicators
 
-- **Radii variation < 5%**: Excellent calibration, good rotation coverage
-- **Radii variation 5-10%**: Acceptable, but could improve with better rotation
-- **Radii variation > 10%**: Poor calibration, incomplete rotation coverage - recollect data
+**Baseline:**
+- RMS error < 2%: GOOD
+- RMS error 2–5%: ACCEPTABLE
+- RMS error > 5%: POOR — recollect with better spherical coverage
+
+**Heading accuracy** (reported when `--flat` data is provided):
+- Total error < 2°: EXCELLENT
+- Total error 2–5°: GOOD
+- Total error > 5°: POOR — recollect flat rotation data
 
 ### Complete Workflow
 
-See [../docs/mag-calibration-workflow.md](../docs/mag-calibration-workflow.md) for the full ESP32 → PC → ESP32 calibration procedure.
+See [../docs/calibration-guide.md](../docs/calibration-guide.md) for the full step-by-step
+procedure including what to expect at each stage and how to verify the result.
 
 ## Future Tools
 
-- **log_analyzer.py**: Parse and visualize SPIFFS data logs
+- **log_analyzer.py**: Parse and visualize LittleFS data logs
 - **heading_plotter.py**: Real-time heading visualization from serial output
 - **imu_diagnostic.py**: Sensor health check and noise analysis

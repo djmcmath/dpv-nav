@@ -12,6 +12,7 @@
 #include "drivers/display.h"
 #include "menu/menu.h"
 #include "nav/state.h"
+#include "util/hdg_cal.h"
 #include <dpvlink.h>
 
 // ---- Link receive state ----------------------------------------------------
@@ -56,6 +57,21 @@ static constexpr uint32_t BOOT_STATUS_HOLD_MS = 4000;
 
 // Track whether we need to redraw nav after menu closes
 static bool menuWasOpen = false;
+
+// ---- 4-point heading calibration UI state ----------------------------------
+// The display device drives all 4 prompts, captures indicated headings from
+// NavPacket.heading_raw_deg, then sends SET_HDG_CAL to the nav device.
+// After all 4 points are captured the summary screen is shown; BTN2 dismisses.
+enum class HdgCalPhase : uint8_t {
+    NONE,     // not in hdg cal
+    PROMPT,   // showing prompt for current cardinal (step 0..3)
+    SUMMARY,  // showing results summary; BTN2 to exit
+};
+
+static HdgCalPhase gHdgCalPhase = HdgCalPhase::NONE;
+static int         gHdgCalStep  = 0;       // 0=North, 1=East, 2=South, 3=West
+static float       gHdgCalIndicated[4];    // captured heading_raw_deg for each step
+static float       gHdgCalCorrections[4];  // computed for summary display
 
 // ---- Speed calibration UI state --------------------------------------------
 // Phases live entirely on the display device; the nav device drives
@@ -117,6 +133,7 @@ static void processNavLine();
 static void processUsbCmd();
 static void sendCmd(DisplayCmd cmd);
 static void sendSpeedCalStart(uint16_t dist_ft);
+static void sendHdgCal(const float indicated[4]);
 static void updateButton(ButtonState& b);
 static void handleButtons();
 
@@ -277,6 +294,14 @@ void loop() {
             gSpeedCalChoice  = 0;
             Serial.println("[SPEED_CAL] entering distance selection");
         }
+
+        if (menu::isPendingHdgCal()) {
+            menu::clearHdgCalPending();
+            gHdgCalPhase = HdgCalPhase::PROMPT;
+            gHdgCalStep  = 0;
+            Serial.println("[HDG_CAL] entering 4-point heading cal");
+        }
+
         display::clear();
     }
     if (menu::isOpen()) {
@@ -353,6 +378,17 @@ void loop() {
                 display::showCalGrid(lastCalProgress,
                                      lastCalProgress.cal_type == (uint8_t)CalType::MOUNTED
                                          ? "MOUNTED CAL" : "BASELINE CAL");
+                return;
+            }
+
+            // 4-point heading cal — takes priority while active
+            if (gHdgCalPhase == HdgCalPhase::PROMPT) {
+                display::showHdgCalPrompt(gHdgCalStep,
+                                          navValid ? lastNav.heading_raw_deg : 0.0f);
+                return;
+            }
+            if (gHdgCalPhase == HdgCalPhase::SUMMARY) {
+                display::showHdgCalSummary(gHdgCalCorrections);
                 return;
             }
 
@@ -522,6 +558,15 @@ static void sendSpeedCalStart(uint16_t dist_ft) {
     }
 }
 
+static void sendHdgCal(const float indicated[4]) {
+    size_t n = displayHdgCalToBytes(indicated, txBuf, sizeof(txBuf));
+    if (n > 0) {
+        Serial1.write(txBuf, n);
+        Serial.printf("[HDG_CAL] SET_HDG_CAL N=%.1f E=%.1f S=%.1f W=%.1f\n",
+                      indicated[0], indicated[1], indicated[2], indicated[3]);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Debounce a single button.  Call once per loop iteration.
 // ---------------------------------------------------------------------------
@@ -567,6 +612,39 @@ static void handleButtons() {
             btn2.fired = true;
             return;
         }
+    }
+
+    // --- 4-point heading calibration -----------------------------------------
+    if (gHdgCalPhase == HdgCalPhase::PROMPT) {
+        // BTN2 short press: capture current raw heading for this step
+        if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
+            btn2.fired = true;
+            gHdgCalIndicated[gHdgCalStep] = navValid ? lastNav.heading_raw_deg : 0.0f;
+            Serial.printf("[HDG_CAL] Step %d captured: %.1f\n",
+                          gHdgCalStep, gHdgCalIndicated[gHdgCalStep]);
+            gHdgCalStep++;
+            if (gHdgCalStep >= 4) {
+                // All 4 points collected — send to nav device and show summary
+                sendHdgCal(gHdgCalIndicated);
+                hdg_cal::HdgCal cal;
+                for (int i = 0; i < 4; i++) cal.indicated[i] = gHdgCalIndicated[i];
+                hdg_cal::corrections(cal, gHdgCalCorrections);
+                gHdgCalPhase = HdgCalPhase::SUMMARY;
+                display::clear();
+            }
+        }
+        return;
+    }
+
+    if (gHdgCalPhase == HdgCalPhase::SUMMARY) {
+        // BTN2 short press: dismiss summary and return to normal nav
+        if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
+            btn2.fired = true;
+            gHdgCalPhase = HdgCalPhase::NONE;
+            display::clear();
+            Serial.println("[HDG_CAL] Summary dismissed");
+        }
+        return;
     }
 
     // --- Speed cal: distance selection mode ----------------------------------

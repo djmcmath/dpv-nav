@@ -29,8 +29,8 @@ constexpr float GPS_SOG_NOISE_FLOOR_KN  = 0.1f;   // SOG below this is certainly
 constexpr float GPS_SOG_TRUST_FLOOR_KN  = 2.0f;   // SOG above this is trusted regardless of COG (knots)
 
 // Position estimation
-constexpr float DEFAULT_BASELINE_LAT     = 47.5f;   // degrees N (assumed until GPS fix)
-constexpr float DEFAULT_BASELINE_LON     = -122.5f;  // degrees W (assumed until GPS fix)
+constexpr float DEFAULT_BASELINE_LAT     = 47.5889f;   // degrees N (assumed until GPS fix)
+constexpr float DEFAULT_BASELINE_LON     = -122.284f;  // degrees W (assumed until GPS fix)
 constexpr bool  DEFAULT_USE_GPS_POSITION = true;     // use GPS lat/lon as position truth when available
 
 // Magnetic declination (degrees, positive = East, negative = West)
@@ -67,8 +67,8 @@ constexpr uint32_t LOG_HIGH_INTERVAL_MS = 1000;   // 1 entry per second (HIGH le
 // ---------------------------------------------------------------------------
 
 // Sample threshold per bin — green = fully covered, yellow = partial, red = sparse
-constexpr uint8_t MAG_CAL_BIN_GREEN_THRESHOLD  = 15;  // samples for "green" (fully covered)
-constexpr uint8_t MAG_CAL_BIN_YELLOW_THRESHOLD = 5;   // samples for "yellow" (partial)
+constexpr uint8_t MAG_CAL_BIN_GREEN_THRESHOLD  = 18;  // samples for "green" (fully covered)
+constexpr uint8_t MAG_CAL_BIN_YELLOW_THRESHOLD = 7;   // samples for "yellow" (partial)
 
 // Baseline cal: 12 heading sectors × 5 elevation bands = 60 bins
 // Elevation bands (degrees pitch): <-60, -60..-30, -30..+30 (level), +30..+60, >+60
@@ -171,7 +171,7 @@ constexpr int   GPS_CAP_2D_MAX_BARS   = 2;    // 2D-only fix → max 2 bars
 // Flow sensor pulse frequency (Hz) above which we consider the DPV to be moving and start the run.
 // Below this on start: stay in WAITING state.
 // Raw pulse count threshold works even if k-factor calibration is wrong.
-constexpr float SPEED_CAL_START_THRESHOLD_HZ  = 5.0f;   // ~5 pulses/sec — very low, just needs tiny flow
+constexpr float SPEED_CAL_START_THRESHOLD_HZ  = 2.0f;   // ~5 pulses/sec — very low, just needs tiny flow
 
 // Flow speed (m/s) below which we consider the DPV stopped (end of run).
 // Fraction of start threshold — catches a clean stop without false-triggering

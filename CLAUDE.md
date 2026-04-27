@@ -4,10 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-DPV-Nav is an inertial navigation system for underwater DPVs (Diver Propulsion Vehicles / scooters). It provides tilt-compensated heading using AHRS (Mahony filter), dead-reckoning position via flowmeter integration, and displays bearing/distance to home on a small OLED.
+DPV-Nav is an inertial navigation system for underwater DPVs (Diver Propulsion Vehicles / scooters). It provides tilt-compensated heading using AHRS (Mahony filter), dead-reckoning position via flowmeter integration, and displays bearing/distance to home on a TFT display.
 
-**Target Hardware:** ESP32 (FeatherESP32), LSM6DS33 (accel/gyro), LIS3MDL (magnetometer), GPS, flow sensor, OLED display
-**Architecture:** Two-device system — nav device (sensors/AHRS/GPS/position) + display device (OLED/buttons), linked via Serial1 JSON packets at 10 Hz
+**Target Hardware:** ESP32 (FeatherESP32), LSM6DS33 (accel/gyro), LIS3MDL (magnetometer), GPS, flow sensor, ST7789 TFT (320×240)
+**Architecture:** Two-device system — nav device (sensors/AHRS/GPS/position) + display device (TFT/buttons), linked via Serial1 JSON packets at 10 Hz
 **Language:** C++ (Arduino framework via PlatformIO)
 **Main entry points:** [src/nav_main.cpp](src/nav_main.cpp) (nav device), [src/display_main.cpp](src/display_main.cpp) (display device)
 
@@ -54,11 +54,11 @@ Code is organized into namespaces by subsystem:
 - `nav::` - Position estimation (dead reckoning, GPS truth, home waypoint)
 - `gps::` - GPS driver (Adafruit Ultimate GPS, NMEA parsing)
 - `flow::` - Flow sensor driver (hall-effect pulse, speed calculation)
-- `display::` - OLED display driver (SSD1351, GFXcanvas16 framebuffer, nav + debug screen rendering)
+- `display::` - TFT display driver (ST7789 320×240, direct hardware writes, nav + debug screen rendering)
 - `menu::` - Hierarchical menu system (JSON-configurable, button-driven, on display device)
-- `ui::` - Display output (console_update for OLED/serial)
 - `logging::` - Data logging system (LittleFS-based)
 - `storage::` - Calibration persistence (JSON files in LittleFS)
+- `hdg_cal::` - 4-point heading calibration (load/save/apply circular interpolation)
 - `nvs_nav::` - Nav device runtime state persistence (ESP32 NVS via Preferences)
 - `nvs_disp::` - Display device settings persistence (ESP32 NVS via Preferences)
 
@@ -67,12 +67,12 @@ Code is organized into namespaces by subsystem:
 ```
 src/
 ├── nav_main.cpp               # Nav device entry point (sensors, AHRS, GPS, DR, serial link)
-├── display_main.cpp           # Display device entry point (OLED rendering, buttons)
+├── display_main.cpp           # Display device entry point (TFT rendering, buttons)
 ├── board_pins.h, config.h     # Hardware pin definitions and config constants
 ├── drivers/                   # Low-level sensor/peripheral drivers
 │   ├── lsm6ds33.cpp/h         # Accel/gyro driver
 │   ├── lis3mdl.cpp/h          # Magnetometer driver
-│   ├── display.cpp/h          # OLED display driver (SSD1351)
+│   ├── display.cpp/h          # TFT display driver (ST7789 320×240, direct hardware writes)
 │   ├── flow_sensor.cpp/h      # Flowmeter driver (hall-effect pulse)
 │   └── gps.cpp/h              # GPS driver (Adafruit Ultimate GPS, NMEA)
 ├── sensors/                   # High-level sensor interfaces
@@ -91,6 +91,7 @@ src/
 │   ├── logging.cpp/h          # Data logging to LittleFS
 │   ├── storage.cpp/h          # Calibration save/load (JSON)
 │   ├── nvs_state.cpp/h        # Runtime state persistence (ESP32 NVS: toggles, position)
+│   ├── hdg_cal.cpp/h          # 4-point heading calibration (load/save/apply, /hdg_cal.json)
 │   └── speed_cal.cpp/h        # Speed cal k-factor history (LittleFS /speed_cal.json, rolling 6-run average)
 └── types/
     └── types.h                # Core data types (Vec3i16, Vec3f, Calib3, MagCalib, etc.)
@@ -110,7 +111,7 @@ data/
    - Magnetometer: `MagCalib` applies hard-iron offset + soft-iron matrix (3×3)
 4. **AHRS fusion** ([math/mahony.h](src/math/mahony.h)): Normalized sensor vectors → `Quaternion` (orientation)
 5. **Euler extraction** ([math/orientation.h](src/math/orientation.h)): Quaternion → Roll/Pitch/Yaw (rad)
-6. **Heading calculation**: Yaw → Heading (0-360°)
+6. **Heading calculation**: Yaw → `headingRawDeg` (0-360°) → `headingDeg` (4-point hdg_cal correction applied if loaded, else same as raw). Both values are sent in NavPacket (`heading_deg` = corrected, `heading_raw_deg` = pre-correction).
 7. **Speed selection**: GPS speed is filtered through a two-stage gate before use. First, a SOG (Speed Over Ground) deadband rejects speeds below 0.5 kn as position jitter noise and trusts speeds above 2.0 kn unconditionally. Speeds in the middle zone must also pass a COG (Course Over Ground) coherence check — an EMA of sin/cos(COG) whose resultant length measures heading consistency (0=random, 1=steady). If GPS speed fails either check, flowmeter speed is used instead. See `GPS_SOG_NOISE_FLOOR_KN`, `GPS_SOG_TRUST_FLOOR_KN`, and `GPS_COG_COHERENCE_THRESH` in [config.h](src/config.h).
 8. **Position estimation** ([nav/nav_model.h](src/nav/nav_model.h)): Dead-reckoning integration (speed × heading × dt) with optional GPS truth override
 9. **Serial link**: `NavPacket` sent to display device at 10 Hz via JSON over Serial1. Optional `DebugPacket` at 5 Hz when `ENABLE_DEBUG_PACKET` is set.
@@ -158,49 +159,30 @@ imu::AxisMap imuAxisMap{
 
 The system supports automatic calibration with persistence to LittleFS (flash storage):
 
-**Magnetometer** ([nav_main.cpp:167-176](src/nav_main.cpp#L167-L176)):
-- On first boot: Min/max sweep calibration (rotate device through all orientations for 30 sec)
-- Saves hard-iron offset + soft-iron matrix to `/calib/mag_cal.json`
-- On subsequent boots: Loads from LittleFS (skip calibration unless file missing)
+**Magnetometer (two-stage, menu-triggered, bin-aware):**
+- **Baseline** (CAL > Baseline): Device off DPV, full sphere coverage. Collects samples to `/mag_baseline_samples.csv`. Run `python tools/mag_calibration.py mag_baseline_samples.csv`, upload `mag_base.json`.
+- **Mounted** (CAL > Mounted): Device installed on DPV, horizontal rotations. Collects samples to `/mag_mounted_samples.csv`. Run `python tools/mag_calibration.py mag_baseline_samples.csv mag_mounted_samples.csv`, upload `mag_mount.json`.
+- Both stages show a live heading×elevation bin-coverage grid on the display. Auto-completes when required bins are green.
+- On boot: tries `mag_base.json` + `mag_mount.json` chain → falls back to legacy `mag_cal.json` → falls back to 90s blocking sweep.
 
-**Gyroscope** ([nav_main.cpp:179-185](src/nav_main.cpp#L179-L185)):
-- On first boot: Sample at rest for 10 sec to measure bias
-- Saves bias to `/calib/gyro_cal.json`
+**Gyroscope:** On first boot (no `gyro_cal.json`): 10s stationary bias sampling. Subsequent boots load from LittleFS.
 
-**Accelerometer** ([nav_main.cpp:188-195](src/nav_main.cpp#L188-L195)):
-- On first boot: 6-point orientation sequence (X+/X-/Y+/Y-/Z+/Z- facing down)
-- Saves bias + scale to `/calib/accel_cal.json`
+**Accelerometer:** On first boot (no `accel_cal.json`): 6-point orientation sequence (X+/X-/Y+/Y-/Z+/Z- facing down, 2.5s each). Subsequent boots load from LittleFS.
 
-To force recalibration, delete JSON files from LittleFS or use menu → CAL > Quick cal.
+**4-Point Heading Calibration (CAL > Hdg cal):**
+- Optional, run after completing baseline + mounted mag cal.
+- User aligns DPV to N/E/S/W at surface and presses BTN2 at each cardinal.
+- Records the indicated (AHRS-reported) heading at each cardinal in `HdgCal.indicated[4]`.
+- Saved to `/hdg_cal.json`; loaded silently on boot (skipped if absent).
+- At runtime, `hdg_cal::apply()` uses circular linear interpolation across the 4 points to correct `headingRawDeg` → `headingDeg`.
+- Display shows `heading_raw_deg` from NavPacket during cal prompts (pre-correction, so recalibration captures absolute readings, not residual corrections).
 
-**Menu-Triggered Calibration (non-blocking):**
+**Speed Calibration (CAL > Speed cal):**
+- Swim a known distance (150–500 ft) at cruise speed; automatic run detection via flow threshold + heading-deviation stop.
+- k-factor computed from total pulse count + true distance; stored as rolling 6-run average in `/speed_cal.json`.
+- RESET+ACCEPT clears history (use after DPV service); ACCEPT adds to average; REJECT discards.
 
-Both calibration modes run non-blocking from the display menu — the nav device continues sending NavPackets throughout, and the display shows a live progress screen (time remaining + coverage bar).
-
-- **Quick cal** (CAL > Quick cal): 30-second hard-iron min/max sweep. Uses `imu::magCalNBBegin(30000)` / `imu::magCalNBTick()` called each main loop iteration. Coverage = min(X,Y,Z) axis span / 6800 LSB. Saves to `/calib/mag_cal.json` on completion.
-- **Full cal** (CAL > Full cal): 120-second raw sample collection via `mag_cal::startCollection(120000)`. Stores raw CSV to `/mag_cal_samples.csv` for offline processing. Coverage = time elapsed %.
-
-**Non-blocking quick cal API** ([sensors/imu.h](src/sensors/imu.h)):
-```cpp
-imu::magCalNBBegin(30000);          // start sweep
-// in main loop:
-if (imu::magCalNBTick()) {          // returns true when done
-    imu::magCalNBGetResult(magCal); // retrieve result
-}
-// progress query:
-imu::magCalNBGetProgress(elapsed_ms, remaining_ms, covX, covY, covZ);
-```
-
-**Advanced Field Calibration (Soft-Iron):**
-
-The quick cal (and the blocking `calibrateMagnetometer()`) only compute hard-iron offset (bias), setting soft-iron matrix to identity. For ±5° heading accuracy on a DPV with variable magnetic signature, proper soft-iron calibration is required using ellipsoid fitting:
-
-1. **Data Collection** ([util/mag_cal_collect.cpp](src/util/mag_cal_collect.cpp)): Menu → CAL > Full cal (120s), or serial `start_cal` command
-2. **Export Data**: Dump CSV to serial terminal and copy to PC
-3. **Ellipsoid Fitting** ([tools/mag_calibration.py](tools/mag_calibration.py)): Python script computes hard-iron + soft-iron matrix using least-squares
-4. **Import Calibration**: Upload generated `calib_mag_cal.json` to LittleFS or hardcode in `nav_main.cpp`
-
-See [docs/mag-calibration-workflow.md](docs/mag-calibration-workflow.md) for complete procedure. This workflow is essential for real-world DPV deployment where the magnetometer is mounted on the DPV with motors, batteries, and other magnetic sources.
+To force recalibration, delete the corresponding JSON file from LittleFS. See [docs/calibration-guide.md](docs/calibration-guide.md) and [docs/mag-calibration-workflow.md](docs/mag-calibration-workflow.md).
 
 ### NVS State Persistence
 
@@ -279,8 +261,9 @@ The display device includes a hierarchical menu system ([src/menu/menu.h](src/me
 ### Menu Structure
 ```
 MENU (root)
+├── OFF      — power off nav device
 ├── NAV:     Outbound, Home, Mark, Op Mode
-├── CAL:     Quick cal, Full cal, Speed cal
+├── CAL:     Baseline, Mounted, Hdg cal, Speed cal
 ├── INPUT:   GPS Pos, GPS Spd, WiFi, Logging
 └── DISPLAY: Mode, Spd/ETA, Units, Heading
 ```
@@ -296,10 +279,10 @@ Each submenu has an auto-generated ".." (back) item. Toggle items (GPS Pos, Unit
 
 **Op Mode (Dive/Surface):** Toggles operational mode. Surface mode (default at boot) keeps GPS and WiFi active. Dive mode disables both GPS processing and WiFi radio — suitable for underwater use where neither is available. Toggling back to surface re-initializes WiFi and GPS.
 
-### Display Layout When Menu Is Open (128×96 OLED)
-- **y=0–11**: Status bar (unchanged, live-updating)
-- **y=12–53**: Nav data (bearing/range to target, live-updating)
-- **y=54–95**: Menu area (separator line, title, up to 3 visible items with scroll)
+### Display Layout When Menu Is Open (320×240 TFT)
+- **y=0–23**: Status bar (unchanged, live-updating)
+- **y=24–119**: Nav data (2×2 grid: BRG/RNG/HDG/SPD, live-updating)
+- **y=120–239**: Menu area (separator line, title, up to visible items with scroll)
 
 ### Menu Definition
 Menu structure is loaded from `/menu.json` on LittleFS at boot. If the file is missing, a hardcoded default is used. The JSON maps action IDs to `menu::Action` enum values. To customize the menu, edit [data/menu.json](data/menu.json) and upload with `pio run -e display -t uploadfs`.
@@ -311,28 +294,18 @@ Menu structure is loaded from `/menu.json` on LittleFS at boot. If the file is m
 4. Handle the command in `handleDisplayCmd()` in [src/nav_main.cpp](src/nav_main.cpp)
 5. Add the item to the hardcoded default menu and to [data/menu.json](data/menu.json)
 
-## Display Rendering Architecture (GFXcanvas16 Framebuffer)
+## Display Rendering Architecture (ST7789 Direct Writes)
 
-The display driver uses an offscreen `GFXcanvas16(128, 96)` framebuffer (24KB RAM). All drawing operations target the canvas (pure RAM writes), and the complete framebuffer is pushed to the SSD1351 OLED in a single SPI bulk transfer via `oled.drawRGBBitmap()`.
+The display driver uses a 320×240 ST7789 TFT with direct hardware writes via the Adafruit ST7789 library. There is no offscreen framebuffer; drawing calls go directly to the display.
 
-**Why framebuffer:** Direct SPI draw calls to the SSD1351 caused display blanking and crashes due to SPI timing sensitivity. The previous workaround was 50ms delays after every SPI call, making rendering slow and fragile. The framebuffer approach eliminates all per-draw SPI traffic — canvas operations are microsecond RAM writes, and the single bulk transfer is more robust than many small transactions.
+**Rendering approach:** Incremental updates at ~10 Hz — only changed values are erased and redrawn to avoid flicker. Full-screen modes (cal prompts, cal summaries, speed cal phases) redraw the full screen on each state transition.
 
-**Rendering flow:**
-1. `showNav()` / `showDebug()`: Clear canvas → draw everything → `flush()` (full frame, self-contained)
-2. `showNavTop()`: Draw top half to canvas → **does NOT flush** (caller adds menu content via `drawText()`/`drawHLine()`, then calls `flush()`)
-3. Drawing primitives (`drawText`, `fillRect`, `drawHLine`, `drawPixel`): Write to canvas only. Caller must call `flush()` to make changes visible.
-4. Boot functions (`selfTest`, `statusLine`): Draw directly to `oled` hardware for immediate visibility during boot sequence.
-
-**Key design decisions:**
-- No caching/dirty tracking — every frame redraws from scratch since canvas writes are free
-- `flush()` is the only function that touches SPI during normal operation
-- `reinit()` calls `oled.begin()` then re-pushes the canvas to restore display contents
-- A `reinit()` at end of `setup()` ensures display works after I2C/MCP init (which can disrupt SPI state)
-- Periodic `reinit()` every 10s in `display_main.cpp` as a watchdog for SPI brown-out recovery
-
-**Serial self-test commands** (via USB serial on display device):
-- `selftest_rect_start [coverage%]` / `selftest_rect_stop` — random colored rectangles at 1 Hz
-- `selftest_text_start [coverage%]` / `selftest_text_stop` — random text strings at 1 Hz
+**Key display functions** ([src/drivers/display.cpp](src/drivers/display.cpp)):
+- `showNav(NavPacket)` — navigation screen: status bar + 2×2 grid (BRG/RNG/HDG/SPD), incremental updates
+- `showDebug(DebugPacket)` — debug screen: raw sensor values (mag/accel/gyro XYZ, heading, pitch/roll)
+- `showHdgCalPrompt(int step, float currentDeg)` — heading cal step prompt with live heading readout
+- `showHdgCalSummary(const float corrections[4])` — heading cal result screen with GREAT/GOOD/FAIR/POOR rating
+- `showMagCalProgress(...)` — bin-coverage grid for magnetometer calibration (Baseline/Mounted)
 
 ## Critical Conventions
 
@@ -396,18 +369,17 @@ Modify `ImuConfig` or `AxisMap` in [nav_main.cpp](src/nav_main.cpp) before `imu:
 
 ### Modifying Calibration Parameters
 Calibration timing is configured at the call sites in [nav_main.cpp](src/nav_main.cpp):
-- **Quick cal (menu)**: `imu::magCalNBBegin(30000)` — 30 sec non-blocking hard-iron sweep
-- **Full cal (menu)**: `mag_cal::startCollection(120000)` — 120 sec raw sample collection
-- **Boot mag cal (first-run)**: `imu::calibrateMagnetometer(magCal, 90000)` — 90 sec blocking sweep
+- **Boot mag cal (first-run fallback)**: `imu::calibrateMagnetometer(magCal, 90000)` — 90 sec blocking sweep (only runs if both mag_base.json and mag_cal.json are absent)
 - **Gyro cal (boot)**: `imu::calibrateGyroscope(gyroCal, 10000)` — 10 sec at rest
 - **Accel cal (boot)**: `imu::calibrateAccelerometer(accelCal, 2500)` — 2.5 sec per orientation (15 sec total)
+- **Baseline/Mounted bin-aware cal**: sample collection runs until required bins are green (no fixed time)
 
-To force recalibration, delete the JSON files from LittleFS or use menu → CAL > Quick cal.
+To force recalibration, delete the JSON files from LittleFS and reboot. Preferred workflow: CAL > Baseline (off DPV) → offline fit → upload `mag_base.json`; then CAL > Mounted (on DPV) → offline fit → upload `mag_mount.json`.
 
 ## Key Files Reference
 
 - [src/nav_main.cpp](src/nav_main.cpp) — Nav device entry point: sensor init, AHRS, GPS, flow, position estimation, serial link
-- [src/display_main.cpp](src/display_main.cpp) — Display device entry point: OLED rendering, buttons, menu integration, serial link receive
+- [src/display_main.cpp](src/display_main.cpp) — Display device entry point: TFT rendering, buttons, menu integration, serial link receive
 - [src/menu/menu.h](src/menu/menu.h) — Menu system API: data structures, state machine, display settings
 - [src/menu/menu.cpp](src/menu/menu.cpp) — Menu implementation: rendering, navigation, JSON loading, action dispatch
 - [data/menu.json](data/menu.json) — Menu definition file (uploaded to display device LittleFS)
@@ -417,7 +389,7 @@ To force recalibration, delete the JSON files from LittleFS or use menu → CAL 
 - [src/sensors/imu.h](src/sensors/imu.h) — Public IMU API (ImuConfig, ImuStatus, read functions)
 - [src/drivers/gps.cpp](src/drivers/gps.cpp) — GPS driver (Adafruit Ultimate GPS, NMEA parsing)
 - [src/drivers/flow_sensor.cpp](src/drivers/flow_sensor.cpp) — Flow sensor driver (speed from hall-effect pulses)
-- [src/drivers/display.cpp](src/drivers/display.cpp) — OLED display driver (GFXcanvas16 framebuffer; nav mode: status bar + 2×2 grid; debug mode: sensor data)
+- [src/drivers/display.cpp](src/drivers/display.cpp) — TFT display driver (ST7789 320×240; nav mode: status bar + 2×2 grid; debug mode: sensor data; hdg cal prompts + summary)
 - [src/math/mahony.h](src/math/mahony.h) — AHRS filter (quaternion update from gyro/accel/mag)
 - [src/math/orientation.h](src/math/orientation.h) — Quaternion ↔ Euler conversions, heading calculation
 - [src/types/types.h](src/types/types.h) — Core data types (Vec3i16, Vec3f, Calib3, MagCalib, ImuConfig, AxisMap)
@@ -426,6 +398,7 @@ To force recalibration, delete the JSON files from LittleFS or use menu → CAL 
 - [src/sensors/calib.h](src/sensors/calib.h) — Calibration application functions
 - [src/util/storage.h](src/util/storage.h) — Calibration save/load (JSON to LittleFS)
 - [src/util/nvs_state.h](src/util/nvs_state.h) — Runtime state persistence (ESP32 NVS): `nvs_nav::` (toggle states, position) and `nvs_disp::` (display settings)
+- [src/util/hdg_cal.h](src/util/hdg_cal.h) — 4-point heading calibration: `load()`, `save()`, `apply(headingDeg, cal)`, `corrections(cal, out[4])`
 - [src/util/logging.h](src/util/logging.h) — Data logging system (CSV-like format)
 - [src/util/speed_cal.h](src/util/speed_cal.h) — Speed cal k-factor history: `load()`, `save()`, `addMeasurement()`, `averageK()`, `reset()`
 - [docs/overview.md](docs/overview.md) — Project overview, architecture, feature summary

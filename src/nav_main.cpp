@@ -27,6 +27,7 @@
 #include "util/mag_cal_collect.h"
 #include "util/nvs_state.h"
 #include "util/speed_cal.h"
+#include "util/hdg_cal.h"
 #include <dpvlink.h>
 
 // ---- AHRS state -----------------------------------------------------------
@@ -36,9 +37,11 @@ static MahonyState ahrs;
 static MahonyParams mahonyParams{ .kp = 1.0f, .ki = 0.002f, .useMag = true };
 
 // ---- Calibration data -----------------------------------------------------
-static MagCalib  magCal;
-static Calib3    gyroCal;
-static Calib3    accelCal;
+static MagCalib         magCal;
+static Calib3           gyroCal;
+static Calib3           accelCal;
+static hdg_cal::HdgCal  gHdgCal;
+static bool             gHdgCalValid = false;
 
 // ---- Nav state -------------------------------------------------------------
 static SystemState sysState = SystemState::BOOT;
@@ -115,7 +118,7 @@ static nvs_nav::State currentNavNvsState() {
 
 // ---- Forward declarations --------------------------------------------------
 static void loadCalibration();
-static void sendNavPacket(float heading, float pitch, float roll,
+static void sendNavPacket(float heading, float headingRaw, float pitch, float roll,
                           float speed, bool gpsSpeed,
                           float distHome, float bearHome,
                           float posX, float posY,
@@ -281,7 +284,10 @@ void loop() {
 
     // --- Extract Euler angles -----------------------------------------------
     Euler euler = quatToEulerRad(ahrs.q);
-    float headingDeg = headingDegFromYawRad(euler.yaw, DEFAULT_DECLINATION_DEG);
+    float headingRawDeg = headingDegFromYawRad(euler.yaw, DEFAULT_DECLINATION_DEG);
+    float headingDeg    = gHdgCalValid
+                              ? hdg_cal::apply(headingRawDeg, gHdgCal)
+                              : headingRawDeg;
     float pitchDeg   = euler.pitch * (180.0f / M_PI);
     float rollDeg    = euler.roll  * (180.0f / M_PI);
 
@@ -395,7 +401,7 @@ void loop() {
     if (nowMs - lastSendMs >= SEND_INTERVAL_MS) {
         lastSendMs = nowMs;
         nav::Position pos = nav::getPosition();
-        sendNavPacket(headingDeg, pitchDeg, rollDeg, speed, useGpsSpeed,
+        sendNavPacket(headingDeg, headingRawDeg, pitchDeg, rollDeg, speed, useGpsSpeed,
                      nav::distanceToHome_m(), nav::bearingToHome_deg(),
                      pos.x_m, pos.y_m, fix);
 
@@ -752,15 +758,23 @@ static void loadCalibration() {
         imu::calibrateAccelerometer(accelCal, 2500);
         storage::saveCalib3("/accel_cal.json", accelCal);
     }
+
+    // 4-point heading calibration (optional — silently skip if absent)
+    if (hdg_cal::load(gHdgCal)) {
+        gHdgCalValid = true;
+        gBootFlags |= BOOT_HDG_CAL_OK;
+        Serial.println("Heading calibration loaded from LittleFS");
+    }
 }
 
-static void sendNavPacket(float heading, float pitch, float roll,
+static void sendNavPacket(float heading, float headingRaw, float pitch, float roll,
                           float speed, bool gpsSpeed,
                           float distHome, float bearHome,
                           float posX, float posY,
                           const GpsFix& fix) {
     NavPacket pkt{};
     pkt.heading_deg      = heading;
+    pkt.heading_raw_deg  = headingRaw;
     pkt.pitch_deg        = pitch;
     pkt.roll_deg         = roll;
     pkt.speed_ms         = speed;
@@ -1048,6 +1062,20 @@ static void handleDisplayCmd() {
                         }
                         nvs_nav::save(currentNavNvsState());
                         break;
+                    case DisplayCmd::SET_HDG_CAL: {
+                        float indicated[4];
+                        if (parseHdgCalCmd(cmdBuf, cmdPos, indicated)) {
+                            for (int i = 0; i < 4; i++) gHdgCal.indicated[i] = indicated[i];
+                            gHdgCalValid = true;
+                            hdg_cal::save(gHdgCal);
+                            gBootFlags |= BOOT_HDG_CAL_OK;
+                            Serial.printf("[HDG_CAL] Saved: N=%.1f E=%.1f S=%.1f W=%.1f\n",
+                                          indicated[0], indicated[1], indicated[2], indicated[3]);
+                        } else {
+                            Serial.println("[HDG_CAL] ERROR: parse failed");
+                        }
+                        break;
+                    }
                     case DisplayCmd::POWER_OFF: {
                         Serial.println("CMD: POWER_OFF — saving state and entering deep sleep");
                         // Persist current position and toggle states before sleeping.

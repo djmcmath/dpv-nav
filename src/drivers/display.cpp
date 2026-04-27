@@ -1074,6 +1074,136 @@ void showSpeedCalResult(uint16_t dist_ft, uint16_t elapsed_s,
 }
 
 // ---------------------------------------------------------------------------
+// 4-point heading calibration: prompt screen
+// Layout (320×240):
+//   y=  0  "HDG CAL"                cyan, size 2
+//   y= 26  "Step N/4: NORTH (0°)"   white, size 2
+//   y= 60  "Align to North"         yellow, size 2
+//   y= 88  "Press BTN2 when stable" gray, size 1
+//   y=120  separator line           cyan
+//   y=128  "Live: XXX.X°"           white, size 3
+// ---------------------------------------------------------------------------
+void showHdgCalPrompt(int step, float currentDeg) {
+    if (!tftReady) return;
+    invalidateNavCache();
+    tft.fillScreen(COLOR_BLACK);
+
+    static const char* const kCardinalName[4] = { "NORTH", "EAST", "SOUTH", "WEST" };
+    static const int         kCardinalDeg[4]  = {  0,       90,     180,     270  };
+
+    tft.setTextSize(2);
+    tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
+    tft.setCursor(0, 0);
+    tft.print("HDG CAL");
+
+    char buf[32];
+    snprintf(buf, sizeof(buf), "Step %d/4: %s (%d" "\xF8" ")",
+             step + 1, kCardinalName[step], kCardinalDeg[step]);
+    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+    tft.setCursor(0, 28);
+    tft.print(buf);
+
+    tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
+    tft.setCursor(0, 60);
+    snprintf(buf, sizeof(buf), "Align to %s", kCardinalName[step]);
+    tft.print(buf);
+
+    tft.setTextSize(1);
+    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+    tft.setCursor(0, 90);
+    tft.print("Press BTN2 when stable");
+
+    tft.drawFastHLine(0, 110, SCREEN_WIDTH, COLOR_CYAN);
+
+    tft.setTextSize(3);
+    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+    snprintf(buf, sizeof(buf), "%.1f" "\xF8", currentDeg);
+    tft.setCursor(0, 122);
+    tft.print(buf);
+}
+
+// ---------------------------------------------------------------------------
+// 4-point heading calibration: summary screen
+// Layout (320×240):
+//   y=  0  "HDG CAL DONE"            cyan, size 2
+//   y= 26  separator line
+//   y= 32  4 correction rows (N/E/S/W with +/- values)   size 2
+//   y=134  separator line
+//   y=142  quality assessment line   colored, size 2
+// ---------------------------------------------------------------------------
+void showHdgCalSummary(const float corrections[4]) {
+    if (!tftReady) return;
+    invalidateNavCache();
+    tft.fillScreen(COLOR_BLACK);
+
+    tft.setTextSize(2);
+    tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
+    tft.setCursor(0, 0);
+    tft.print("HDG CAL DONE");
+
+    tft.drawFastHLine(0, 24, SCREEN_WIDTH, COLOR_CYAN);
+
+    // Show each correction: label and signed value
+    static const char* const kLabel[4] = { "N", "E", "S", "W" };
+    char buf[32];
+    int y = 30;
+    for (int i = 0; i < 4; i++) {
+        tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+        tft.setCursor(0, y);
+        snprintf(buf, sizeof(buf), "%s: %+.1f" "\xF8", kLabel[i], corrections[i]);
+        tft.print(buf);
+        y += 24;
+    }
+
+    tft.drawFastHLine(0, y + 2, SCREEN_WIDTH, COLOR_CYAN);
+    y += 10;
+
+    // Magnitude: use max absolute error across all 4 points
+    float maxErr = 0.0f;
+    for (int i = 0; i < 4; i++) {
+        float a = corrections[i] < 0.0f ? -corrections[i] : corrections[i];
+        if (a > maxErr) maxErr = a;
+    }
+
+    // Direction consistency: all same sign (or zero) = consistent
+    int pos = 0, neg = 0;
+    for (int i = 0; i < 4; i++) {
+        if (corrections[i] > 0.5f) pos++;
+        if (corrections[i] < -0.5f) neg++;
+    }
+    bool consistent = (pos == 0 || neg == 0);
+
+    // Rating label and color
+    const char* rating;
+    uint16_t    ratingColor;
+    if (maxErr < 3.0f) {
+        rating = "GREAT";  ratingColor = COLOR_GREEN;
+    } else if (maxErr < 6.0f) {
+        rating = "GOOD";   ratingColor = COLOR_GREEN;
+    } else if (maxErr < 10.0f) {
+        rating = "FAIR";   ratingColor = COLOR_YELLOW;
+    } else {
+        rating = "POOR";   ratingColor = COLOR_RED;
+    }
+
+    tft.setTextColor(ratingColor, COLOR_BLACK);
+    tft.setCursor(0, y);
+    snprintf(buf, sizeof(buf), "%s (%.1f" "\xF8" " max)", rating, maxErr);
+    tft.print(buf);
+
+    y += 24;
+    if (consistent) {
+        tft.setTextColor(COLOR_GREEN, COLOR_BLACK);
+        tft.setCursor(0, y);
+        tft.print("Consistent dir");
+    } else {
+        tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
+        tft.setCursor(0, y);
+        tft.print("Mixed direction");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Bin-coverage calibration grid
 // Layout (320×240):
 //   y=0..19   — title row

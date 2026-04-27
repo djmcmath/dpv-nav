@@ -25,6 +25,7 @@ static SendCmdFn gSendCmd = nullptr;
 static bool gDiveMode = false;  // Op mode toggle state (display-side tracking)
 static uint8_t gLogLevel = 0;  // Log level tracking (0=OFF, 1=LOW, 2=HIGH)
 static bool gSpeedCalPending  = false;  // true after user selects "Speed cal"
+static bool gHdgCalPending    = false;  // true after user selects "Hdg cal"
 static bool gPowerOffPending  = false;  // true after user selects "OFF"
 
 // Nav-device toggle states (updated from NavPacket flags)
@@ -104,15 +105,17 @@ static void loadDefaults() {
     // CAL submenu (index 2)
     auto& cal = submenus[2];
     strncpy(cal.title, "Cal", MENU_LABEL_LEN);
-    cal.count = 4;
+    cal.count = 5;
     strncpy(cal.items[0].label, "Baseline", MENU_LABEL_LEN);
     cal.items[0].action = Action::CAL_BASELINE; cal.items[0].submenuIdx = -1;
     strncpy(cal.items[1].label, "Mounted", MENU_LABEL_LEN);
     cal.items[1].action = Action::CAL_MOUNTED; cal.items[1].submenuIdx = -1;
-    strncpy(cal.items[2].label, "Speed cal", MENU_LABEL_LEN);
-    cal.items[2].action = Action::CAL_SPEED; cal.items[2].submenuIdx = -1;
-    strncpy(cal.items[3].label, "..", MENU_LABEL_LEN);
-    cal.items[3].action = Action::NONE; cal.items[3].submenuIdx = -1;
+    strncpy(cal.items[2].label, "Hdg cal", MENU_LABEL_LEN);
+    cal.items[2].action = Action::CAL_HDG; cal.items[2].submenuIdx = -1;
+    strncpy(cal.items[3].label, "Speed cal", MENU_LABEL_LEN);
+    cal.items[3].action = Action::CAL_SPEED; cal.items[3].submenuIdx = -1;
+    strncpy(cal.items[4].label, "..", MENU_LABEL_LEN);
+    cal.items[4].action = Action::NONE; cal.items[4].submenuIdx = -1;
 
     // INPUT submenu (index 3)
     auto& inp = submenus[3];
@@ -290,6 +293,10 @@ static void executeAction(Action act) {
         case Action::CAL_SPEED:
             gSpeedCalPending = true;  // signal display_main to enter distance selection
             Serial.println("[MENU] CAL_SPEED: entering distance selection");
+            break;
+        case Action::CAL_HDG:
+            gHdgCalPending = true;
+            Serial.println("[MENU] CAL_HDG: entering 4-point heading cal");
             break;
         case Action::INPUT_GPS_POS:
             if (gSendCmd) gSendCmd(DisplayCmd::TOGGLE_GPS_POS);
@@ -514,6 +521,14 @@ bool isPendingSpeedCal() {
 
 void clearSpeedCalPending() {
     gSpeedCalPending = false;
+}
+
+bool isPendingHdgCal() {
+    return gHdgCalPending;
+}
+
+void clearHdgCalPending() {
+    gHdgCalPending = false;
 }
 
 bool isPendingPowerOff() {

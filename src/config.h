@@ -165,6 +165,16 @@ constexpr int   GPS_CAP_2D_MAX_BARS   = 2;    // 2D-only fix → max 2 bars
 // SNR cap (GPS_SNR_THRESH_25 → max 2 bars) — not enforced while SNR is unavailable
 
 // ---------------------------------------------------------------------------
+// Battery voltage indicator thresholds (millivolts, single-cell LiPo on Feather v1 BAT pin)
+// GPIO35 reads VBAT/2 via the onboard 2:1 divider; adjust if battery type differs.
+// ---------------------------------------------------------------------------
+constexpr uint16_t BATT_MV_FULL   = 4200;  // fully charged (100%)
+constexpr uint16_t BATT_MV_EMPTY  = 3300;  // protection cutoff (0%)
+constexpr uint16_t BATT_MV_GREEN  = 3900;  // >= green (good)
+constexpr uint16_t BATT_MV_YELLOW = 3600;  // >= yellow (moderate); below = red (low)
+constexpr int      BATT_ADC_AVG_N = 8;     // samples averaged per battery reading
+
+// ---------------------------------------------------------------------------
 // Speed calibration thresholds
 // ---------------------------------------------------------------------------
 

@@ -1,31 +1,36 @@
 #pragma once
 
-// 4-point heading calibration: records indicated vs actual heading at N/E/S/W,
-// then applies circular linear interpolation to correct heading at runtime.
+// Fourier-series heading correction.
 //
-// Storage: /hdg_cal.json on LittleFS (nav device only)
-// Wire:    SET_HDG_CAL DisplayCmd from display device after collecting 4 points
+// Coefficients are computed offline (tools/fourier_fit.py) from a set of
+// (actual, indicated) heading pairs and stored in /hdg_fourier.json.
+// The nav device loads coefficients at boot and applies the correction at runtime:
+//
+//   correction(θ) = c[0] + c[1]cos(θ) + c[2]sin(θ) + c[3]cos(2θ) + ...
+//   heading_corrected = heading_indicated + correction(heading_indicated)
+//
+// Storage: /hdg_fourier.json on LittleFS (nav device only — written offline, uploaded)
+// Sample data collected during CAL > Hdg cal is saved to /hdg_samples.csv for
+// offline processing by fourier_fit.py.
 
 namespace hdg_cal {
 
-// Indicated AHRS heading (pre-correction, with declination applied) when the
-// device was aligned to each of the four cardinal headings, in order: N/E/S/W.
+static constexpr int  MAX_HARMONICS = 4;
+static constexpr int  MAX_COEFFS    = 2 * MAX_HARMONICS + 1;  // DC + N*(cos,sin)
+static constexpr const char* FILE_PATH         = "/hdg_fourier.json";
+static constexpr const char* SAMPLES_FILE_PATH = "/hdg_samples.csv";
+
 struct HdgCal {
-    float indicated[4];  // [0]=North(0°) [1]=East(90°) [2]=South(180°) [3]=West(270°)
+    int   n;                 // number of harmonics (1..MAX_HARMONICS)
+    float c[MAX_COEFFS];     // [DC, cos1, sin1, cos2, sin2, ...]
 };
 
-static constexpr const char* FILE_PATH = "/hdg_cal.json";
-
+// Load Fourier coefficients from /hdg_fourier.json.  Returns false if absent/invalid.
 bool load(HdgCal& cal);
-bool save(const HdgCal& cal);
 
-// Apply heading correction via circular linear interpolation between the 4 points.
-// headingDeg is the raw indicated heading (0-360); returns the corrected heading.
-// Returns headingDeg unchanged if cal data is degenerate.
+// Apply Fourier correction to a raw indicated heading.
+// headingDeg is pre-correction (0-360); returns corrected heading (0-360).
+// Returns headingDeg unchanged if n is out of range.
 float apply(float headingDeg, const HdgCal& cal);
-
-// Compute the 4 correction values (actual - indicated) for display/assessment.
-// out_corrections[i] = actual[i] - indicated[i], normalized to [-180, 180].
-void corrections(const HdgCal& cal, float out_corrections[4]);
 
 }  // namespace hdg_cal

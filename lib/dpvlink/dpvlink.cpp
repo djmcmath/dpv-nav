@@ -60,6 +60,8 @@ size_t navPacketToBytes(const NavPacket& pkt, char* buf, size_t bufLen) {
     if (pkt.boot_flags) doc["bf"] = pkt.boot_flags;
     // Raw heading (before hdg_cal correction) — only include when it differs from heading_deg
     if (pkt.heading_raw_deg != pkt.heading_deg) doc["hr"] = pkt.heading_raw_deg;
+    // Battery voltage — only include when we have a reading
+    if (pkt.batt_mv > 0) doc["bv"] = pkt.batt_mv;
 
     size_t n = serializeJson(doc, buf, bufLen - 1);
     if (n == 0 || n >= bufLen - 1) return 0;
@@ -97,6 +99,7 @@ bool bytesToNavPacket(const char* buf, size_t len, NavPacket& out) {
     out.boot_flags           = doc["bf"]  | (uint8_t)0;
     // heading_raw_deg: fall back to heading_deg if not present (no hdg_cal active)
     out.heading_raw_deg      = doc["hr"]  | out.heading_deg;
+    out.batt_mv              = doc["bv"]  | (uint16_t)0;
     return true;
 }
 
@@ -122,15 +125,12 @@ uint16_t parseSpeedCalDist(const char* buf, size_t len) {
 }
 
 // ---------------------------------------------------------------------------
-// 4-point heading calibration command
+// Fourier heading calibration commands
 // ---------------------------------------------------------------------------
-size_t displayHdgCalToBytes(const float indicated[4], char* buf, size_t bufLen) {
+size_t displayCaptureHdgPointToBytes(float target_deg, char* buf, size_t bufLen) {
     JsonDocument doc;
-    doc["cmd"] = static_cast<uint8_t>(DisplayCmd::SET_HDG_CAL);
-    doc["h0"]  = indicated[0];
-    doc["h1"]  = indicated[1];
-    doc["h2"]  = indicated[2];
-    doc["h3"]  = indicated[3];
+    doc["cmd"] = static_cast<uint8_t>(DisplayCmd::CAPTURE_HDG_POINT);
+    doc["tgt"] = target_deg;
 
     size_t n = serializeJson(doc, buf, bufLen - 1);
     if (n == 0 || n >= bufLen - 1) return 0;
@@ -139,15 +139,10 @@ size_t displayHdgCalToBytes(const float indicated[4], char* buf, size_t bufLen) 
     return n + 1;
 }
 
-bool parseHdgCalCmd(const char* buf, size_t len, float indicated[4]) {
+float parseCaptureHdgPoint(const char* buf, size_t len) {
     JsonDocument doc;
-    if (deserializeJson(doc, buf, len)) return false;
-    if (!doc["h0"].is<float>()) return false;
-    indicated[0] = doc["h0"] | 0.0f;
-    indicated[1] = doc["h1"] | 90.0f;
-    indicated[2] = doc["h2"] | 180.0f;
-    indicated[3] = doc["h3"] | 270.0f;
-    return true;
+    if (deserializeJson(doc, buf, len)) return 0.0f;
+    return doc["tgt"] | 0.0f;
 }
 
 // ---------------------------------------------------------------------------

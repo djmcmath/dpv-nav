@@ -58,7 +58,7 @@ Code is organized into namespaces by subsystem:
 - `menu::` - Hierarchical menu system (JSON-configurable, button-driven, on display device)
 - `logging::` - Data logging system (LittleFS-based)
 - `storage::` - Calibration persistence (JSON files in LittleFS)
-- `hdg_cal::` - 4-point heading calibration (load/save/apply circular interpolation)
+- `hdg_cal::` - Fourier heading calibration (load hdg_fourier.json, apply Fourier-series correction)
 - `nvs_nav::` - Nav device runtime state persistence (ESP32 NVS via Preferences)
 - `nvs_disp::` - Display device settings persistence (ESP32 NVS via Preferences)
 
@@ -91,7 +91,7 @@ src/
 │   ├── logging.cpp/h          # Data logging to LittleFS
 │   ├── storage.cpp/h          # Calibration save/load (JSON)
 │   ├── nvs_state.cpp/h        # Runtime state persistence (ESP32 NVS: toggles, position)
-│   ├── hdg_cal.cpp/h          # 4-point heading calibration (load/save/apply, /hdg_cal.json)
+│   ├── hdg_cal.cpp/h          # Fourier heading calibration (load /hdg_fourier.json, apply Fourier-series correction)
 │   └── speed_cal.cpp/h        # Speed cal k-factor history (LittleFS /speed_cal.json, rolling 6-run average)
 └── types/
     └── types.h                # Core data types (Vec3i16, Vec3f, Calib3, MagCalib, etc.)
@@ -111,7 +111,7 @@ data/
    - Magnetometer: `MagCalib` applies hard-iron offset + soft-iron matrix (3×3)
 4. **AHRS fusion** ([math/mahony.h](src/math/mahony.h)): Normalized sensor vectors → `Quaternion` (orientation)
 5. **Euler extraction** ([math/orientation.h](src/math/orientation.h)): Quaternion → Roll/Pitch/Yaw (rad)
-6. **Heading calculation**: Yaw → `headingRawDeg` (0-360°) → `headingDeg` (4-point hdg_cal correction applied if loaded, else same as raw). Both values are sent in NavPacket (`heading_deg` = corrected, `heading_raw_deg` = pre-correction).
+6. **Heading calculation**: Yaw → `headingRawDeg` (0-360°) → `headingDeg` (Fourier hdg_cal correction applied if `/hdg_fourier.json` loaded, else same as raw). Both values are sent in NavPacket (`heading_deg` = corrected, `heading_raw_deg` = pre-correction).
 7. **Speed selection**: GPS speed is filtered through a two-stage gate before use. First, a SOG (Speed Over Ground) deadband rejects speeds below 0.5 kn as position jitter noise and trusts speeds above 2.0 kn unconditionally. Speeds in the middle zone must also pass a COG (Course Over Ground) coherence check — an EMA of sin/cos(COG) whose resultant length measures heading consistency (0=random, 1=steady). If GPS speed fails either check, flowmeter speed is used instead. See `GPS_SOG_NOISE_FLOOR_KN`, `GPS_SOG_TRUST_FLOOR_KN`, and `GPS_COG_COHERENCE_THRESH` in [config.h](src/config.h).
 8. **Position estimation** ([nav/nav_model.h](src/nav/nav_model.h)): Dead-reckoning integration (speed × heading × dt) with optional GPS truth override
 9. **Serial link**: `NavPacket` sent to display device at 10 Hz via JSON over Serial1. Optional `DebugPacket` at 5 Hz when `ENABLE_DEBUG_PACKET` is set.
@@ -169,13 +169,13 @@ The system supports automatic calibration with persistence to LittleFS (flash st
 
 **Accelerometer:** On first boot (no `accel_cal.json`): 6-point orientation sequence (X+/X-/Y+/Y-/Z+/Z- facing down, 2.5s each). Subsequent boots load from LittleFS.
 
-**4-Point Heading Calibration (CAL > Hdg cal):**
-- Optional, run after completing baseline + mounted mag cal.
-- User aligns DPV to N/E/S/W at surface and presses BTN2 at each cardinal.
-- Records the indicated (AHRS-reported) heading at each cardinal in `HdgCal.indicated[4]`.
-- Saved to `/hdg_cal.json`; loaded silently on boot (skipped if absent).
-- At runtime, `hdg_cal::apply()` uses circular linear interpolation across the 4 points to correct `headingRawDeg` → `headingDeg`.
-- Display shows `heading_raw_deg` from NavPacket during cal prompts (pre-correction, so recalibration captures absolute readings, not residual corrections).
+**Fourier Heading Calibration (CAL > Hdg cal):**
+- Optional, run after completing baseline + mounted mag cal. Run in a magnetically clean environment (living room, not garage).
+- On-device: display guides user through 12 headings (0°, 30°, 60°, … 330°) at 30° intervals. User aligns DPV to each target and presses BTN2. Nav device records `(target, indicated)` pairs and saves to `/hdg_samples.csv`.
+- Offline: download `/hdg_samples.csv` via web interface, run `python tools/fourier_fit.py hdg_samples.csv`, upload the resulting `hdg_fourier.json` to nav device LittleFS.
+- The JSON contains `n` (number of harmonics, 1–4) and `c` (Fourier coefficients array). Up to 4 harmonics (9 coefficients: DC + 4×cos/sin pairs).
+- At runtime, `hdg_cal::apply()` evaluates the Fourier series to correct `headingRawDeg` → `headingDeg`. Loaded silently on boot from `/hdg_fourier.json` (skipped if absent).
+- Display shows `heading_raw_deg` from NavPacket during cal prompts (pre-correction absolute readings, not residual corrections).
 
 **Speed Calibration (CAL > Speed cal):**
 - Swim a known distance (150–500 ft) at cruise speed; automatic run detection via flow threshold + heading-deviation stop.
@@ -303,8 +303,8 @@ The display driver uses a 320×240 ST7789 TFT with direct hardware writes via th
 **Key display functions** ([src/drivers/display.cpp](src/drivers/display.cpp)):
 - `showNav(NavPacket)` — navigation screen: status bar + 2×2 grid (BRG/RNG/HDG/SPD), incremental updates
 - `showDebug(DebugPacket)` — debug screen: raw sensor values (mag/accel/gyro XYZ, heading, pitch/roll)
-- `showHdgCalPrompt(int step, float currentDeg)` — heading cal step prompt with live heading readout
-- `showHdgCalSummary(const float corrections[4])` — heading cal result screen with GREAT/GOOD/FAIR/POOR rating
+- `showHdgFourierCalPrompt(int step, int total, float targetDeg, float indicatedDeg)` — heading cal step prompt with live heading readout
+- `showHdgFourierCalDone(int nPoints)` — done screen with instructions to run offline fit and upload JSON
 - `showMagCalProgress(...)` — bin-coverage grid for magnetometer calibration (Baseline/Mounted)
 
 ## Critical Conventions
@@ -398,7 +398,7 @@ To force recalibration, delete the JSON files from LittleFS and reboot. Preferre
 - [src/sensors/calib.h](src/sensors/calib.h) — Calibration application functions
 - [src/util/storage.h](src/util/storage.h) — Calibration save/load (JSON to LittleFS)
 - [src/util/nvs_state.h](src/util/nvs_state.h) — Runtime state persistence (ESP32 NVS): `nvs_nav::` (toggle states, position) and `nvs_disp::` (display settings)
-- [src/util/hdg_cal.h](src/util/hdg_cal.h) — 4-point heading calibration: `load()`, `save()`, `apply(headingDeg, cal)`, `corrections(cal, out[4])`
+- [src/util/hdg_cal.h](src/util/hdg_cal.h) — Fourier heading calibration: `load()` (reads `/hdg_fourier.json`), `apply(headingDeg, cal)` (evaluates Fourier series)
 - [src/util/logging.h](src/util/logging.h) — Data logging system (CSV-like format)
 - [src/util/speed_cal.h](src/util/speed_cal.h) — Speed cal k-factor history: `load()`, `save()`, `addMeasurement()`, `averageK()`, `reset()`
 - [docs/overview.md](docs/overview.md) — Project overview, architecture, feature summary

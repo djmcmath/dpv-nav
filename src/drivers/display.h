@@ -85,15 +85,17 @@ void showSpeedCalResult(uint16_t dist_ft, uint16_t elapsed_s,
                         float k_existing, float k_proposed,
                         uint8_t choice);
 
-// 4-point heading calibration screens (all flush to display).
-// Prompt screen: instruct user to align to a cardinal and press BTN2.
-//   step         — 0..3 (North/East/South/West)
-//   currentDeg   — live heading from NavPacket (shown so user can see when stable)
-void showHdgCalPrompt(int step, float currentDeg);
+// Fourier heading calibration screens.
+// Prompt screen: instruct user to align to a target heading and press BTN2.
+//   step         — 0-based step index
+//   total        — total number of steps
+//   targetDeg    — target heading the user should align to (0-360)
+//   indicatedDeg — live AHRS heading from NavPacket (pre-correction)
+void showHdgFourierCalPrompt(int step, int total, float targetDeg, float indicatedDeg);
 
-// Summary screen after all 4 points collected.
-//   corrections[4] — correction values (actual - indicated), N/E/S/W order
-void showHdgCalSummary(const float corrections[4]);
+// Done screen: shown after all points collected and CSV saved.
+//   nPoints — number of samples collected
+void showHdgFourierCalDone(int nPoints);
 
 // --- Random-rect self-test --------------------------------------------------
 // Draws a random-color rectangle at a random position once per second.

@@ -1114,14 +1114,17 @@ void showSpeedCalResult(uint16_t dist_ft, uint16_t elapsed_s,
 }
 
 // ---------------------------------------------------------------------------
-// 4-point heading calibration: prompt screen
+// Fourier heading calibration: prompt screen
 // Layout (320×240):
-//   y=  0  "HDG CAL"                cyan, size 2
-//   y= 26  "Step N/4: NORTH (0°)"   white, size 2
-//   y= 60  "Align to North"         yellow, size 2
-//   y= 88  "Press BTN2 when stable" gray, size 1
-//   y=120  separator line           cyan
-//   y=128  "Live: XXX.X°"           white, size 3
+//   y=  0  "HDG CAL"                    cyan, size 2
+//   y= 22  "Step N/12: Target 000°"     white, size 2
+//   y= 44  separator line               cyan
+//   y= 50  "Use phone compass:"         yellow, size 1
+//   y= 60  "physically face 000°"       yellow, size 1
+//   y= 74  "BTN2 when aimed & steady"   gray, size 1
+//   y= 86  separator line               cyan
+//   y= 92  "SENSOR (expected to differ):" gray, size 1
+//   y=104  "XXX.X°"                     white, size 3
 // ---------------------------------------------------------------------------
 void showHdgFourierCalPrompt(int step, int total, float targetDeg, float indicatedDeg) {
     if (!tftReady) return;
@@ -1133,39 +1136,41 @@ void showHdgFourierCalPrompt(int step, int total, float targetDeg, float indicat
     tft.setCursor(0, 0);
     tft.print("HDG CAL");
 
-    char buf[40];
-    snprintf(buf, sizeof(buf), "Step %d/%d: Target %03.0f" "\xF8", step + 1, total, targetDeg);
+    char buf[48];
+    snprintf(buf, sizeof(buf), "Step %d/%d: Tgt %03.0f" "\xF8", step + 1, total, targetDeg);
     tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
-    tft.setCursor(0, 28);
+    tft.setCursor(0, 22);
     tft.print(buf);
 
-    snprintf(buf, sizeof(buf), "Align to %.0f" "\xF8", targetDeg);
+    tft.drawFastHLine(0, 44, SCREEN_WIDTH, COLOR_CYAN);
+
+    tft.setTextSize(1);
     tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
+    tft.setCursor(0, 50);
+    tft.print("Use phone compass:");
+    snprintf(buf, sizeof(buf), "physically face %.0f" "\xF8", targetDeg);
     tft.setCursor(0, 60);
     tft.print(buf);
 
-    tft.setTextSize(1);
     tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
-    tft.setCursor(0, 90);
-    tft.print("Press BTN2 when stable");
+    tft.setCursor(0, 74);
+    tft.print("BTN2 when aimed & steady");
 
-    tft.drawFastHLine(0, 110, SCREEN_WIDTH, COLOR_CYAN);
+    tft.drawFastHLine(0, 86, SCREEN_WIDTH, COLOR_CYAN);
+
+    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+    tft.setCursor(0, 92);
+    tft.print("SENSOR (expected to differ):");
 
     tft.setTextSize(3);
     tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
     snprintf(buf, sizeof(buf), "%.1f" "\xF8", indicatedDeg);
-    tft.setCursor(0, 122);
+    tft.setCursor(0, 104);
     tft.print(buf);
 }
 
 // ---------------------------------------------------------------------------
-// 4-point heading calibration: summary screen
-// Layout (320×240):
-//   y=  0  "HDG CAL DONE"            cyan, size 2
-//   y= 26  separator line
-//   y= 32  4 correction rows (N/E/S/W with +/- values)   size 2
-//   y=134  separator line
-//   y=142  quality assessment line   colored, size 2
+// Fourier heading calibration: done screen
 // ---------------------------------------------------------------------------
 void showHdgFourierCalDone(int nPoints) {
     if (!tftReady) return;

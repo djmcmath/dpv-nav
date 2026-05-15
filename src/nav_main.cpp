@@ -568,7 +568,7 @@ void loop() {
     web::update();
     if (web::isReloadCalRequested()) {
         web::clearReloadCalRequest();
-        reloadCalibrationFiles();
+        loadCalibration();
     }
 
     // --- Calibration tick and completion detection ---------------------------

@@ -110,10 +110,13 @@ Delete the corresponding JSON file(s) from LittleFS and reboot, or run the menu 
 3. System samples for 10 seconds at ~100 Hz
 4. Average of all samples = bias offset; scale remains 1.0
 
-**Typical bias values:**
-- Good: ±10 raw counts (±0.0002 rad/s)
-- Acceptable: ±50 raw counts (±0.0008 rad/s)
-- Bad (device moved): >200 raw counts
+**Typical values:**
+- Good: ±10–50 raw counts (±0.001 rad/s)
+- Bad (device moved): > 200 raw counts — repeat on a more stable surface
+
+To force recalibration: delete `/gyro_cal.json` from LittleFS and reboot.
+
+---
 
 ## Accelerometer Calibration
 
@@ -235,43 +238,26 @@ Files are stored on LittleFS (ESP32 internal flash). Total calibration data is <
 
 ## Speed Calibration (Flow Sensor)
 
-Speed cal measures the flow sensor's k-factor (pulses per litre) by timing a swim over a known distance. Results are averaged across up to 6 runs and saved to `/speed_cal.json` on LittleFS.
+Speed cal measures the flow sensor's k-factor (pulses per litre) by timing a swim over a
+known distance. Up to 6 runs are averaged and saved to `/speed_cal.json` on LittleFS.
 
-### How it works
-
-The flow sensor converts pulse frequency to speed using:
+The flow sensor converts pulse frequency to speed:
 ```
 speed_ms = (freq_hz / k_factor) / 60 / 1000 / cross_section_m2
 ```
-Speed cal solves for `k_factor` given the true distance and measured total pulses:
-```
-k_factor = total_pulses / (dist_m × 60 × 1000 × FLOW_CROSS_SECTION_M2)
-```
-Elapsed time cancels out — only total pulse count and true distance matter.
+Speed cal solves for `k_factor` given true distance and total pulses. Elapsed time cancels —
+only pulse count and distance matter.
 
-### Calibration file
-
-```
-/speed_cal.json     — Rolling history of up to 6 k-factor measurements
-```
-
-Format:
-```json
-{ "n": 3, "k": [1.12, 1.09, 1.15] }
-```
-The active k-factor is the average of all stored values. On boot the nav device loads this file and applies the average. If the file is absent, `FLOW_K_FACTOR` from `config.h` is used.
+**Before speed cal:** Set `FLOW_CROSS_SECTION_M2` in `config.h` to the physical inner
+cross-section of the DPV inlet. For a 50 mm diameter tube: π × (0.025)² ≈ 0.00196 m².
 
 ### Running a speed cal
 
-See **CAL > Speed cal** in the [User Guide](user-guide.md) for the full step-by-step workflow. In brief:
-
 1. Menu → **CAL > Speed cal**
-2. Select distance (150–500 ft, default 300 ft)
-3. Start DPV — timing begins automatically at flow ≥ 0.3 m/s
-4. Swim the distance; the run stops when flow drops or heading deviates > 90° after 30 s
-5. Accept (add to average), reset+accept (start fresh), or reject
-
-### Accept vs Reset+Accept
+2. Select distance (150–500 ft in 50 ft steps, default 300 ft)
+3. Start DPV — timing begins automatically when flow exceeds threshold
+4. Swim the selected distance at constant speed
+5. Choose **ACCEPT**, **RESET+ACCEPT**, or **REJECT**
 
 | Option | When to use |
 |--------|-------------|

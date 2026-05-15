@@ -403,7 +403,6 @@ To force recalibration, delete the JSON files from LittleFS and reboot. Preferre
 - [src/util/speed_cal.h](src/util/speed_cal.h) — Speed cal k-factor history: `load()`, `save()`, `addMeasurement()`, `averageK()`, `reset()`
 - [docs/overview.md](docs/overview.md) — Project overview, architecture, feature summary
 - [docs/user-guide.md](docs/user-guide.md) — User-facing guide: boot, display, buttons, dive workflow
-- [docs/calibration-guide.md](docs/calibration-guide.md) — Sensor calibration (mag, gyro, accel) + persistence
-- [docs/mag-calibration-workflow.md](docs/mag-calibration-workflow.md) — Advanced soft-iron magnetometer calibration (ellipsoid fitting)
+- [docs/calibration-guide.md](docs/calibration-guide.md) — Sensor calibration (mag baseline + mounted two-stage workflow, gyro, accel, speed)
 - [docs/ahrs-orientation.md](docs/ahrs-orientation.md) — AHRS Mahony filter, Euler angles, heading
 - [docs/data-logging-guide.md](docs/data-logging-guide.md) — Data logging system (CSV to LittleFS)

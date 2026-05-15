@@ -10,6 +10,7 @@ namespace web {
 
 static WebServer server(80);
 static DNSServer dnsServer;
+static bool sReloadCalRequested = false;
 
 // --------------- embedded HTML page ---------------
 
@@ -80,6 +81,13 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
     <button type="submit">Upload</button>
   </form>
   <div id="status"></div>
+</div>
+<div class="upload" style="margin-top:1rem">
+  <b>Calibration</b>
+  <div style="margin-top:.5rem">
+    <button onclick="reloadCal()">Reload Cal Files</button>
+  </div>
+  <div id="calstatus"></div>
 </div>
 <div class="waypoint">
   <b>Waypoint</b>
@@ -222,6 +230,12 @@ async function removeNet(ssid) {
   document.getElementById('wifistat2').textContent = r.ok ? 'Removed' : 'Remove failed';
   loadWifi();
 }
+async function reloadCal() {
+  const s = document.getElementById('calstatus');
+  s.textContent = 'Reloading...';
+  const r = await fetch('/api/reload-cal', { method: 'POST' });
+  s.textContent = r.ok ? 'Calibration reloaded' : 'Reload failed';
+}
 load();
 loadWp();
 loadWifi();
@@ -356,6 +370,11 @@ static void handleUpload() {
 }
 
 static void handleUploadComplete() {
+    server.send(200, "text/plain", "OK");
+}
+
+static void handleReloadCal() {
+    sReloadCalRequested = true;
     server.send(200, "text/plain", "OK");
 }
 
@@ -525,7 +544,8 @@ void init() {
     server.on("/api/fs-info", HTTP_GET,  handleFsInfo);
     server.on("/api/download",HTTP_GET,  handleDownload);
     server.on("/api/delete",  HTTP_GET,  handleDelete);
-    server.on("/api/upload",  HTTP_POST, handleUploadComplete, handleUpload);
+    server.on("/api/upload",     HTTP_POST, handleUploadComplete, handleUpload);
+    server.on("/api/reload-cal", HTTP_POST, handleReloadCal);
     server.on("/api/waypoint",      HTTP_GET,    handleGetWaypoint);
     server.on("/api/waypoint",      HTTP_POST,   handleSetWaypoint);
     server.on("/api/waypoint",      HTTP_DELETE, handleDeleteWaypoint);
@@ -546,5 +566,8 @@ void update() {
     dnsServer.processNextRequest();
     server.handleClient();
 }
+
+bool isReloadCalRequested() { return sReloadCalRequested; }
+void clearReloadCalRequest() { sReloadCalRequested = false; }
 
 }  // namespace web

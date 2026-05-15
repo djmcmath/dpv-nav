@@ -292,11 +292,22 @@ void loop() {
 
     // --- Extract Euler angles -----------------------------------------------
     Euler euler = quatToEulerRad(ahrs.q);
-    float headingRawDeg     = headingDegFromYawRad(euler.yaw, DEFAULT_DECLINATION_DEG);
-    gCurrentHeadingRawDeg   = headingRawDeg;  // expose for CAPTURE_HDG_POINT handler
-    float headingDeg        = gHdgCalValid
-                                  ? hdg_cal::apply(headingRawDeg, gHdgCal)
-                                  : headingRawDeg;
+    float headingRawDeg = headingDegFromYawRad(euler.yaw, DEFAULT_DECLINATION_DEG);
+    // Fourier cal is collected using a physical magnetic compass as reference,
+    // so apply/store the correction in the magnetic domain, then restore declination.
+    float headingMagDeg = headingRawDeg - DEFAULT_DECLINATION_DEG;
+    if (headingMagDeg <    0.0f) headingMagDeg += 360.0f;
+    if (headingMagDeg >= 360.0f) headingMagDeg -= 360.0f;
+    gCurrentHeadingRawDeg = headingMagDeg;  // expose magnetic heading for CAPTURE_HDG_POINT
+    float headingDeg;
+    if (gHdgCalValid) {
+        float headingMagCorr = hdg_cal::apply(headingMagDeg, gHdgCal);
+        headingDeg = headingMagCorr + DEFAULT_DECLINATION_DEG;
+        if (headingDeg >= 360.0f) headingDeg -= 360.0f;
+        if (headingDeg <    0.0f) headingDeg += 360.0f;
+    } else {
+        headingDeg = headingRawDeg;
+    }
     float pitchDeg   = euler.pitch * (180.0f / M_PI);
     float rollDeg    = euler.roll  * (180.0f / M_PI);
 
@@ -410,7 +421,7 @@ void loop() {
     if (nowMs - lastSendMs >= SEND_INTERVAL_MS) {
         lastSendMs = nowMs;
         nav::Position pos = nav::getPosition();
-        sendNavPacket(headingDeg, headingRawDeg, pitchDeg, rollDeg, speed, useGpsSpeed,
+        sendNavPacket(headingDeg, headingMagDeg, pitchDeg, rollDeg, speed, useGpsSpeed,
                      nav::distanceToHome_m(), nav::bearingToHome_deg(),
                      pos.x_m, pos.y_m, fix);
 
@@ -555,6 +566,10 @@ void loop() {
     // --- WiFi / web server housekeeping --------------------------------------
     wifi::update();
     web::update();
+    if (web::isReloadCalRequested()) {
+        web::clearReloadCalRequest();
+        reloadCalibrationFiles();
+    }
 
     // --- Calibration tick and completion detection ---------------------------
     if (gInCal) {
@@ -773,6 +788,46 @@ static void loadCalibration() {
         gHdgCalValid = true;
         gBootFlags |= BOOT_HDG_CAL_OK;
         Serial.printf("Fourier heading cal loaded (%d harmonic(s))\n", gHdgCal.n);
+    }
+}
+
+// Reload calibration JSON files without blocking fallbacks.
+// Safe to call at runtime (e.g., after uploading a new cal file via web UI).
+static void reloadCalibrationFiles() {
+    gBootFlags &= ~(BOOT_MAG_CAL_OK | BOOT_GYRO_CAL_OK | BOOT_ACCEL_CAL_OK | BOOT_HDG_CAL_OK);
+    gHdgCalValid = false;
+
+    bool hasBase = false, hasMount = false;
+    if (storage::loadMagCalibrationChain(magCal, hasBase, hasMount)) {
+        imu::setMagCalibration(magCal);
+        gBootFlags |= BOOT_MAG_CAL_OK;
+        Serial.printf("[Reload] Mag cal: base=%d mount=%d\n", hasBase, hasMount);
+    } else {
+        Serial.println("[Reload] No mag calibration found");
+    }
+
+    if (storage::loadCalib3("/gyro_cal.json", gyroCal)) {
+        imu::setGyroCalibration(gyroCal);
+        gBootFlags |= BOOT_GYRO_CAL_OK;
+        Serial.println("[Reload] Gyro cal loaded");
+    } else {
+        Serial.println("[Reload] No gyro calibration found");
+    }
+
+    if (storage::loadCalib3("/accel_cal.json", accelCal)) {
+        imu::setAccelCalibration(accelCal);
+        gBootFlags |= BOOT_ACCEL_CAL_OK;
+        Serial.println("[Reload] Accel cal loaded");
+    } else {
+        Serial.println("[Reload] No accel calibration found");
+    }
+
+    if (hdg_cal::load(gHdgCal)) {
+        gHdgCalValid = true;
+        gBootFlags |= BOOT_HDG_CAL_OK;
+        Serial.printf("[Reload] Fourier heading cal loaded (%d harmonic(s))\n", gHdgCal.n);
+    } else {
+        Serial.println("[Reload] No Fourier heading cal found");
     }
 }
 

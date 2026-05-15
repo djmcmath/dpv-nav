@@ -13,7 +13,7 @@
     - IMU present — checks WHO_AM_I registers for LSM6DS33 + LIS3MDL
     - Calibration load — loads mag/gyro/accel calibration from LittleFS
     - If no calibration files found, runs interactive calibration (90s mag sweep, 10s gyro at rest, 6-point accel)
-    - 4-point heading calibration loaded if present (silently skipped if absent)
+    - Fourier heading calibration loaded from `hdg_fourier.json` if present (silently skipped if absent)
     - GPS initialized (streams NMEA, does not block waiting for fix)
     - Flow sensor initialized (ISR-based pulse counting)
     - **NVS state restored** — previous session's toggle states (GPS, WiFi, op mode, log level) and last estimated position are reloaded from ESP32 NVS flash
@@ -21,7 +21,7 @@
 
 3. **Quick heading sanity check**: Compare displayed heading against a phone compass or known bearing.
 
-4. **If recalibration needed**: Open menu (BTN1) → **CAL > Mounted** to re-collect magnetometer samples for the installed position, or **CAL > Hdg cal** for a quick 4-point correction of small residual errors.
+4. **If recalibration needed**: Open menu (BTN1) → **CAL > Mounted** to re-collect magnetometer samples for the installed position, or **CAL > Hdg cal** to collect new heading correction data.
 
 ## Setting Home
 
@@ -52,7 +52,7 @@ MENU
 ├── CAL
 │   ├── Baseline   — bin-aware magnetometer calibration, device off DPV (full sphere coverage)
 │   ├── Mounted    — bin-aware magnetometer calibration, device on DPV (corrects DPV mag signature)
-│   ├── Hdg cal    — 4-point heading calibration: align to N/E/S/W, press BTN2 at each cardinal
+│   ├── Hdg cal    — Fourier heading calibration: guided 12-point collection, then offline fit + upload
 │   └── Speed cal  — interactive flow-meter k-factor calibration (swim a known distance)
 ├── INPUT
 │   ├── GPS Pos    — toggle GPS position on/off (shows current state)
@@ -70,56 +70,50 @@ Toggle items show their current state (e.g., "Units: m", "Op Mode: SURF") and st
 
 All toggle states (GPS Pos, GPS Spd, WiFi, Op Mode, Log level, and all Display settings) are saved to NVS immediately on change and restored on next boot.
 
-### 4-Point Heading Calibration (CAL > Hdg cal)
+### Fourier Heading Calibration (CAL > Hdg cal)
 
-After magnetometer calibration, small residual heading errors (typically 2–8°) often remain. Heading cal measures the actual error at each cardinal and corrects at runtime.
+After magnetometer calibration, systematic heading errors (5–20°) typically remain due to the DPV's magnetic geometry. Heading cal collects 12 data points for an offline Fourier fit that reduces residual error to ~2°.
 
-**When to use:** After completing baseline + mounted mag cal. Before a first dive with a newly calibrated device.
+**When to use:** After completing baseline + mounted mag cal. Run in a magnetically clean environment (not a garage with a concrete floor).
 
-**Workflow:**
+**Part 1 — On-device collection:**
 
-1. Select **CAL > Hdg cal** from the menu. The display shows the first prompt:
+1. Select **CAL > Hdg cal** from the menu. The display shows:
    ```
    HDG CAL
-   Step 1/4: NORTH (0°)
-   Align to NORTH
+   Step 1/12: Target 000°
+   Align to 000°
    Press BTN2 when stable
-
    ─────────────────────
-          2.3°
+          4.7°
    ```
    The large number is the current live raw heading. Watch it settle before pressing.
 
-2. Align the DPV to **true North** (use a phone compass). Wait for the heading readout to stop changing.
+2. Align the DPV to **0° (North)**. Wait for the heading readout to stop changing.
 
-3. Press **BTN2**. The step advances to **EAST**, then **SOUTH**, then **WEST** — same procedure for each.
+3. Press **BTN2**. The step advances to 030°, then 060°, … through all 12 steps at 30° intervals.
 
-4. After the 4th capture the calibration is sent to the nav device and saved. The summary screen appears:
+4. After Step 12, the nav device saves `/hdg_samples.csv` and shows:
    ```
-   HDG CAL DONE
-   ─────────────
-   N: +2.3°
-   E: -1.8°
-   S: +2.1°
-   W: -1.5°
-   ─────────────
-   GREAT (2.3° max)
-   Consistent dir
+   HDG CAL
+   ─────────────────
+   12 points saved
+
+   Export /hdg_samples.csv
+   Run fourier_fit.py
+   Upload hdg_fourier.json
+   ─────────────────
+   Press BTN2 to exit
    ```
 
-5. Press **BTN2** to dismiss and return to normal navigation.
+5. Press **BTN2** to return to normal navigation.
 
-**Interpreting the summary:**
+**Part 2 — Offline fit and upload:**
 
-| Max error | Rating |
-|-----------|--------|
-| < 3° | GREAT |
-| < 6° | GOOD |
-| < 10° | FAIR |
-| ≥ 10° | POOR |
-
-- **Consistent dir** — all corrections are the same sign (e.g., all slightly positive). Normal, easy to correct well.
-- **Mixed direction** — corrections vary in sign. This can indicate a soft-iron calibration problem; consider redoing the mounted mag cal.
+1. Download `/hdg_samples.csv` from the nav device LittleFS.
+2. Run: `python tools/fourier_fit.py hdg_samples.csv`
+3. Upload the resulting `hdg_fourier.json` to nav device LittleFS root.
+4. Reboot — the correction loads automatically on next boot.
 
 ### Speed Calibration (CAL > Speed cal)
 
@@ -260,7 +254,7 @@ Requires `ENABLE_DEBUG_PACKET 1` on the nav device to send sensor data:
 2. Descend with DPV, unit active.
 3. Device runs dead-reckoning integration at ~100 Hz:
     - Flow sensor updates speed (or GPS speed, if fix is fresh and passes SOG deadband + COG coherence filter)
-    - AHRS updates heading from gyro/accel/mag fusion; 4-point heading correction applied if calibrated
+    - AHRS updates heading from gyro/accel/mag fusion; Fourier heading correction applied if `hdg_fourier.json` loaded
     - Nav model integrates position: `x += speed × sin(heading) × dt`, `y += speed × cos(heading) × dt`
 4. Display updates at 10 Hz, showing bearing, range, heading, and speed.
 5. To return home: follow the bearing shown on the upper-left cell.
@@ -270,7 +264,7 @@ Requires `ENABLE_DEBUG_PACKET 1` on the nav device to send sensor data:
 
 1. **Baseline mag cal** — device off DPV, full sphere coverage. Run offline Python fit, upload `mag_base.json`.
 2. **Mounted mag cal** — device installed on DPV, horizontal rotations. Run offline Python fit, upload `mag_mount.json`.
-3. **4-point heading cal** — align to N/E/S/W at the surface with device on DPV. Quick and fully automated.
+3. **Fourier heading cal** — collect 12 points on DPV at 30° intervals, run `fourier_fit.py` offline, upload `hdg_fourier.json`.
 4. **Speed cal** — 3–6 runs over a known distance to dial in the flow sensor k-factor.
 
 Gyro and accel calibrate automatically on first boot if their files are absent.
@@ -308,7 +302,7 @@ Key settings in [src/config.h](../src/config.h):
 ## Troubleshooting
 
 - **"NO LINK" on display**: Check Serial1 wiring between devices. Nav device should be sending packets.
-- **Heading off by constant amount**: Run **CAL > Hdg cal** to capture the offset at each cardinal. If offset is large (>10°) the magnetometer calibration may need redoing first.
+- **Heading off by constant amount**: Run **CAL > Hdg cal** to collect 12-point data, fit, and upload `hdg_fourier.json`. If errors are large (>10°) or inconsistent, redo mounted mag cal first.
 - **Heading varies by orientation (tilt-dependent)**: Soft-iron distortion not fully corrected — redo mounted mag cal and run offline ellipsoid fitting.
 - **Position drifts without moving**: Check gyro calibration (should be done at rest). Flow sensor may be noisy — increase `FLOW_AVG_PERIOD_S`.
 - **GPS shows speed when stationary**: GPS position jitter creates phantom speed. The SOG deadband + COG coherence filter should reject this. Enable `GPS_DIAG_ENABLE` in nav_main.cpp to see raw SOG/COG and filter decisions.

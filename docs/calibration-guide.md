@@ -12,7 +12,8 @@ DPV-Nav calibrates four sensors/subsystems: magnetometer, gyroscope, acceleromet
 /mag_cal.json       — Legacy single-stage mag cal (loaded as fallback if base/mount absent)
 /gyro_cal.json      — Gyroscope bias
 /accel_cal.json     — Accelerometer bias + scale
-/hdg_cal.json       — 4-point heading calibration (optional)
+/hdg_samples.csv    — Raw (target, indicated) pairs from heading cal collection run
+/hdg_fourier.json   — Fourier heading correction (n harmonics + coefficient array, optional)
 /speed_cal.json     — Flow sensor k-factor history (rolling 6-run average)
 ```
 
@@ -38,11 +39,11 @@ DPV-Nav calibrates four sensors/subsystems: magnetometer, gyroscope, acceleromet
 }
 ```
 
-**HdgCal** (4-point heading):
+**HdgFourier** (Fourier heading correction):
 ```json
-{ "h0": 2.3, "h1": 87.6, "h2": 183.1, "h3": 268.9 }
+{ "n": 4, "c": [5.85, -0.39, -5.10, 0.16, -16.54, -0.76, 1.88, -0.27, 2.92] }
 ```
-`h0`–`h3` are the indicated (AHRS-reported) headings when aligned to N/E/S/W respectively.
+`n` is the number of harmonics (1–4). `c` is the Fourier coefficient array: `[DC, cos1, sin1, cos2, sin2, ...]` (length `2n+1`). Generated offline by `tools/fourier_fit.py`.
 
 ## Boot Sequence
 
@@ -52,7 +53,7 @@ For mag: try two-stage chain (mag_base.json + mag_mount.json)
           → fall back to blocking 90s min/max sweep (last resort)
 For gyro: load gyro_cal.json or run 10s stationary bias cal
 For accel: load accel_cal.json or run 6-point orientation cal
-For hdg: load hdg_cal.json — silently skip if absent (optional)
+For hdg: load hdg_fourier.json — silently skip if absent (optional)
 ```
 
 ## Magnetometer Calibration
@@ -127,68 +128,77 @@ Delete the corresponding JSON file(s) from LittleFS and reboot, or run the menu 
 - Bias: ±50 raw counts (±0.004 m/s²)
 - Scale: 0.98 – 1.02 per axis
 
-## 4-Point Heading Calibration
+## Fourier Heading Calibration
 
-**Purpose:** After magnetometer calibration, small systematic heading errors typically remain (2–8°). The 4-point heading cal measures the actual error at each cardinal heading and applies circular linear interpolation at runtime to reduce residual error to <2°.
+**Purpose:** After magnetometer calibration, complex systematic heading errors typically remain (5–20°) due to the DPV's magnetic geometry (motor, batteries, structural asymmetries). The 4-harmonic Fourier correction captures these non-sinusoidal errors and reduces residual error to ~2° max.
 
-**When to do it:** After completing baseline + mounted mag cal. The device must already have a working magnetometer calibration before heading cal is meaningful.
+**When to do it:** After completing baseline + mounted mag cal. Run in a magnetically clean environment (living room on a wooden floor — not in a garage with rebar in concrete). The device must already have a working magnetometer calibration.
 
 **Trigger:** Menu → **CAL > Hdg cal**
 
 ### Procedure
 
+**Part 1 — On-device data collection:**
+
 1. Open menu (BTN1) → **CAL > Hdg cal**. The menu closes and the heading cal screen appears.
-2. The screen prompts for Step 1/4: **NORTH (0°)**.
-   - The live AHRS heading (pre-correction, raw) is shown in large text so you can watch it stabilise.
-3. Align the DPV to true North. Wait for the heading readout to stop changing.
-4. Press **BTN2** to capture that heading.
-5. The screen advances to Step 2/4: **EAST (90°)**. Align to East, wait for stable reading, press BTN2.
-6. Repeat for Step 3/4 **SOUTH (180°)** and Step 4/4 **WEST (270°)**.
-7. After the 4th capture, the calibration is automatically sent to the nav device and saved to `/hdg_cal.json`. A summary screen appears:
+2. The screen shows **Step 1/12: Target 000°** and the live AHRS heading in large text.
+3. Align the DPV to 0° (North). Watch the heading readout stabilise.
+4. Press **BTN2** to capture that heading. The screen advances to **Step 2/12: Target 030°**.
+5. Repeat for all 12 steps (every 30°: 0°, 30°, 60°, … 330°). Each BTN2 press captures the current indicated heading and records `(target, indicated)` on the nav device.
+6. After Step 12, the nav device saves `/hdg_samples.csv` and the done screen appears:
 
 ```
-HDG CAL DONE
+HDG CAL
 ─────────────────
-N: +2.3°
-E: -1.8°
-S: +2.1°
-W: -1.5°
+12 points saved
+
+Export /hdg_samples.csv
+Run fourier_fit.py
+Upload hdg_fourier.json
 ─────────────────
-GREAT (2.3° max)
-Consistent dir
+Press BTN2 to exit
 ```
 
-8. Press **BTN2** to dismiss the summary and return to normal navigation.
+7. Press **BTN2** to return to normal navigation.
 
-### Summary screen interpretation
+**Part 2 — Offline fit and upload:**
 
-**Max error rating:**
+1. Download `/hdg_samples.csv` from the nav device (via web interface or LittleFS tools).
+2. Run: `python tools/fourier_fit.py hdg_samples.csv [--plot]`
+   - Prints per-point residuals and selects the best number of harmonics (1–4).
+   - Saves `hdg_fourier.json` in the current directory.
+   - Optionally saves `hdg_fourier_fit.png` (requires `--plot`).
+3. Upload `hdg_fourier.json` to the nav device LittleFS root.
+4. Reboot — the correction loads automatically.
 
-| Max error | Rating |
-|-----------|--------|
-| < 3° | GREAT |
-| < 6° | GOOD |
-| < 10° | FAIR |
-| ≥ 10° | POOR |
+### CSV format
 
-**Direction consistency:**
-- **Consistent dir** (all corrections same sign, e.g. all positive) — indicates a systematic offset, which is the most correctable kind of error.
-- **Mixed direction** (corrections vary in sign) — indicates more complex distortion; double-check mag calibration quality.
+`/hdg_samples.csv` has two columns:
 
-A POOR or mixed-direction result suggests the magnetometer calibration should be redone before relying on heading cal.
+```csv
+actual,indicated
+0.0,4.7
+30.0,24.3
+60.0,52.1
+...
+```
+
+`actual` is the target heading the user aligned to; `indicated` is what the AHRS reported.
 
 ### How it works at runtime
 
-The nav device stores the 4 `(indicated, correction)` pairs. At each heading computation:
-1. The raw AHRS heading is computed
-2. The correction table is queried using the raw heading as a lookup key (circular linear interpolation between the four points)
-3. The corrected heading is used for dead-reckoning and sent in NavPacket
+The nav device loads `hdg_fourier.json` on boot and evaluates the Fourier series at each heading computation:
 
-The raw heading is also sent separately as `heading_raw_deg` in NavPacket so the display device can capture it correctly during recalibration (the display shows `heading_raw_deg` during the cal prompts).
+```
+correction(θ) = c[0] + c[1]·cos(θ) + c[2]·sin(θ) + c[3]·cos(2θ) + c[4]·sin(2θ) + ...
+headingDeg = headingRawDeg + correction(headingRawDeg)
+```
+
+`heading_raw_deg` is always sent in NavPacket alongside the corrected `heading_deg`, so the display can show pre-correction readings during recalibration.
 
 ### Recalibrating
 
-Simply run **CAL > Hdg cal** again. The new calibration overwrites `/hdg_cal.json` on completion.
+Run **CAL > Hdg cal** again, then redo the offline fit and upload the new `hdg_fourier.json`.
 
 ## Storage API
 
@@ -203,11 +213,10 @@ storage::loadMagCalibration("/mag_base.json", magCal);
 storage::saveCalib3("/gyro_cal.json", gyroCal);
 storage::loadCalib3("/gyro_cal.json", gyroCal);
 
-// Heading cal
+// Heading cal (read-only on device — file is uploaded by user after offline fit)
 #include "util/hdg_cal.h"
-hdg_cal::load(gHdgCal);           // returns bool
-hdg_cal::save(gHdgCal);           // returns bool
-hdg_cal::apply(headingDeg, gHdgCal);  // returns corrected heading
+hdg_cal::load(gHdgCal);                    // returns bool; reads /hdg_fourier.json
+hdg_cal::apply(headingDeg, gHdgCal);       // returns corrected heading
 ```
 
 Files are stored on LittleFS (ESP32 internal flash). Total calibration data is <5 KB.
@@ -216,10 +225,10 @@ Files are stored on LittleFS (ESP32 internal flash). Total calibration data is <
 
 | Problem | Cause | Fix |
 |---------|-------|-----|
-| Heading off by consistent amount | Systematic hard-iron bias | Run mounted mag cal or 4-point heading cal |
+| Heading off by consistent amount | Systematic hard-iron bias | Run mounted mag cal or Fourier heading cal |
 | Heading varies by orientation | Soft-iron distortion | Run full mounted cal + offline ellipsoid fit |
-| Heading cal shows POOR | Mag cal has large residual errors | Redo mag cal before heading cal |
-| Heading cal shows Mixed direction | Complex distortion pattern | Verify DPV has no moving magnetic sources; redo mounted cal |
+| Fourier residuals > 5° after fit | Calibration in bad environment | Move away from concrete floors with rebar; redo collection |
+| Fourier residuals > 5° in clean env | Complex DPV magnetic geometry | Use 4 harmonics; check DPV for loose magnetic components |
 | Gyro bias very large (>500) | Device moved during cal | Repeat on stable surface, no vibration |
 | Accel scale way off (>1.1) | Wrong orientation or sensor issue | Verify axis labeling, check sensor |
 | "LittleFS mount failed" | Flash partition not configured | Check `board_build.filesystem = littlefs` in platformio.ini |

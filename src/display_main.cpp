@@ -12,7 +12,6 @@
 #include "drivers/display.h"
 #include "menu/menu.h"
 #include "nav/state.h"
-#include "util/hdg_cal.h"
 #include <dpvlink.h>
 
 // ---- Link receive state ----------------------------------------------------
@@ -58,20 +57,24 @@ static constexpr uint32_t BOOT_STATUS_HOLD_MS = 4000;
 // Track whether we need to redraw nav after menu closes
 static bool menuWasOpen = false;
 
-// ---- 4-point heading calibration UI state ----------------------------------
-// The display device drives all 4 prompts, captures indicated headings from
-// NavPacket.heading_raw_deg, then sends SET_HDG_CAL to the nav device.
-// After all 4 points are captured the summary screen is shown; BTN2 dismisses.
-enum class HdgCalPhase : uint8_t {
-    NONE,     // not in hdg cal
-    PROMPT,   // showing prompt for current cardinal (step 0..3)
-    SUMMARY,  // showing results summary; BTN2 to exit
+// ---- Fourier heading calibration UI state -----------------------------------
+// Display drives 12 guided prompts at 30° intervals; BTN2 at each step sends
+// CAPTURE_HDG_POINT to the nav device (which records gCurrentHeadingRawDeg).
+// After all 12 points, FINALIZE_HDG_CAL is sent; the nav device saves
+// /hdg_samples.csv for offline Fourier fitting.
+static constexpr int kHdgCalNPoints = 12;
+static constexpr float kHdgCalTargets[kHdgCalNPoints] = {
+    0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330
 };
 
-static HdgCalPhase gHdgCalPhase = HdgCalPhase::NONE;
-static int         gHdgCalStep  = 0;       // 0=North, 1=East, 2=South, 3=West
-static float       gHdgCalIndicated[4];    // captured heading_raw_deg for each step
-static float       gHdgCalCorrections[4];  // computed for summary display
+enum class HdgFourierCalPhase : uint8_t {
+    NONE,        // not in hdg cal
+    COLLECTING,  // showing prompt for current step
+    DONE,        // showing done screen; BTN2 to exit
+};
+
+static HdgFourierCalPhase gHdgFourierCalPhase = HdgFourierCalPhase::NONE;
+static int                gHdgFourierCalStep  = 0;
 
 // ---- Speed calibration UI state --------------------------------------------
 // Phases live entirely on the display device; the nav device drives
@@ -133,7 +136,6 @@ static void processNavLine();
 static void processUsbCmd();
 static void sendCmd(DisplayCmd cmd);
 static void sendSpeedCalStart(uint16_t dist_ft);
-static void sendHdgCal(const float indicated[4]);
 static void updateButton(ButtonState& b);
 static void handleButtons();
 
@@ -297,9 +299,10 @@ void loop() {
 
         if (menu::isPendingHdgCal()) {
             menu::clearHdgCalPending();
-            gHdgCalPhase = HdgCalPhase::PROMPT;
-            gHdgCalStep  = 0;
-            Serial.println("[HDG_CAL] entering 4-point heading cal");
+            sendCmd(DisplayCmd::START_HDG_FOURIER_CAL);
+            gHdgFourierCalPhase = HdgFourierCalPhase::COLLECTING;
+            gHdgFourierCalStep  = 0;
+            Serial.println("[HDG_CAL] entering Fourier heading cal");
         }
 
         display::clear();
@@ -381,14 +384,15 @@ void loop() {
                 return;
             }
 
-            // 4-point heading cal — takes priority while active
-            if (gHdgCalPhase == HdgCalPhase::PROMPT) {
-                display::showHdgCalPrompt(gHdgCalStep,
-                                          navValid ? lastNav.heading_raw_deg : 0.0f);
+            // Fourier heading cal — takes priority while active
+            if (gHdgFourierCalPhase == HdgFourierCalPhase::COLLECTING) {
+                display::showHdgFourierCalPrompt(gHdgFourierCalStep, kHdgCalNPoints,
+                                                 kHdgCalTargets[gHdgFourierCalStep],
+                                                 navValid ? lastNav.heading_raw_deg : 0.0f);
                 return;
             }
-            if (gHdgCalPhase == HdgCalPhase::SUMMARY) {
-                display::showHdgCalSummary(gHdgCalCorrections);
+            if (gHdgFourierCalPhase == HdgFourierCalPhase::DONE) {
+                display::showHdgFourierCalDone(kHdgCalNPoints);
                 return;
             }
 
@@ -558,15 +562,6 @@ static void sendSpeedCalStart(uint16_t dist_ft) {
     }
 }
 
-static void sendHdgCal(const float indicated[4]) {
-    size_t n = displayHdgCalToBytes(indicated, txBuf, sizeof(txBuf));
-    if (n > 0) {
-        Serial1.write(txBuf, n);
-        Serial.printf("[HDG_CAL] SET_HDG_CAL N=%.1f E=%.1f S=%.1f W=%.1f\n",
-                      indicated[0], indicated[1], indicated[2], indicated[3]);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Debounce a single button.  Call once per loop iteration.
 // ---------------------------------------------------------------------------
@@ -614,35 +609,34 @@ static void handleButtons() {
         }
     }
 
-    // --- 4-point heading calibration -----------------------------------------
-    if (gHdgCalPhase == HdgCalPhase::PROMPT) {
-        // BTN2 short press: capture current raw heading for this step
+    // --- Fourier heading calibration -----------------------------------------
+    if (gHdgFourierCalPhase == HdgFourierCalPhase::COLLECTING) {
+        // BTN2 short press: send CAPTURE_HDG_POINT with current target; nav device
+        // records its live gCurrentHeadingRawDeg alongside the target.
         if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
             btn2.fired = true;
-            gHdgCalIndicated[gHdgCalStep] = navValid ? lastNav.heading_raw_deg : 0.0f;
-            Serial.printf("[HDG_CAL] Step %d captured: %.1f\n",
-                          gHdgCalStep, gHdgCalIndicated[gHdgCalStep]);
-            gHdgCalStep++;
-            if (gHdgCalStep >= 4) {
-                // All 4 points collected — send to nav device and show summary
-                sendHdgCal(gHdgCalIndicated);
-                hdg_cal::HdgCal cal;
-                for (int i = 0; i < 4; i++) cal.indicated[i] = gHdgCalIndicated[i];
-                hdg_cal::corrections(cal, gHdgCalCorrections);
-                gHdgCalPhase = HdgCalPhase::SUMMARY;
+            float target = kHdgCalTargets[gHdgFourierCalStep];
+            size_t n = displayCaptureHdgPointToBytes(target, txBuf, sizeof(txBuf));
+            if (n > 0) Serial1.write(txBuf, n);
+            Serial.printf("[HDG_CAL] Step %d/%d target=%.0f\n",
+                          gHdgFourierCalStep + 1, kHdgCalNPoints, target);
+            gHdgFourierCalStep++;
+            if (gHdgFourierCalStep >= kHdgCalNPoints) {
+                sendCmd(DisplayCmd::FINALIZE_HDG_CAL);
+                gHdgFourierCalPhase = HdgFourierCalPhase::DONE;
                 display::clear();
             }
         }
         return;
     }
 
-    if (gHdgCalPhase == HdgCalPhase::SUMMARY) {
-        // BTN2 short press: dismiss summary and return to normal nav
+    if (gHdgFourierCalPhase == HdgFourierCalPhase::DONE) {
+        // BTN2 short press: dismiss done screen and return to normal nav
         if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
             btn2.fired = true;
-            gHdgCalPhase = HdgCalPhase::NONE;
+            gHdgFourierCalPhase = HdgFourierCalPhase::NONE;
             display::clear();
-            Serial.println("[HDG_CAL] Summary dismissed");
+            Serial.println("[HDG_CAL] Done screen dismissed");
         }
         return;
     }

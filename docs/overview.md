@@ -31,5 +31,5 @@ v1 features (implemented):
 - Menu system with JSON-configurable structure: NAV (outbound/home/mark/op mode), CAL (baseline/mounted/hdg cal/speed), INPUT (GPS/WiFi/logging toggles), DISPLAY (mode/units/heading)
 - Menu loaded from `/menu.json` on LittleFS; hardcoded fallback if file missing
 - Bin-aware magnetometer calibration: two-stage baseline (off-scooter) + mounted (on-scooter) cal, each collecting samples across a heading×elevation grid until coverage is sufficient
-- 4-point heading calibration: user aligns to N/E/S/W, system records indicated vs actual, applies circular linear interpolation at runtime for last-degree accuracy after mag cal
+- Fourier heading calibration: guided 12-point on-device collection at 30° intervals, offline 4-harmonic Fourier fit (`fourier_fit.py`), JSON upload; reduces residual error to ~2° max
 - Interactive speed calibration: swim a known distance (150–500 ft), automatic run detection (flow threshold + heading-change stop), k-factor computed from total pulse count, rolling 6-run average stored to `/speed_cal.json`

@@ -7,3 +7,4 @@ nul
 *.zip
 *.log
 *.tar.gz
+tools/old csv/*

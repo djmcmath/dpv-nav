@@ -24,6 +24,9 @@ constexpr uint32_t LINK_BAUD = 115200;
 // --- Flow sensor (hall-effect pulse counting) ---
 constexpr int FLOW_SENSOR_PIN = 34;  // Started with GPIO 25 (ADC2) but conflicts with WiFi
 
+// --- Battery voltage ADC (Feather ESP32 v1: GPIO35 = A13, VBAT via 2:1 divider) ---
+constexpr int BATT_ADC_PIN = 35;
+
 // --- Buttons (external pull-up to 3.3V, active LOW when pressed) ---
 constexpr int BUTTON1_PIN = 27;
 constexpr int BUTTON2_PIN = 13;

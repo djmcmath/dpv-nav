@@ -57,6 +57,25 @@ static constexpr uint32_t BOOT_STATUS_HOLD_MS = 4000;
 // Track whether we need to redraw nav after menu closes
 static bool menuWasOpen = false;
 
+// ---- Fourier heading calibration UI state -----------------------------------
+// Display drives 12 guided prompts at 30° intervals; BTN2 at each step sends
+// CAPTURE_HDG_POINT to the nav device (which records gCurrentHeadingRawDeg).
+// After all 12 points, FINALIZE_HDG_CAL is sent; the nav device saves
+// /hdg_samples.csv for offline Fourier fitting.
+static constexpr int kHdgCalNPoints = 12;
+static constexpr float kHdgCalTargets[kHdgCalNPoints] = {
+    0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330
+};
+
+enum class HdgFourierCalPhase : uint8_t {
+    NONE,        // not in hdg cal
+    COLLECTING,  // showing prompt for current step
+    DONE,        // showing done screen; BTN2 to exit
+};
+
+static HdgFourierCalPhase gHdgFourierCalPhase = HdgFourierCalPhase::NONE;
+static int                gHdgFourierCalStep  = 0;
+
 // ---- Speed calibration UI state --------------------------------------------
 // Phases live entirely on the display device; the nav device drives
 // cal_mode (2/3/4) in NavPackets once the run starts.
@@ -277,6 +296,15 @@ void loop() {
             gSpeedCalChoice  = 0;
             Serial.println("[SPEED_CAL] entering distance selection");
         }
+
+        if (menu::isPendingHdgCal()) {
+            menu::clearHdgCalPending();
+            sendCmd(DisplayCmd::START_HDG_FOURIER_CAL);
+            gHdgFourierCalPhase = HdgFourierCalPhase::COLLECTING;
+            gHdgFourierCalStep  = 0;
+            Serial.println("[HDG_CAL] entering Fourier heading cal");
+        }
+
         display::clear();
     }
     if (menu::isOpen()) {
@@ -353,6 +381,18 @@ void loop() {
                 display::showCalGrid(lastCalProgress,
                                      lastCalProgress.cal_type == (uint8_t)CalType::MOUNTED
                                          ? "MOUNTED CAL" : "BASELINE CAL");
+                return;
+            }
+
+            // Fourier heading cal — takes priority while active
+            if (gHdgFourierCalPhase == HdgFourierCalPhase::COLLECTING) {
+                display::showHdgFourierCalPrompt(gHdgFourierCalStep, kHdgCalNPoints,
+                                                 kHdgCalTargets[gHdgFourierCalStep],
+                                                 navValid ? lastNav.heading_raw_deg : 0.0f);
+                return;
+            }
+            if (gHdgFourierCalPhase == HdgFourierCalPhase::DONE) {
+                display::showHdgFourierCalDone(kHdgCalNPoints);
                 return;
             }
 
@@ -567,6 +607,38 @@ static void handleButtons() {
             btn2.fired = true;
             return;
         }
+    }
+
+    // --- Fourier heading calibration -----------------------------------------
+    if (gHdgFourierCalPhase == HdgFourierCalPhase::COLLECTING) {
+        // BTN2 short press: send CAPTURE_HDG_POINT with current target; nav device
+        // records its live gCurrentHeadingRawDeg alongside the target.
+        if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
+            btn2.fired = true;
+            float target = kHdgCalTargets[gHdgFourierCalStep];
+            size_t n = displayCaptureHdgPointToBytes(target, txBuf, sizeof(txBuf));
+            if (n > 0) Serial1.write(txBuf, n);
+            Serial.printf("[HDG_CAL] Step %d/%d target=%.0f\n",
+                          gHdgFourierCalStep + 1, kHdgCalNPoints, target);
+            gHdgFourierCalStep++;
+            if (gHdgFourierCalStep >= kHdgCalNPoints) {
+                sendCmd(DisplayCmd::FINALIZE_HDG_CAL);
+                gHdgFourierCalPhase = HdgFourierCalPhase::DONE;
+                display::clear();
+            }
+        }
+        return;
+    }
+
+    if (gHdgFourierCalPhase == HdgFourierCalPhase::DONE) {
+        // BTN2 short press: dismiss done screen and return to normal nav
+        if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
+            btn2.fired = true;
+            gHdgFourierCalPhase = HdgFourierCalPhase::NONE;
+            display::clear();
+            Serial.println("[HDG_CAL] Done screen dismissed");
+        }
+        return;
     }
 
     // --- Speed cal: distance selection mode ----------------------------------

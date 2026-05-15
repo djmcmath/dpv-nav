@@ -60,6 +60,7 @@ struct NavCache {
     // Status bar
     uint8_t gpsSignalBars = 0xFF;   // 0–4 computed signal bar count
     uint8_t statusFlags   = 0xFF;   // relevant flag bits (WiFi, P, S)
+    uint8_t battLevel     = 0xFF;   // 0=unknown,1=red,2=yellow,3=green (avoids redraw on mV jitter)
     // BRG cell
     bool    hasHome       = false;
     int     bearingInt    = -999;
@@ -229,9 +230,36 @@ static void drawStatusBar(const NavPacket& pkt) {
     // Each size-2 char is 12px wide.
     // Positions chosen for even spacing across 320px.
 
-    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+    // BATT label color and small vertical level bar (x=54, 4px wide × 14px tall)
+    // batt_mv==0 means nav device hasn't read yet → gray
+    uint16_t battColor;
+    if      (pkt.batt_mv == 0)                    battColor = COLOR_GRAY;
+    else if (pkt.batt_mv >= BATT_MV_GREEN)        battColor = COLOR_GREEN;
+    else if (pkt.batt_mv >= BATT_MV_YELLOW)       battColor = COLOR_YELLOW;
+    else                                           battColor = COLOR_RED;
+
+    tft.setTextColor(battColor, COLOR_BLACK);
     tft.setCursor(2, 4);
     tft.print("BATT");
+
+    // Draw battery level bar: outline + proportional fill (bottom-aligned)
+    static constexpr int BBAR_X = 54;
+    static constexpr int BBAR_Y = 5;
+    static constexpr int BBAR_W = 4;
+    static constexpr int BBAR_H = 14;
+    tft.drawRect(BBAR_X, BBAR_Y, BBAR_W, BBAR_H, battColor);
+    if (pkt.batt_mv > 0) {
+        uint16_t mv = pkt.batt_mv < BATT_MV_EMPTY ? BATT_MV_EMPTY
+                    : pkt.batt_mv > BATT_MV_FULL  ? BATT_MV_FULL
+                    : pkt.batt_mv;
+        int fillH = (int)((mv - BATT_MV_EMPTY) * (BBAR_H - 2) / (BATT_MV_FULL - BATT_MV_EMPTY));
+        // clear interior then fill from bottom
+        tft.fillRect(BBAR_X + 1, BBAR_Y + 1, BBAR_W - 2, BBAR_H - 2, COLOR_BLACK);
+        if (fillH > 0)
+            tft.fillRect(BBAR_X + 1, BBAR_Y + 1 + (BBAR_H - 2 - fillH), BBAR_W - 2, fillH, battColor);
+    } else {
+        tft.fillRect(BBAR_X + 1, BBAR_Y + 1, BBAR_W - 2, BBAR_H - 2, COLOR_BLACK);
+    }
 
     tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
     tft.setCursor(66, 4);
@@ -462,6 +490,10 @@ void showNav(const NavPacket& pkt) {
     int    headingInt = (int)(pkt.heading_deg + 0.5f) % 360;
     uint8_t logLevel  = (pkt.flags & FLAG_LOG_LEVEL_MASK) >> FLAG_LOG_LEVEL_SHIFT;
     uint8_t statFlags = pkt.flags & (FLAG_WIFI_ENABLED | FLAG_GPS_POS_ENABLED | FLAG_GPS_SPD_ENABLED);
+    uint8_t battLevel = (pkt.batt_mv == 0)              ? 0
+                      : (pkt.batt_mv >= BATT_MV_GREEN)  ? 3
+                      : (pkt.batt_mv >= BATT_MV_YELLOW) ? 2
+                      : 1;
 #if DISPLAY_UNITS_IMPERIAL
     int speedDisp = (int)(pkt.speed_ms * 60.0f * 3.28084f + 0.5f);
 #else
@@ -469,7 +501,8 @@ void showNav(const NavPacket& pkt) {
 #endif
 
     // Determine which elements changed — evaluate all before updating cache
-    bool statusChanged  = (statFlags != navCache.statusFlags || pkt.gps_signal_bars != navCache.gpsSignalBars);
+    bool statusChanged  = (statFlags != navCache.statusFlags || pkt.gps_signal_bars != navCache.gpsSignalBars
+                           || battLevel != navCache.battLevel);
     bool brgChanged     = (bearingInt != navCache.bearingInt || hasHome != navCache.hasHome || trueHdg != navCache.trueHeading);
     bool rngChanged     = (distCm != navCache.distCm        || hasHome != navCache.hasHome);
     bool hdgChanged     = (headingInt != navCache.headingInt || trueHdg != navCache.trueHeading);
@@ -487,6 +520,7 @@ void showNav(const NavPacket& pkt) {
     // Update cache
     navCache.statusFlags   = statFlags;
     navCache.gpsSignalBars = pkt.gps_signal_bars;
+    navCache.battLevel     = battLevel;
     navCache.hasHome       = hasHome;
     navCache.trueHeading   = trueHdg;
     navCache.bearingInt    = bearingInt;
@@ -541,11 +575,17 @@ void showNavTop(const NavPacket& pkt) {
     int  bearingInt = hasHome ? ((int)(pkt.bearing_home_deg + 0.5f) % 360) : -1;
     int  distCm     = hasHome ? (int)(pkt.distance_home_m * 100.0f) : -1;
     uint8_t statFlags = pkt.flags & (FLAG_WIFI_ENABLED | FLAG_GPS_POS_ENABLED | FLAG_GPS_SPD_ENABLED);
+    uint8_t battLevel = (pkt.batt_mv == 0)              ? 0
+                      : (pkt.batt_mv >= BATT_MV_GREEN)  ? 3
+                      : (pkt.batt_mv >= BATT_MV_YELLOW) ? 2
+                      : 1;
 
-    if (statFlags != navCache.statusFlags || pkt.gps_signal_bars != navCache.gpsSignalBars) {
+    if (statFlags != navCache.statusFlags || pkt.gps_signal_bars != navCache.gpsSignalBars
+        || battLevel != navCache.battLevel) {
         drawStatusBar(pkt);
         navCache.statusFlags   = statFlags;
         navCache.gpsSignalBars = pkt.gps_signal_bars;
+        navCache.battLevel     = battLevel;
     }
     if (bearingInt != navCache.bearingInt || hasHome != navCache.hasHome || trueHdg != navCache.trueHeading) {
         drawBearing(pkt);
@@ -1071,6 +1111,94 @@ void showSpeedCalResult(uint16_t dist_ft, uint16_t elapsed_s,
             tft.print(labels[i]);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// 4-point heading calibration: prompt screen
+// Layout (320×240):
+//   y=  0  "HDG CAL"                cyan, size 2
+//   y= 26  "Step N/4: NORTH (0°)"   white, size 2
+//   y= 60  "Align to North"         yellow, size 2
+//   y= 88  "Press BTN2 when stable" gray, size 1
+//   y=120  separator line           cyan
+//   y=128  "Live: XXX.X°"           white, size 3
+// ---------------------------------------------------------------------------
+void showHdgFourierCalPrompt(int step, int total, float targetDeg, float indicatedDeg) {
+    if (!tftReady) return;
+    invalidateNavCache();
+    tft.fillScreen(COLOR_BLACK);
+
+    tft.setTextSize(2);
+    tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
+    tft.setCursor(0, 0);
+    tft.print("HDG CAL");
+
+    char buf[40];
+    snprintf(buf, sizeof(buf), "Step %d/%d: Target %03.0f" "\xF8", step + 1, total, targetDeg);
+    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+    tft.setCursor(0, 28);
+    tft.print(buf);
+
+    snprintf(buf, sizeof(buf), "Align to %.0f" "\xF8", targetDeg);
+    tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
+    tft.setCursor(0, 60);
+    tft.print(buf);
+
+    tft.setTextSize(1);
+    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+    tft.setCursor(0, 90);
+    tft.print("Press BTN2 when stable");
+
+    tft.drawFastHLine(0, 110, SCREEN_WIDTH, COLOR_CYAN);
+
+    tft.setTextSize(3);
+    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+    snprintf(buf, sizeof(buf), "%.1f" "\xF8", indicatedDeg);
+    tft.setCursor(0, 122);
+    tft.print(buf);
+}
+
+// ---------------------------------------------------------------------------
+// 4-point heading calibration: summary screen
+// Layout (320×240):
+//   y=  0  "HDG CAL DONE"            cyan, size 2
+//   y= 26  separator line
+//   y= 32  4 correction rows (N/E/S/W with +/- values)   size 2
+//   y=134  separator line
+//   y=142  quality assessment line   colored, size 2
+// ---------------------------------------------------------------------------
+void showHdgFourierCalDone(int nPoints) {
+    if (!tftReady) return;
+    invalidateNavCache();
+    tft.fillScreen(COLOR_BLACK);
+
+    tft.setTextSize(2);
+    tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
+    tft.setCursor(0, 0);
+    tft.print("HDG CAL");
+
+    tft.drawFastHLine(0, 24, SCREEN_WIDTH, COLOR_CYAN);
+
+    char buf[40];
+    snprintf(buf, sizeof(buf), "%d points saved", nPoints);
+    tft.setTextColor(COLOR_GREEN, COLOR_BLACK);
+    tft.setCursor(0, 34);
+    tft.print(buf);
+
+    tft.setTextSize(1);
+    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+    tft.setCursor(0, 70);
+    tft.print("Export /hdg_samples.csv");
+    tft.setCursor(0, 86);
+    tft.print("Run fourier_fit.py");
+    tft.setCursor(0, 102);
+    tft.print("Upload hdg_fourier.json");
+
+    tft.drawFastHLine(0, 118, SCREEN_WIDTH, COLOR_CYAN);
+
+    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+    tft.setCursor(0, 128);
+    tft.print("Press BTN2 to exit");
 }
 
 // ---------------------------------------------------------------------------

@@ -24,6 +24,7 @@
       "items": [
         {"label": "Baseline", "act": 5},
         {"label": "Mounted", "act": 6},
+        {"label": "Hdg cal", "act": 18},
         {"label": "Speed cal", "act": 7}
       ]
     },

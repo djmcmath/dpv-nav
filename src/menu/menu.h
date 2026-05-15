@@ -19,26 +19,27 @@ constexpr uint32_t MENU_TIMEOUT_MS = 15000;  // auto-close after 15 s idle
 // Menu actions — what happens when a leaf item is selected
 // ---------------------------------------------------------------------------
 enum class Action : uint8_t {
-    NONE = 0,
-    SUBMENU,            // open child submenu (submenuIdx valid)
+    NONE          = 0,
+    SUBMENU       = 1,   // open child submenu (submenuIdx valid)
     // Nav-device commands (sent over serial link)
-    NAV_OUTBOUND,
-    NAV_HOME,
-    NAV_MARK,
-    CAL_BASELINE,       // bin-aware baseline (off-scooter) cal
-    CAL_MOUNTED,        // bin-aware mounted (on-scooter) cal
-    CAL_SPEED,
-    INPUT_GPS_POS,
-    INPUT_GPS_SPD,
-    INPUT_WIFI,
-    INPUT_LOG_CYCLE,
+    NAV_OUTBOUND  = 2,
+    NAV_HOME      = 3,
+    NAV_MARK      = 4,
+    CAL_BASELINE  = 5,   // bin-aware baseline (off-scooter) cal
+    CAL_MOUNTED   = 6,   // bin-aware mounted (on-scooter) cal
+    CAL_SPEED     = 7,
+    INPUT_GPS_POS = 8,
+    INPUT_GPS_SPD = 9,
+    INPUT_WIFI    = 10,
+    INPUT_LOG_CYCLE = 11,
     // Local display-device settings
-    DISP_MODE,          // debug vs navigate
-    DISP_SPD_ETA,       // speed vs ETA
-    DISP_UNITS,         // m vs ft
-    DISP_HDG_TYPE,      // mag vs true
-    NAV_OP_MODE,        // dive vs surface (toggle GPS + WiFi)
-    POWER_OFF,          // save state and enter deep sleep
+    DISP_MODE     = 12,  // debug vs navigate
+    DISP_SPD_ETA  = 13,  // speed vs ETA
+    DISP_UNITS    = 14,  // m vs ft
+    DISP_HDG_TYPE = 15,  // mag vs true
+    NAV_OP_MODE   = 16,  // dive vs surface (toggle GPS + WiFi)
+    POWER_OFF     = 17,  // save state and enter deep sleep
+    CAL_HDG       = 18,  // 4-point heading calibration
 };
 
 // ---------------------------------------------------------------------------
@@ -117,6 +118,11 @@ void updateNavState(uint8_t flags);
 // should enter distance-selection mode.  Cleared by clearSpeedCalPending().
 bool isPendingSpeedCal();
 void clearSpeedCalPending();
+
+// Returns true if the user just selected "Hdg cal" and the display device
+// should enter the 4-point heading calibration UI.  Cleared by clearHdgCalPending().
+bool isPendingHdgCal();
+void clearHdgCalPending();
 
 // Returns true if the user just selected "OFF" and the display device
 // should begin the power-off sequence.  Cleared by clearPowerOffPending().

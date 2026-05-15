@@ -27,6 +27,7 @@
 #include "util/mag_cal_collect.h"
 #include "util/nvs_state.h"
 #include "util/speed_cal.h"
+#include "util/hdg_cal.h"
 #include <dpvlink.h>
 
 // ---- AHRS state -----------------------------------------------------------
@@ -36,9 +37,18 @@ static MahonyState ahrs;
 static MahonyParams mahonyParams{ .kp = 1.0f, .ki = 0.002f, .useMag = true };
 
 // ---- Calibration data -----------------------------------------------------
-static MagCalib  magCal;
-static Calib3    gyroCal;
-static Calib3    accelCal;
+static MagCalib         magCal;
+static Calib3           gyroCal;
+static Calib3           accelCal;
+static hdg_cal::HdgCal  gHdgCal;
+static bool             gHdgCalValid = false;
+
+// Fourier heading cal sample collection (filled during CAPTURE_HDG_POINT commands)
+static constexpr int HDG_SAMPLE_MAX = 24;
+static float gHdgSamplesTarget[HDG_SAMPLE_MAX];
+static float gHdgSamplesIndicated[HDG_SAMPLE_MAX];
+static int   gHdgSampleCount = 0;
+static float gCurrentHeadingRawDeg = 0.0f;  // updated each loop; read by CAPTURE handler
 
 // ---- Nav state -------------------------------------------------------------
 static SystemState sysState = SystemState::BOOT;
@@ -47,6 +57,7 @@ static uint32_t lastSendMs    = 0;
 static uint32_t lastDiagMs    = 0;
 static uint32_t lastPosSaveMs = 0;
 static uint32_t lastFlowLogMs = 0;
+static uint16_t gBattMv       = 0;  // EMA-smoothed battery voltage (mV), 0 = not yet read
 static constexpr uint32_t SEND_INTERVAL_MS     = 100;   // 10 Hz link rate
 static constexpr uint32_t LOOP_INTERVAL_US     = 10000; // 100 Hz loop rate gate
 static constexpr uint32_t DIAG_INTERVAL_MS     = 1000;  // 1 Hz sensor diagnostics
@@ -115,7 +126,7 @@ static nvs_nav::State currentNavNvsState() {
 
 // ---- Forward declarations --------------------------------------------------
 static void loadCalibration();
-static void sendNavPacket(float heading, float pitch, float roll,
+static void sendNavPacket(float heading, float headingRaw, float pitch, float roll,
                           float speed, bool gpsSpeed,
                           float distHome, float bearHome,
                           float posX, float posY,
@@ -281,7 +292,11 @@ void loop() {
 
     // --- Extract Euler angles -----------------------------------------------
     Euler euler = quatToEulerRad(ahrs.q);
-    float headingDeg = headingDegFromYawRad(euler.yaw, DEFAULT_DECLINATION_DEG);
+    float headingRawDeg     = headingDegFromYawRad(euler.yaw, DEFAULT_DECLINATION_DEG);
+    gCurrentHeadingRawDeg   = headingRawDeg;  // expose for CAPTURE_HDG_POINT handler
+    float headingDeg        = gHdgCalValid
+                                  ? hdg_cal::apply(headingRawDeg, gHdgCal)
+                                  : headingRawDeg;
     float pitchDeg   = euler.pitch * (180.0f / M_PI);
     float rollDeg    = euler.roll  * (180.0f / M_PI);
 
@@ -395,7 +410,7 @@ void loop() {
     if (nowMs - lastSendMs >= SEND_INTERVAL_MS) {
         lastSendMs = nowMs;
         nav::Position pos = nav::getPosition();
-        sendNavPacket(headingDeg, pitchDeg, rollDeg, speed, useGpsSpeed,
+        sendNavPacket(headingDeg, headingRawDeg, pitchDeg, rollDeg, speed, useGpsSpeed,
                      nav::distanceToHome_m(), nav::bearingToHome_deg(),
                      pos.x_m, pos.y_m, fix);
 
@@ -752,15 +767,39 @@ static void loadCalibration() {
         imu::calibrateAccelerometer(accelCal, 2500);
         storage::saveCalib3("/accel_cal.json", accelCal);
     }
+
+    // Fourier heading calibration (optional — silently skip if absent)
+    if (hdg_cal::load(gHdgCal)) {
+        gHdgCalValid = true;
+        gBootFlags |= BOOT_HDG_CAL_OK;
+        Serial.printf("Fourier heading cal loaded (%d harmonic(s))\n", gHdgCal.n);
+    }
 }
 
-static void sendNavPacket(float heading, float pitch, float roll,
+// Average BATT_ADC_AVG_N ADC samples and fold in via EMA.
+// GPIO35 reads VBAT through a 2:1 divider, so adc_mV * 2 = battery_mV.
+// Call once per sendNavPacket (10 Hz); EMA alpha gives a ~5 s smoothing window.
+static void updateBattMv() {
+    uint32_t sum = 0;
+    for (int i = 0; i < BATT_ADC_AVG_N; i++) sum += analogRead(BATT_ADC_PIN);
+    uint32_t raw_adc = sum / BATT_ADC_AVG_N;
+    uint16_t sample_mv = (uint16_t)((raw_adc * 3300UL * 2) / 4095);
+    if (gBattMv == 0) {
+        gBattMv = sample_mv;  // seed EMA on first read
+    } else {
+        // EMA alpha ≈ 0.02 → ~50-sample (~5 s) smoothing window
+        gBattMv = (uint16_t)(gBattMv + (int32_t)(sample_mv - gBattMv) * 2 / 100);
+    }
+}
+
+static void sendNavPacket(float heading, float headingRaw, float pitch, float roll,
                           float speed, bool gpsSpeed,
                           float distHome, float bearHome,
                           float posX, float posY,
                           const GpsFix& fix) {
     NavPacket pkt{};
     pkt.heading_deg      = heading;
+    pkt.heading_raw_deg  = headingRaw;
     pkt.pitch_deg        = pitch;
     pkt.roll_deg         = roll;
     pkt.speed_ms         = speed;
@@ -784,6 +823,9 @@ static void sendNavPacket(float heading, float pitch, float roll,
     flags |= (static_cast<uint8_t>(logging::getLevel()) << FLAG_LOG_LEVEL_SHIFT) & FLAG_LOG_LEVEL_MASK;
     pkt.flags      = flags;
     pkt.boot_flags = gBootFlags;
+
+    updateBattMv();
+    pkt.batt_mv = gBattMv;
 
     // Pack calibration progress when in CALIBRATION state
     if (sysState == SystemState::CALIBRATION && gInCal) {
@@ -1048,6 +1090,42 @@ static void handleDisplayCmd() {
                         }
                         nvs_nav::save(currentNavNvsState());
                         break;
+                    case DisplayCmd::START_HDG_FOURIER_CAL:
+                        gHdgSampleCount = 0;
+                        Serial.println("[HDG_CAL] Collection started — buffer reset");
+                        break;
+                    case DisplayCmd::CAPTURE_HDG_POINT: {
+                        float target = parseCaptureHdgPoint(cmdBuf, cmdPos);
+                        if (gHdgSampleCount < HDG_SAMPLE_MAX) {
+                            gHdgSamplesTarget[gHdgSampleCount]    = target;
+                            gHdgSamplesIndicated[gHdgSampleCount] = gCurrentHeadingRawDeg;
+                            Serial.printf("[HDG_CAL] Point %d: target=%.0f indicated=%.1f\n",
+                                          gHdgSampleCount + 1, target, gCurrentHeadingRawDeg);
+                            gHdgSampleCount++;
+                        } else {
+                            Serial.println("[HDG_CAL] WARNING: sample buffer full, point discarded");
+                        }
+                        break;
+                    }
+                    case DisplayCmd::FINALIZE_HDG_CAL: {
+                        File f = LittleFS.open(hdg_cal::SAMPLES_FILE_PATH, FILE_WRITE);
+                        if (f) {
+                            f.println("actual,indicated");
+                            for (int i = 0; i < gHdgSampleCount; i++) {
+                                f.printf("%.1f,%.1f\n",
+                                         gHdgSamplesTarget[i],
+                                         gHdgSamplesIndicated[i]);
+                            }
+                            f.close();
+                            Serial.printf("[HDG_CAL] Saved %d samples to %s\n",
+                                          gHdgSampleCount, hdg_cal::SAMPLES_FILE_PATH);
+                        } else {
+                            Serial.printf("[HDG_CAL] ERROR: could not open %s\n",
+                                          hdg_cal::SAMPLES_FILE_PATH);
+                        }
+                        gHdgSampleCount = 0;
+                        break;
+                    }
                     case DisplayCmd::POWER_OFF: {
                         Serial.println("CMD: POWER_OFF — saving state and entering deep sleep");
                         // Persist current position and toggle states before sleeping.

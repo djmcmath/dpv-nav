@@ -1,311 +1,114 @@
 # Sensor Calibration Guide
 
-## The short version
+## Overview
 
-The compass chip can't read north accurately out of the box — nearby magnets, motors, and metal
-bend the field. Calibration measures and corrects for this.
+DPV-Nav calibrates four sensors/subsystems: magnetometer, gyroscope, accelerometer, and heading. Calibration data is persisted to LittleFS as JSON files on the nav device. On boot, saved calibration loads in under a second; if files are missing, blocking calibration runs automatically (except for heading, which is optional).
 
-**Two-stage process:**
-
-1. **Baseline cal** — Characterize the sensor on its own (off-scooter). Covers the full sphere.
-2. **Mounted cal** — Correct for what the DPV's motors and batteries add. Done on-scooter.
-
-Both stages follow the same pattern:
-- Run a collection on the device (menu → CAL)
-- Download the CSV to a PC
-- Run a Python script to fit the calibration
-- Upload the resulting JSON and reboot
-
-If either stage is missing, the device still operates — it just uses whatever it has. Baseline only
-is much better than nothing. Both stages gives you the best heading accuracy.
-
-Gyro and accelerometer calibrate automatically on first boot. You normally only need to do the mag
-calibration manually.
-
----
-
-## Prerequisites
-
-Install Python dependencies once:
-```bash
-pip install numpy scipy
-```
-
-You will need to download CSV files from the ESP32's LittleFS flash. Use the web interface
-(WiFi must be enabled, get the device IP from the serial log) or a serial file-transfer tool.
-
----
-
-## Stage 1: Baseline Calibration
-
-Do this with the nav unit on the bench — not mounted on the DPV. The battery and electronics
-that live on the nav PCB should be present; the DPV motors should not be.
-
-### Step 1a: Collect baseline samples
-
-1. Power on both devices (nav + display)
-2. Open menu (short press BTN1)
-3. Navigate to **CAL > Baseline** and press BTN2
-
-The OLED switches to a calibration grid: 12 columns (heading sectors, 0° through 330°) and
-5 rows (elevation bands: nose-up 60°, 30°, level, -30°, -60°). Each cell starts dark, turns
-**yellow** at 5 samples, and **green** at 15 samples.
-
-**Rotate the device through all orientations:**
-- Spin slowly in a full circle while flat → fills the middle row (level band)
-- Tilt nose up ~30° and spin again → fills row above center
-- Tilt nose down ~30° and spin again → fills row below center
-- Tilt nose up ~60° and spin → fills top row
-- Tilt nose down ~60° and spin → fills bottom row
-- Diagonal combinations fill any remaining cells
-
-Take your time. Slow, deliberate rotation covers more unique orientations than fast spinning.
-Expect 3–8 minutes for full green coverage. **There is no time limit.**
-
-The collection ends automatically when all cells are green. The screen returns to navigation
-and the samples are saved to `/mag_baseline_samples.csv` on LittleFS.
-
-**Tip for the flat rotation:** Include one slow, smooth 360° spin while holding the device as
-flat as possible. This same data will improve horizontal heading accuracy in the Python script.
-Note roughly which portion of your collection was flat — you may want to export it separately.
-
-### Step 1b: Export the CSV
-
-Download `/mag_baseline_samples.csv` from LittleFS to your PC. Save it in the `tools/` directory
-(or wherever you'll run the Python script from).
-
-### Step 1c: Run the baseline Python script
-
-```bash
-cd tools
-python mag_calibration.py --mode baseline mag_baseline_samples.csv
-```
-
-If you did a dedicated flat rotation and have it as a separate file:
-```bash
-python mag_calibration.py --mode baseline mag_baseline_samples.csv --flat mag_flat.csv
-```
-
-**What you should see:**
+## Calibration Files
 
 ```
-BASELINE CALIBRATION RESULTS
-============================================================
-
-Hard-Iron Offset (bias):
-  X:  1606.52
-  Y:  2697.98
-  Z:  6227.00
-
-Soft-Iron Correction Matrix:
-  [1.023456, 0.001234, 0.000000]
-  [0.001234, 0.978901, 0.000000]
-  [0.000000, 0.000000, 1.000000]
-
-Diagnostics:
-  Samples: 847
-  Ellipsoid radii:  [1214.3, 1244.7, 1198.6]
-  Radii variation: 1.87%
-
-Residuals:
-  RMS error:  81.77  (2.37%)
-  Max |error|: 156.23  (4.52%)
-  Quality: ACCEPTABLE (2-5% RMS)
+/mag_base.json      — Baseline magnetometer (hard-iron + soft-iron 3×3), off-scooter cal
+/mag_mount.json     — Mounted magnetometer correction (hard-iron + soft-iron 3×3), on-scooter
+/mag_cal.json       — Legacy single-stage mag cal (loaded as fallback if base/mount absent)
+/gyro_cal.json      — Gyroscope bias
+/accel_cal.json     — Accelerometer bias + scale
+/hdg_samples.csv    — Raw (target, indicated) pairs from heading cal collection run
+/hdg_fourier.json   — Fourier heading correction (n harmonics + coefficient array, optional)
+/speed_cal.json     — Flow sensor k-factor history (rolling 6-run average)
 ```
 
-**Interpreting baseline output:**
+### JSON Formats
 
-| Metric | Good | Acceptable | Problem — recollect |
-|--------|------|------------|---------------------|
-| Samples | > 500 | 200–500 | < 100 |
-| RMS error % | < 2% | 2–5% | > 5% |
-| Radii variation | < 5% | 5–10% | > 10% (WARNING printed) |
-
-If you provided flat data, a heading accuracy section also appears:
-
-```
-HEADING ACCURACY ANALYSIS (flat device)
-============================================================
-
-  Calibrated flat circle:
-  Center: (-0.3 / -0.004 uT,  -9.7 / -0.142 uT)
-  Radius: X=1214.0  Y=1244.8   Roundness=0.975
-
-  Heading accuracy estimate:
-  From circle offset:  +/-0.5 deg
-  From ellipticity:    +/-1.4 deg
-  Total (worst case):  +/-1.9 deg
-  Rating: EXCELLENT
+**MagCalib** (base and mount files):
+```json
+{
+  "bias": { "x": 45.2, "y": -28.7, "z": 15.4 },
+  "softIron": [
+    [1.02, 0.01, -0.003],
+    [0.01, 0.98, 0.002],
+    [-0.003, 0.002, 1.01]
+  ]
+}
 ```
 
-| Heading accuracy | Rating | What it means |
-|-----------------|--------|---------------|
-| < 2° total | EXCELLENT | As good as it gets |
-| 2–5° total | GOOD | Acceptable for navigation |
-| > 5° total | POOR | Recollect flat rotation data; make sure the device was actually flat |
-
-**If RMS is POOR (> 5%):** The most common cause is incomplete spherical coverage —
-not all grid cells were green, or the rotation was too fast for the bins to fill. Re-run
-the collection and move more slowly through the extreme elevation bands (top and bottom rows).
-
-The script writes `mag_base.json` in the current directory.
-
-### Step 1d: Upload mag_base.json and reboot
-
-> **Warning:** `uploadfs` reformats the entire LittleFS filesystem. All files — including
-> gyro and accel calibration — are wiped. Copy anything you want to keep into the `data/`
-> directory before running it; they will be restored alongside your new calibration.
-
-1. Copy `tools/mag_base.json` to `data/mag_base.json`
-2. If you have existing `gyro_cal.json` or `accel_cal.json`, copy those to `data/` as well
-3. Upload:
-   ```bash
-   pio run -e nav -t uploadfs
-   ```
-4. Power-cycle the nav device
-
-In the serial log on boot you should see:
-```
-[STORAGE] mag_base.json loaded
+**Calib3** (gyro/accel):
+```json
+{
+  "bias": { "x": 0.1, "y": -0.05, "z": 0.03 },
+  "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+}
 ```
 
-The device is now running with baseline calibration. Heading accuracy at this point is good
-for bench testing. For use on the DPV, proceed to Stage 2.
-
----
-
-## Stage 2: Mounted Calibration
-
-This stage corrects for the magnetic distortion from the DPV itself — primarily the motors
-and motor controller. Do this with the nav unit installed on the scooter in its normal
-operating position, DPV fully powered.
-
-Baseline calibration (Stage 1) must be loaded before running this step.
-
-### Step 2a: Collect mounted samples
-
-1. Power on DPV with nav unit installed
-2. Open menu (BTN1)
-3. Navigate to **CAL > Mounted** and press BTN2
-
-The OLED shows a 12×3 grid (same 12 heading sectors, 3 elevation bands: nose-up 30°, level,
-nose-down 30°). The mounted cal only covers ±30° pitch — reflecting the range of angles
-possible while maneuvering a DPV underwater.
-
-**What to do:**
-- Drive the DPV in a slow, full circle at level trim → fills the center row
-- Drive a circle with mild nose-up angle (10–25°) → fills top row
-- Drive a circle with mild nose-down angle (10–25°) → fills bottom row
-
-Keep your speed slow and constant. Abrupt changes confuse the heading estimate that drives
-bin assignment. The motors must be running — they're the main magnetic source you're
-calibrating against.
-
-Collection ends when all cells are green. Saves `/mag_mounted_samples.csv` and returns to
-navigation.
-
-### Step 2b: Export the CSV
-
-Download `/mag_mounted_samples.csv` from LittleFS to your PC. Save it in `tools/`.
-
-### Step 2c: Run the mounted Python script
-
-```bash
-cd tools
-python mag_calibration.py --mode mounted --base mag_base.json mag_mounted_samples.csv
+**HdgFourier** (Fourier heading correction):
+```json
+{ "n": 4, "c": [5.85, -0.39, -5.10, 0.16, -16.54, -0.76, 1.88, -0.27, 2.92] }
 ```
+`n` is the number of harmonics (1–4). `c` is the Fourier coefficient array: `[DC, cos1, sin1, cos2, sin2, ...]` (length `2n+1`). Generated offline by `tools/fourier_fit.py`.
 
-**What you should see:**
+## Boot Sequence
 
 ```
-MOUNTED CALIBRATION CORRECTION RESULTS
-============================================================
-
-Mounted hard-iron offset (b_mount):
-  X:  +0.0234
-  Y:  -0.0156
-  Z:     0.0000  (locked)
-
-Mounted soft-iron correction (M_mount, diagonal):
-  [1.023400, 0.000000, 0.000000]
-  [0.000000, 0.978500, 0.000000]
-  [0.000000, 0.000000, 1.000000]
-
-Diagnostics:
-  Samples: 412  |  Scale fit method: algebraic
-  Flat circle radius (base-corrected): 1198.45 counts  (17.51 µT)
-  Ellipticity heading error (pre-correction): ±4.8°
-  RMS error (after correction): 45.23  (1.87%)
+For mag: try two-stage chain (mag_base.json + mag_mount.json)
+          → fall back to legacy mag_cal.json
+          → fall back to blocking 90s min/max sweep (last resort)
+For gyro: load gyro_cal.json or run 10s stationary bias cal
+For accel: load accel_cal.json or run 6-point orientation cal
+For hdg: load hdg_fourier.json — silently skip if absent (optional)
 ```
 
-**Interpreting mounted output:**
+## Magnetometer Calibration
 
-- **Ellipticity heading error (pre-correction):** How much heading error the DPV's fields
-  were adding before this correction. 2–15° is normal and expected. If it's near zero, the
-  scooter has minimal magnetic signature and the mounted cal is just refining the bias.
-- **RMS error (after correction):** Should be < 3%. If it's > 5%, collect more samples with
-  better heading coverage.
-- **Scale correction > 15%:** The script will note this. It is plausible for a DPV with
-  strong motor fields. Proceed and verify with the compass check below.
-- **Scale correction < 2%:** Also noted. The DPV's soft-iron effect is small; the main
-  benefit of mounted cal is the hard-iron (b_mount) correction.
+### Two-stage calibration chain
 
-The script writes `mag_mount.json`.
+The preferred calibration workflow uses two stages, each producing a JSON file that is the result of offline ellipsoid fitting (see [mag-calibration-workflow.md](mag-calibration-workflow.md)):
 
-### Step 2d: Upload mag_mount.json and reboot
+| Stage | Menu item | File | When to do |
+|-------|-----------|------|-----------|
+| Baseline | CAL > Baseline | `/mag_base.json` | First time, or after hardware change. Device off the DPV. Covers full sphere. |
+| Mounted | CAL > Mounted | `/mag_mount.json` | After baseline, with device installed on DPV. Corrects for DPV magnetic signature. |
 
-1. Copy `tools/mag_mount.json` to `data/mag_mount.json`
-2. Also ensure `data/mag_base.json` is present (it should be from Stage 1)
-3. Run:
-   ```bash
-   pio run -e nav -t uploadfs
-   ```
-4. Power-cycle the nav device
+Both calibrations collect raw samples using a **bin-aware** approach: the screen shows a heading × elevation grid, and bins fill green as adequate samples are collected. When all required bins are green, the calibration is complete and the sample CSV is saved to LittleFS for offline processing.
 
-In the serial log on boot you should see both lines:
-```
-[STORAGE] mag_base.json loaded
-[STORAGE] mag_mount.json loaded
-```
+### Running Baseline Calibration
 
-The device now applies the full correction chain on every magnetometer reading:
-`corrected = M_mount × (M_base × (raw − b_base) − b_mount)`
+1. **Remove device from DPV** and take it somewhere with low magnetic interference.
+2. Open menu (BTN1) → **CAL > Baseline**.
+3. The display switches to a bin-coverage grid screen. Rotate the device through all orientations — roll, pitch, yaw, and diagonals.
+4. Fill all bins green (the grid fills from left to right; level row must be 100%, tilted rows ~90%).
+5. When all required bins are green the display shows "DONE" briefly, then CSV data is saved to `/mag_baseline_samples.csv` on LittleFS.
+6. Export the CSV and run the Python offline fitting tool: `python tools/mag_calibration.py mag_baseline_samples.csv`
+7. Upload the generated `mag_base.json` to LittleFS.
 
----
+### Running Mounted Calibration
 
-## Verification
+1. **Mount device on DPV** in its normal installed position (all motors, batteries, and other magnetic sources present and at operational distance).
+2. Open menu (BTN1) → **CAL > Mounted**.
+3. Rotate the DPV through heading and tilt orientations. DPV operation is primarily horizontal so the grid only requires 3 elevation bands.
+4. Fill all required bins green, then export CSV (`/mag_mounted_samples.csv`) and run:
+   `python tools/mag_calibration.py mag_baseline_samples.csv mag_mounted_samples.csv`
+5. Upload the generated `mag_mount.json` to LittleFS.
 
-**This is the test that matters.** Do it before trusting the system for a dive.
+### What each calibration corrects
 
-You need a reference compass — a standalone dive compass or a phone compass app. A phone is
-good enough here since you're looking for gross errors, not ±1° accuracy.
+| Distortion | Baseline | Mounted |
+|-----------|---------|---------|
+| Hard-iron bias (sensor, PCB) | ✓ | Refined |
+| Soft-iron coupling (PCB, enclosure) | ✓ | Refined |
+| DPV motor/battery magnetic signature | — | ✓ |
 
-1. Install the nav unit on the DPV in its normal diving position
-2. Hold the DPV flat and level (as you would while diving)
-3. Point to **8 headings**: N, NE, E, SE, S, SW, W, NW
-4. At each heading, compare what the DPV display shows against your reference compass
-5. Write down the error (positive = DPV reads too high)
+### Forcing re-calibration
 
-**Interpreting results:**
-
-| Error pattern | What it means | Action |
-|---------------|---------------|--------|
-| All errors within ±5°, alternating sign | Calibration is good | You're done |
-| All errors biased in one direction (e.g. all positive) | Residual hard-iron offset | Redo flat rotation; rerun baseline with `--flat` |
-| Large swings (e.g. +20° at N, −15° at E) | Soft-iron still distorted | Redo baseline with more complete spherical coverage |
-| Heading reads backwards (increasing counterclockwise) | Axis map problem | Check CLAUDE.md magnetometer coordinate frame section |
-
-**Pass criterion:** All 8 headings within ±5° of reference. If any heading is off by more
-than 10°, do not dive with this unit — recalibrate first.
-
----
+Delete the corresponding JSON file(s) from LittleFS and reboot, or run the menu cal workflow to generate new sample CSVs.
 
 ## Gyroscope Calibration
 
-Runs automatically on first boot if `/gyro_cal.json` is absent.
+**Method:** Stationary bias sampling (runs at boot if no file found)
 
-**Procedure:** Place the device on a stable surface. Keep it completely still. The system
-samples for 10 seconds and saves the bias offset.
+**Procedure:**
+1. Place device on a stable, level surface
+2. Keep completely still — no movement or vibration
+3. System samples for 10 seconds at ~100 Hz
+4. Average of all samples = bias offset; scale remains 1.0
 
 **Typical values:**
 - Good: ±10–50 raw counts (±0.001 rad/s)
@@ -317,48 +120,121 @@ To force recalibration: delete `/gyro_cal.json` from LittleFS and reboot.
 
 ## Accelerometer Calibration
 
-Runs automatically on first boot if `/accel_cal.json` is absent.
+**Method:** 6-point orientation sequence (runs at boot if no file found)
 
-**Procedure:** Follow the serial prompts. Hold each of 6 faces pointing down (X+, X−, Y+, Y−,
-Z+, Z−) for 2.5 seconds each. The device prompts before each orientation.
+**Procedure:**
+1. System prompts for 6 orientations: X+, X-, Y+, Y-, Z+, Z- facing down
+2. Hold device steady in each orientation for 2.5 seconds while it samples
+3. System computes: `bias = (max + min) / 2`, `scale = 9.81 / (max - bias)` per axis
 
 **Typical values:**
 - Bias: ±50 raw counts (±0.004 m/s²)
-- Scale per axis: 0.98–1.02
+- Scale: 0.98 – 1.02 per axis
 
-To force recalibration: delete `/accel_cal.json` from LittleFS and reboot.
+## Fourier Heading Calibration
 
----
+**Purpose:** After magnetometer calibration, complex systematic heading errors typically remain (5–20°) due to the DPV's magnetic geometry (motor, batteries, structural asymmetries). The 4-harmonic Fourier correction captures these non-sinusoidal errors and reduces residual error to ~2° max.
 
-## Calibration Files on LittleFS
+**When to do it:** After completing baseline + mounted mag cal. Run in a magnetically clean environment (living room on a wooden floor — not in a garage with rebar in concrete). The device must already have a working magnetometer calibration.
+
+**Trigger:** Menu → **CAL > Hdg cal**
+
+### Procedure
+
+**Part 1 — On-device data collection:**
+
+1. Open menu (BTN1) → **CAL > Hdg cal**. The menu closes and the heading cal screen appears.
+2. The screen shows **Step 1/12: Target 000°** and the live AHRS heading in large text.
+3. Align the DPV to 0° (North). Watch the heading readout stabilise.
+4. Press **BTN2** to capture that heading. The screen advances to **Step 2/12: Target 030°**.
+5. Repeat for all 12 steps (every 30°: 0°, 30°, 60°, … 330°). Each BTN2 press captures the current indicated heading and records `(target, indicated)` on the nav device.
+6. After Step 12, the nav device saves `/hdg_samples.csv` and the done screen appears:
 
 ```
-/mag_base.json          — Baseline mag cal (hard-iron offset + soft-iron matrix)
-/mag_mount.json         — Mounted correction (applied on top of base)
-/gyro_cal.json          — Gyro bias
-/accel_cal.json         — Accel bias + scale
-/mag_baseline_samples.csv   — Raw baseline collection (temporary; safe to delete after upload)
-/mag_mounted_samples.csv    — Raw mounted collection (temporary; safe to delete after upload)
+HDG CAL
+─────────────────
+12 points saved
+
+Export /hdg_samples.csv
+Run fourier_fit.py
+Upload hdg_fourier.json
+─────────────────
+Press BTN2 to exit
 ```
 
-The legacy `/mag_cal.json` (single-stage, hard-iron only) is still read as a fallback if
-`mag_base.json` is absent. The bin-aware two-stage workflow supersedes it.
+7. Press **BTN2** to return to normal navigation.
 
----
+**Part 2 — Offline fit and upload:**
+
+1. Download `/hdg_samples.csv` from the nav device (via web interface or LittleFS tools).
+2. Run: `python tools/fourier_fit.py hdg_samples.csv [--plot]`
+   - Prints per-point residuals and selects the best number of harmonics (1–4).
+   - Saves `hdg_fourier.json` in the current directory.
+   - Optionally saves `hdg_fourier_fit.png` (requires `--plot`).
+3. Upload `hdg_fourier.json` to the nav device LittleFS root.
+4. Reboot — the correction loads automatically.
+
+### CSV format
+
+`/hdg_samples.csv` has two columns:
+
+```csv
+actual,indicated
+0.0,4.7
+30.0,24.3
+60.0,52.1
+...
+```
+
+`actual` is the target heading the user aligned to; `indicated` is what the AHRS reported.
+
+### How it works at runtime
+
+The nav device loads `hdg_fourier.json` on boot and evaluates the Fourier series at each heading computation:
+
+```
+correction(θ) = c[0] + c[1]·cos(θ) + c[2]·sin(θ) + c[3]·cos(2θ) + c[4]·sin(2θ) + ...
+headingDeg = headingRawDeg + correction(headingRawDeg)
+```
+
+`heading_raw_deg` is always sent in NavPacket alongside the corrected `heading_deg`, so the display can show pre-correction readings during recalibration.
+
+### Recalibrating
+
+Run **CAL > Hdg cal** again, then redo the offline fit and upload the new `hdg_fourier.json`.
+
+## Storage API
+
+```cpp
+#include "util/storage.h"
+
+// Magnetometer
+storage::saveMagCalibration("/mag_base.json", magCal);
+storage::loadMagCalibration("/mag_base.json", magCal);
+
+// Gyro / Accel
+storage::saveCalib3("/gyro_cal.json", gyroCal);
+storage::loadCalib3("/gyro_cal.json", gyroCal);
+
+// Heading cal (read-only on device — file is uploaded by user after offline fit)
+#include "util/hdg_cal.h"
+hdg_cal::load(gHdgCal);                    // returns bool; reads /hdg_fourier.json
+hdg_cal::apply(headingDeg, gHdgCal);       // returns corrected heading
+```
+
+Files are stored on LittleFS (ESP32 internal flash). Total calibration data is <5 KB.
 
 ## Troubleshooting
 
-| Symptom | Likely cause | Fix |
-|---------|--------------|-----|
-| Boot log shows no `[STORAGE] mag_base.json loaded` | File missing or uploadfs not run | Verify `data/mag_base.json` exists before uploadfs |
-| Heading correct on bench but wrong on DPV | Mounted cal not loaded | Check boot log for `mag_mount.json` line |
-| Heading drifts slowly while stationary | Gyro bias not calibrated | Check `/gyro_cal.json` loaded at boot |
-| All 8 verification headings off by same amount | Residual hard-iron bias | Redo flat rotation; rerun baseline with `--flat` |
-| Heading oscillates ±20° with rotation | Soft-iron not corrected | Better baseline coverage; aim for all 60 bins green |
-| Python says POOR RMS (> 5%) | Insufficient 3D coverage | Slower rotation; cover all grid rows including top and bottom |
-| uploadfs wiped my gyro/accel cal | Forgot to copy to `data/` | Copy JSONs to `data/`, repeat uploadfs |
-
----
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| Heading off by consistent amount | Systematic hard-iron bias | Run mounted mag cal or Fourier heading cal |
+| Heading varies by orientation | Soft-iron distortion | Run full mounted cal + offline ellipsoid fit |
+| Fourier residuals > 5° after fit | Calibration in bad environment | Move away from concrete floors with rebar; redo collection |
+| Fourier residuals > 5° in clean env | Complex DPV magnetic geometry | Use 4 harmonics; check DPV for loose magnetic components |
+| Gyro bias very large (>500) | Device moved during cal | Repeat on stable surface, no vibration |
+| Accel scale way off (>1.1) | Wrong orientation or sensor issue | Verify axis labeling, check sensor |
+| "LittleFS mount failed" | Flash partition not configured | Check `board_build.filesystem = littlefs` in platformio.ini |
 
 ## Speed Calibration (Flow Sensor)
 
@@ -385,15 +261,14 @@ cross-section of the DPV inlet. For a 50 mm diameter tube: π × (0.025)² ≈ 0
 
 | Option | When to use |
 |--------|-------------|
-| **ACCEPT** | Normal run — adds to rolling average (up to 6 measurements) |
-| **RESET+ACCEPT** | DPV serviced, impeller changed, or first cal on new hardware — clears history |
-| **REJECT** | Run was suspect (aborted early, speed varied, DPV turned mid-run) |
+| **ACCEPT** | Normal run — adds to rolling average of up to 6 measurements |
+| **RESET+ACCEPT** | DPV serviced, impeller changed, or first cal on a new installation — clears history so old measurements from different hardware don't pollute the average |
+| **REJECT** | Run was suspect (aborted early, DPV speed changed mid-run, etc.) |
 
-### Troubleshooting speed cal
+### Setting FLOW_CROSS_SECTION_M2
 
-| Problem | Fix |
-|---------|-----|
-| Run starts before DPV is moving | Raise `SPEED_CAL_START_THRESHOLD_HZ` in config.h |
-| Run stops too early mid-swim | Lower `SPEED_CAL_STOP_THRESHOLD_MS` slightly |
-| k-factor wildly different from existing | Verify `FLOW_CROSS_SECTION_M2` is set correctly |
-| `/speed_cal.json` not found on first run | Normal — file is created on first ACCEPT |
+`FLOW_CROSS_SECTION_M2` in `config.h` must be set to the physical intake cross-section of the DPV inlet before speed cal can give sensible k-factor values. Measure the inner diameter of the flow sensor mounting tube:
+```
+area = π × (diameter/2)²
+```
+A 50 mm diameter tube → 0.00196 m² ≈ 0.002 m². This constant is not calibrated automatically.

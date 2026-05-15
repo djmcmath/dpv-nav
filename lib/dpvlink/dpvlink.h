@@ -45,6 +45,10 @@ struct NavPacket {
     float    speed_cal_k_existing;   // k-factor before this calibration run
     float    speed_cal_k_proposed;   // computed k-factor from this run
 
+    float    heading_raw_deg;      // heading before hdg_cal correction (same as heading_deg if no cal loaded)
+
+    uint16_t batt_mv;             // battery voltage in millivolts (0 = unknown / not read yet)
+
     // Boot status flags — set once during nav device setup(), sent in every packet.
     // Display uses these to show the boot results screen after first link contact.
     uint8_t boot_flags;  // see BOOT_* constants below
@@ -56,6 +60,7 @@ constexpr uint8_t BOOT_GPS_OK       = 0x02;  // GPS init succeeded
 constexpr uint8_t BOOT_MAG_CAL_OK   = 0x04;  // mag calibration loaded from flash
 constexpr uint8_t BOOT_GYRO_CAL_OK  = 0x08;  // gyro calibration loaded from flash
 constexpr uint8_t BOOT_ACCEL_CAL_OK = 0x10;  // accel calibration loaded from flash
+constexpr uint8_t BOOT_HDG_CAL_OK   = 0x20;  // Fourier heading calibration loaded from flash
 
 // NavPacket.flags bit definitions
 constexpr uint8_t FLAG_TRUE_HEADING    = 0x01;  // 1 = true heading, 0 = magnetic
@@ -151,6 +156,9 @@ enum class DisplayCmd : uint8_t {
     SPEED_CAL_ACCEPT       = 21, // accept result and add to rolling history
     SPEED_CAL_REJECT       = 22, // reject result, discard measurement
     POWER_OFF              = 25, // save state and enter deep sleep
+    START_HDG_FOURIER_CAL  = 26, // begin Fourier heading cal data collection (resets sample buffer)
+    CAPTURE_HDG_POINT      = 27, // capture one (target, indicated) pair (carries float "tgt" field)
+    FINALIZE_HDG_CAL       = 28, // end collection, save /hdg_samples.csv on nav device
 };
 
 // ---------------------------------------------------------------------------
@@ -183,3 +191,10 @@ size_t displaySpeedCalStartToBytes(uint16_t dist_ft, char* buf, size_t bufLen);
 // Extract the "dist" field from a parsed START_SPEED_CAL command buffer.
 // Returns 300 (default) if the field is absent.
 uint16_t parseSpeedCalDist(const char* buf, size_t len);
+
+// Serialize CAPTURE_HDG_POINT with the target heading (degrees).
+size_t displayCaptureHdgPointToBytes(float target_deg, char* buf, size_t bufLen);
+
+// Extract the target heading from a CAPTURE_HDG_POINT command buffer.
+// Returns 0.0 if the "tgt" field is absent.
+float parseCaptureHdgPoint(const char* buf, size_t len);

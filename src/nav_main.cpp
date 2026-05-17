@@ -192,13 +192,21 @@ void setup() {
         }
 
         // Flow sensor
-        flow::FlowConfig flowCfg{
-            .k_factor         = FLOW_K_FACTOR,
-            .cross_section_m2 = FLOW_CROSS_SECTION_M2,
-            .avg_period_s     = FLOW_AVG_PERIOD_S
-        };
-        flow::init(flowCfg);
-        Serial.println("Flow sensor init OK");
+        {
+            speed_cal::History hist = speed_cal::load();
+            float k = speed_cal::averageK(hist, FLOW_K_FACTOR);
+            flow::FlowConfig flowCfg{
+                .k_factor         = k,
+                .cross_section_m2 = FLOW_CROSS_SECTION_M2,
+                .avg_period_s     = FLOW_AVG_PERIOD_S
+            };
+            flow::init(flowCfg);
+            if (hist.count > 0) {
+                Serial.printf("Flow sensor init OK (speed_cal: k=%.4f, %u runs)\n", k, hist.count);
+            } else {
+                Serial.printf("Flow sensor init OK (speed_cal: no history, using default k=%.4f)\n", k);
+            }
+        }
 
         // Position model
         nav::init(DEFAULT_BASELINE_LAT, DEFAULT_BASELINE_LON);

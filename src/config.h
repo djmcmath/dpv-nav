@@ -10,7 +10,7 @@ constexpr const char* WIFI_AP_PASS        = "password";
 constexpr uint32_t    WIFI_STA_TIMEOUT_MS = 10000;
 
 // Flow sensor configuration (hall-effect pulse output)
-constexpr float FLOW_K_FACTOR         = 1.0f;   // freq_hz = K * flow_lpm (pulses per L/min)
+constexpr float FLOW_K_FACTOR         = 0.168f; // freq_hz = K * flow_lpm (pulses per L/min)
 constexpr float FLOW_CROSS_SECTION_M2 = 0.002f;  // Intake cross-section area (m²) — calibrate to match DPV
 
 // Flow speed averaging

@@ -62,6 +62,7 @@ constexpr uint32_t NVS_POS_SAVE_INTERVAL_MS = 30000;  // 30 seconds
 constexpr uint32_t LOG_LOW_INTERVAL_MS  = 1000;   // 1 entry per second (LOW level)
 constexpr uint32_t LOG_HIGH_INTERVAL_MS = 1000;   // 1 entry per second (HIGH level)
 
+
 // ---------------------------------------------------------------------------
 // Magnetometer calibration bin parameters
 // ---------------------------------------------------------------------------

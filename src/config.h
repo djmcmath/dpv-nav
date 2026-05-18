@@ -4,7 +4,7 @@
 
 // WiFi configuration
 constexpr const char* WIFI_STA_SSID       = "DansMain";
-constexpr const char* WIFI_STA_PASS       = "PassWord99";
+constexpr const char* WIFI_STA_PASS       = "Password@99";
 constexpr const char* WIFI_AP_SSID        = "Tern";
 constexpr const char* WIFI_AP_PASS        = "password";
 constexpr uint32_t    WIFI_STA_TIMEOUT_MS = 10000;
@@ -59,7 +59,7 @@ constexpr uint32_t DEBUG_SEND_INTERVAL_MS = 200;  // 5 Hz
 constexpr uint32_t NVS_POS_SAVE_INTERVAL_MS = 30000;  // 30 seconds
 
 // Data logging intervals (ms) — minimum time between log entries per level
-constexpr uint32_t LOG_LOW_INTERVAL_MS  = 5000;   // 1 entry per 5 seconds (LOW level)
+constexpr uint32_t LOG_LOW_INTERVAL_MS  = 1000;   // 1 entry per second (LOW level)
 constexpr uint32_t LOG_HIGH_INTERVAL_MS = 1000;   // 1 entry per second (HIGH level)
 
 // ---------------------------------------------------------------------------

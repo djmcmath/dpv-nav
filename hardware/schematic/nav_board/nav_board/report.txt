@@ -1,0 +1,12 @@
+Plotted to 'D:\Documents\dpv-nav\hardware\schematic\nav_board\nav_board\fabrication\nav_board-F_Cu.gbr'.
+Plotted to 'D:\Documents\dpv-nav\hardware\schematic\nav_board\nav_board\fabrication\nav_board-B_Cu.gbr'.
+Plotted to 'D:\Documents\dpv-nav\hardware\schematic\nav_board\nav_board\fabrication\nav_board-F_Paste.gbr'.
+Plotted to 'D:\Documents\dpv-nav\hardware\schematic\nav_board\nav_board\fabrication\nav_board-B_Paste.gbr'.
+Plotted to 'D:\Documents\dpv-nav\hardware\schematic\nav_board\nav_board\fabrication\nav_board-F_Silkscreen.gbr'.
+Plotted to 'D:\Documents\dpv-nav\hardware\schematic\nav_board\nav_board\fabrication\nav_board-B_Silkscreen.gbr'.
+Plotted to 'D:\Documents\dpv-nav\hardware\schematic\nav_board\nav_board\fabrication\nav_board-F_Mask.gbr'.
+Plotted to 'D:\Documents\dpv-nav\hardware\schematic\nav_board\nav_board\fabrication\nav_board-B_Mask.gbr'.
+Plotted to 'D:\Documents\dpv-nav\hardware\schematic\nav_board\nav_board\fabrication\nav_board-Edge_Cuts.gbr'.
+Created Gerber job file 'D:\Documents\dpv-nav\hardware\schematic\nav_board\nav_board\fabrication\nav_board-job.gbrjob'.
+Info: Done.
+Info: Done.

@@ -10,7 +10,7 @@ constexpr const char* WIFI_AP_PASS        = "password";
 constexpr uint32_t    WIFI_STA_TIMEOUT_MS = 10000;
 
 // Flow sensor configuration (hall-effect pulse output)
-constexpr float FLOW_K_FACTOR         = 0.168f; // freq_hz = K * flow_lpm (pulses per L/min)
+constexpr float FLOW_K_FACTOR         = 0.224f; // freq_hz = K * flow_lpm (pulses per L/min)
 constexpr float FLOW_CROSS_SECTION_M2 = 0.002f;  // Intake cross-section area (m²) — calibrate to match DPV
 
 // Flow speed averaging
@@ -169,10 +169,10 @@ constexpr int   GPS_CAP_2D_MAX_BARS   = 2;    // 2D-only fix → max 2 bars
 // Battery voltage indicator thresholds (millivolts, single-cell LiPo on Feather v1 BAT pin)
 // GPIO35 reads VBAT/2 via the onboard 2:1 divider; adjust if battery type differs.
 // ---------------------------------------------------------------------------
-constexpr uint16_t BATT_MV_FULL   = 4200;  // fully charged (100%)
+constexpr uint16_t BATT_MV_FULL   = 4500;  // fully charged (100%)
 constexpr uint16_t BATT_MV_EMPTY  = 3300;  // protection cutoff (0%)
-constexpr uint16_t BATT_MV_GREEN  = 3900;  // >= green (good)
-constexpr uint16_t BATT_MV_YELLOW = 3600;  // >= yellow (moderate); below = red (low)
+constexpr uint16_t BATT_MV_GREEN  = 3700;  // >= green (good)
+constexpr uint16_t BATT_MV_YELLOW = 3400;  // >= yellow (moderate); below = red (low)
 constexpr int      BATT_ADC_AVG_N = 8;     // samples averaged per battery reading
 
 // ---------------------------------------------------------------------------

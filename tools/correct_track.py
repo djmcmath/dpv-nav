@@ -2,27 +2,49 @@
 """
 Correct a DPV-nav dead-reckoning track to close on known GPS endpoints.
 
-Expects a log CSV with the structure:
-    GPS rows  →  Estimated rows  →  GPS rows   (no multi-gap)
+Supports any number of GPS "anchor" blocks in the log — one at the start,
+one at the end, and optionally one or more in the middle (e.g. a manually
+inserted wreck fix, a surface interval mid-dive, etc.).
+
+GPS block structure:
+    - A "GPS block" is a contiguous run of rows with pos_src = "G".
+    - The *last* row of a GPS block anchors the start of the following DR
+      segment (most recent fix before going under).
+    - The *first* row of a GPS block anchors the end of the preceding DR
+      segment (first confirmed fix after surfacing).
+    - For a single-row GPS block (e.g. a manually inserted midpoint), both
+      anchors are the same row.
 
 Two correction modes (--mode):
 
   joint (default)
-    Solves jointly for a constant speed scale (k) and constant heading offset
-    (theta) such that the re-integrated DR track starts at the last pre-dive
-    GPS fix and ends exactly at the first post-dive GPS fix.  Works best for
-    dives with significant net displacement between the two GPS fixes.
-    Optional --max-theta / --max-k-error flags clip to a feasible box and
-    report the residual closure error.
+    Solves jointly for a constant speed scale (k) and constant heading
+    offset (θ) using closed-form weighted least squares across all DR
+    segments.  A single (k, θ) pair is applied to every segment —
+    appropriate when the systematic errors (compass bias, flow-meter
+    k-factor) are constant across the whole dive.
+
+    Corrected EPs are re-integrated as: adj[i+1] = adj[i] + k·speed·dt
+    in direction (heading + θ).  This is the physically meaningful
+    reconstruction — what the device would have shown with correct
+    sensors.  GPS anchors are used only to solve for (k, θ); the
+    corrected track is not warped to force closure (use proportional
+    mode for that).  Per-segment closure gaps after correction are
+    reported and reflect the quality of the joint fit.
+
+    Normal equations decouple (A^T A = D · I₂, D = Σ|DR_i|²), so no
+    numpy is required.  The single-segment case is exact (zero gap).
+
+    Optional --max-theta / --max-k-error flags constrain the solution.
 
   proportional
-    Distributes the raw DR closure error (DR endpoint → post-dive GPS fix)
-    linearly across the track, weighted by cumulative path distance.  Makes no
-    assumption about error cause.  Works for loop dives where the joint solver
-    degenerates.  Always closes with 0 residual.
+    Applies distance-weighted closure correction independently to each
+    segment.  Makes no assumption about error cause.  Works for loop
+    segments where joint degenerates.  Always closes each segment exactly.
 
-GPS rows pass through unchanged in both modes.
+Note that GPS rows pass through unchanged in both modes.
 Adds columns: adj_pos_x_m, adj_pos_y_m, adj_lat, adj_lon
+In order to re-ingest into dive map, copy the adj_ columns back to the lat/lon columns.
 
 Usage:
     python tools/correct_track.py <logfile.csv> [--mode joint|proportional]
@@ -61,146 +83,200 @@ def xy_to_latlon(x: float, y: float):
     return lat, lon
 
 
-def find_estimated_segment(src: list[str]):
-    """Return (first_e, last_e, start_gps_idx, end_gps_idx) or exit."""
-    first_e = next((i for i, s in enumerate(src) if s == "E"), None)
-    if first_e is None:
-        print("Error: no estimated rows found in CSV.")
-        sys.exit(1)
+# ── Block parsing ─────────────────────────────────────────────────────────────
 
-    last_e_rev = next((i for i, s in enumerate(reversed(src)) if s == "E"), None)
-    last_e = len(src) - 1 - last_e_rev
-
-    start_gps_idx = first_e - 1
-    end_gps_idx = last_e + 1
-
-    if start_gps_idx < 0 or src[start_gps_idx] != "G":
-        print("Error: no GPS row immediately before the estimated section.")
-        sys.exit(1)
-
-    if end_gps_idx >= len(src) or src[end_gps_idx] != "G":
-        print("Error: no GPS row immediately after the estimated section.")
-        sys.exit(1)
-
-    return first_e, last_e, start_gps_idx, end_gps_idx
-
-
-def solve_k_theta(start_row, end_row, est_rows: list[dict]):
+def parse_blocks(rows: list[dict]) -> list[dict]:
     """
-    Compute speed scale k and heading offset theta (radians) such that
-    re-integrating est_rows with (k * speed, heading + theta) produces a
-    displacement equal to (end_GPS - start_GPS).
-
-    Derivation: the re-integration sums to:
-        adj_x = k * (cos(theta)*Sx + sin(theta)*Sy)
-        adj_y = k * (cos(theta)*Sy - sin(theta)*Sx)
-    Setting (adj_x, adj_y) = (dx, dy) and solving:
-        k     = hypot(dx, dy) / hypot(Sx, Sy)
-        theta = atan2(Sy, Sx) - atan2(dy, dx)
-
-    Sign convention for theta:
-        positive → raw DR points clockwise of target; add theta to all headings
-                   (physically: compass was reading too low)
-        negative → raw DR points counterclockwise of target; add theta to all
-                   headings (physically: compass was reading too high)
-
-    Returns (k, theta_rad, Sx, Sy, dx, dy).
+    Group consecutive rows with the same pos_src into blocks.
+    Returns list of {'type': str, 'rows': list[dict], 'start_idx': int}.
     """
-    x0, y0 = latlon_to_xy(float(start_row["lat"]), float(start_row["lon"]))
-    xN, yN = latlon_to_xy(float(end_row["lat"]), float(end_row["lon"]))
+    if not rows:
+        return []
+    blocks = []
+    cur_type  = rows[0]["pos_src"]
+    cur_rows  = [rows[0]]
+    cur_start = 0
+    for i, row in enumerate(rows[1:], 1):
+        src = row["pos_src"]
+        if src == cur_type:
+            cur_rows.append(row)
+        else:
+            blocks.append({"type": cur_type, "rows": list(cur_rows), "start_idx": cur_start})
+            cur_type  = src
+            cur_rows  = [row]
+            cur_start = i
+    blocks.append({"type": cur_type, "rows": cur_rows, "start_idx": cur_start})
+    return blocks
 
-    dx = xN - x0
-    dy = yN - y0
+
+def validate_blocks(blocks: list[dict]) -> None:
+    """Validate: must alternate G/E starting and ending with G."""
+    if not blocks:
+        print("Error: no data rows found.")
+        sys.exit(1)
+    if blocks[0]["type"] != "G":
+        print("Error: file must begin with GPS rows (pos_src = 'G').")
+        sys.exit(1)
+    if blocks[-1]["type"] != "G":
+        print("Error: file must end with GPS rows (pos_src = 'G').")
+        sys.exit(1)
+    for i, b in enumerate(blocks):
+        expected = "G" if i % 2 == 0 else "E"
+        if b["type"] != expected:
+            print(f"Error: expected {'GPS' if expected == 'G' else 'estimated'} block "
+                  f"at block position {i}, found '{b['type']}'.")
+            sys.exit(1)
+    if not any(b["type"] == "E" for b in blocks):
+        print("Error: no estimated rows found.")
+        sys.exit(1)
+
+
+def build_segments(blocks: list[dict]) -> list[dict]:
+    """
+    Return one segment dict per E-block.
+    start_row: last G in the preceding G-block (most recent fix before DR)
+    end_row:   first G in the following G-block (first fix after DR)
+    """
+    segments = []
+    for i, b in enumerate(blocks):
+        if b["type"] == "E":
+            segments.append({
+                "num":       len(segments) + 1,
+                "start_row": blocks[i - 1]["rows"][-1],
+                "end_row":   blocks[i + 1]["rows"][0],
+                "est_rows":  b["rows"],
+                "start_idx": b["start_idx"],
+            })
+    return segments
+
+
+# ── Per-segment math ──────────────────────────────────────────────────────────
+
+def compute_dr_vectors(seg: dict) -> tuple[float, float, float, float]:
+    """
+    Integrate the raw DR for one segment.
+    Returns (Sx, Sy, dx, dy) where:
+        (Sx, Sy) = raw DR displacement sum
+        (dx, dy) = GPS required displacement (end − start)
+    """
+    x0, y0 = latlon_to_xy(float(seg["start_row"]["lat"]), float(seg["start_row"]["lon"]))
+    xN, yN = latlon_to_xy(float(seg["end_row"]["lat"]),   float(seg["end_row"]["lon"]))
+    dx, dy = xN - x0, yN - y0
 
     Sx = Sy = 0.0
-    prev_ts = int(start_row["timestamp_ms"])
-
-    for row in est_rows:
-        ts = int(row["timestamp_ms"])
-        dt = (ts - prev_ts) / 1000.0
-        heading_rad = math.radians(float(row["heading_deg"]))
-        speed = float(row["speed_ms"])
-        Sx += speed * math.sin(heading_rad) * dt
-        Sy += speed * math.cos(heading_rad) * dt
-        prev_ts = ts
-
-    raw_dist = math.hypot(Sx, Sy)
-    if raw_dist < 1e-6:
-        print("Error: near-zero raw DR displacement — cannot solve for k and theta.")
-        sys.exit(1)
-
-    req_dist = math.hypot(dx, dy)
-    k = req_dist / raw_dist
-    theta_rad = math.atan2(Sy, Sx) - math.atan2(dy, dx)
-
-    return k, theta_rad, Sx, Sy, dx, dy
-
-
-def closure_error(start_row, est_rows, end_row, k, theta_rad):
-    """Re-integrate and return distance between last estimated point and end GPS."""
-    x, y = latlon_to_xy(float(start_row["lat"]), float(start_row["lon"]))
-    prev_ts = int(start_row["timestamp_ms"])
-    for row in est_rows:
-        ts = int(row["timestamp_ms"])
-        dt = (ts - prev_ts) / 1000.0
-        hr = math.radians(float(row["heading_deg"]))
+    prev_ts = int(seg["start_row"]["timestamp_ms"])
+    for row in seg["est_rows"]:
+        ts  = int(row["timestamp_ms"])
+        dt  = (ts - prev_ts) / 1000.0
+        hr  = math.radians(float(row["heading_deg"]))
         spd = float(row["speed_ms"])
-        x += k * spd * math.sin(hr + theta_rad) * dt
-        y += k * spd * math.cos(hr + theta_rad) * dt
+        Sx += spd * math.sin(hr) * dt
+        Sy += spd * math.cos(hr) * dt
         prev_ts = ts
-    ex, ey = latlon_to_xy(float(end_row["lat"]), float(end_row["lon"]))
-    return math.hypot(x - ex, y - ey), x, y
+
+    return Sx, Sy, dx, dy
 
 
-def reintegrate(start_row, est_rows: list[dict], k: float, theta_rad: float):
-    """Return list of (adj_x, adj_y) for each estimated row."""
+
+def reintegrate(seg: dict, k: float, theta_rad: float):
+    """
+    Re-integrate one segment under (k, θ): adj[i+1] = adj[i] + k·spd·dt
+    in direction (heading + θ), starting from the GPS anchor start_row.
+
+    Returns (positions, gap_m, (gap_x, gap_y)) where gap is the distance
+    from the last corrected EP to the GPS end anchor — the closure residual
+    after physical correction.  For a single-segment exact solution this
+    is zero; for multi-segment LS it reflects how well the joint (k, θ)
+    fits this segment.
+    """
+    start_row = seg["start_row"]
+    end_row   = seg["end_row"]
+    est_rows  = seg["est_rows"]
+
     x, y = latlon_to_xy(float(start_row["lat"]), float(start_row["lon"]))
+    xN, yN = latlon_to_xy(float(end_row["lat"]), float(end_row["lon"]))
+
     prev_ts = int(start_row["timestamp_ms"])
-    positions = []
-    for row in est_rows:
-        ts = int(row["timestamp_ms"])
-        dt = (ts - prev_ts) / 1000.0
-        hr = math.radians(float(row["heading_deg"]))
-        spd = float(row["speed_ms"])
-        x += k * spd * math.sin(hr + theta_rad) * dt
-        y += k * spd * math.cos(hr + theta_rad) * dt
-        prev_ts = ts
-        positions.append((x, y))
-    return positions
-
-
-def proportional_correct(start_row, est_rows: list[dict], end_row):
-    """
-    Raw DR integration + distance-proportional closure correction.
-
-    For each estimated row at cumulative path fraction t (0→1):
-        adj_pos(i) = DR_pos(i) + t(i) * (GPS_end - DR_end)
-
-    Weighting by cumulative path distance rather than time means stationary
-    periods don't accumulate correction, which is more physically motivated.
-    Always closes with 0 residual.
-
-    Returns (positions, dr_end, closure_vec, total_path_m).
-    """
-    x0, y0 = latlon_to_xy(float(start_row["lat"]), float(start_row["lon"]))
-    xN, yN = latlon_to_xy(float(end_row["lat"]),   float(end_row["lon"]))
-
-    # Pass 1: raw DR + cumulative distances
-    x, y = x0, y0
-    prev_ts = int(start_row["timestamp_ms"])
-    raw_positions = []
-    cum_dist = []
-    total = 0.0
+    positions: list[tuple[float, float]] = []
 
     for row in est_rows:
         ts  = int(row["timestamp_ms"])
         dt  = (ts - prev_ts) / 1000.0
         hr  = math.radians(float(row["heading_deg"]))
         spd = float(row["speed_ms"])
-        step = spd * dt
+        x += k * spd * math.sin(hr + theta_rad) * dt
+        y += k * spd * math.cos(hr + theta_rad) * dt
+        prev_ts = ts
+        positions.append((x, y))
+
+    gap_x = xN - positions[-1][0]
+    gap_y = yN - positions[-1][1]
+    return positions, math.hypot(gap_x, gap_y), (gap_x, gap_y)
+
+
+# ── Joint solver ──────────────────────────────────────────────────────────────
+
+def solve_k_theta_multi(vec_list: list[tuple]) -> tuple[float, float]:
+    """
+    Closed-form weighted LS solution for (k, θ) across N segments.
+
+    For each segment the corrected displacement must satisfy:
+        [Sx_i   Sy_i] [c]   [dx_i]
+        [Sy_i  -Sx_i] [s] = [dy_i]
+    where c = k·cos θ, s = k·sin θ.
+
+    The stacked normal equations decouple (A^T A = (Σ|DR_i|²)·I₂):
+        c = Σ(Sx_i·dx_i + Sy_i·dy_i) / Σ(Sx_i² + Sy_i²)
+        s = Σ(Sy_i·dx_i − Sx_i·dy_i) / Σ(Sx_i² + Sy_i²)
+
+    Single-segment case is exact (zero residual).  Multi-segment is LS.
+    Segments with larger DR magnitude contribute proportionally more weight.
+
+    Sign convention for θ:
+        positive → raw DR points clockwise of target; headings were reading
+                   low (add θ to all headings corrects)
+        negative → raw DR points counterclockwise; headings were reading high
+
+    Returns (k, theta_rad).
+    """
+    num_c = num_s = denom = 0.0
+    for Sx, Sy, dx, dy in vec_list:
+        num_c += Sx * dx + Sy * dy
+        num_s += Sy * dx - Sx * dy
+        denom += Sx * Sx + Sy * Sy
+
+    if denom < 1e-6:
+        print("Error: near-zero total DR displacement — cannot solve for k and θ.")
+        sys.exit(1)
+
+    c = num_c / denom
+    s = num_s / denom
+    return math.hypot(c, s), math.atan2(s, c)
+
+
+# ── Proportional solver ───────────────────────────────────────────────────────
+
+def proportional_correct_segment(seg: dict):
+    """
+    Distance-weighted proportional closure for one segment.
+    Returns (positions, dr_end, (closure_x, closure_y), total_path_m).
+    """
+    x, y = latlon_to_xy(float(seg["start_row"]["lat"]), float(seg["start_row"]["lon"]))
+    xN, yN = latlon_to_xy(float(seg["end_row"]["lat"]), float(seg["end_row"]["lon"]))
+
+    prev_ts = int(seg["start_row"]["timestamp_ms"])
+    raw_positions: list[tuple[float, float]] = []
+    cum_dist: list[float] = []
+    total = 0.0
+
+    for row in seg["est_rows"]:
+        ts  = int(row["timestamp_ms"])
+        dt  = (ts - prev_ts) / 1000.0
+        hr  = math.radians(float(row["heading_deg"]))
+        spd = float(row["speed_ms"])
         x += spd * math.sin(hr) * dt
         y += spd * math.cos(hr) * dt
-        total += step
+        total += spd * dt
         prev_ts = ts
         raw_positions.append((x, y))
         cum_dist.append(total)
@@ -209,14 +285,15 @@ def proportional_correct(start_row, est_rows: list[dict], end_row):
     closure_x = xN - dr_end[0]
     closure_y = yN - dr_end[1]
 
-    # Pass 2: apply proportional correction
     positions = []
     for (rx, ry), cd in zip(raw_positions, cum_dist):
         t = cd / total if total > 0 else 0.0
         positions.append((rx + t * closure_x, ry + t * closure_y))
 
-    return positions, dr_end, (closure_x, closure_y), total
+    return positions, (closure_x, closure_y), total
 
+
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
@@ -230,11 +307,10 @@ def main():
                         help="[joint] Constrain speed factor to 1±FRAC (e.g. 0.15)")
     args = parser.parse_args()
 
-    input_file = args.input_file
-    base, ext = os.path.splitext(input_file)
+    base, ext = os.path.splitext(args.input_file)
     output_file = f"{base}_corrected{ext}"
 
-    with open(input_file, newline="") as f:
+    with open(args.input_file, newline="") as f:
         reader = csv.DictReader(f)
         fieldnames = list(reader.fieldnames)
         rows = list(reader)
@@ -243,105 +319,140 @@ def main():
         print("No data rows found.")
         sys.exit(1)
 
-    src = [r["pos_src"] for r in rows]
-    first_e, last_e, start_gps_idx, end_gps_idx = find_estimated_segment(src)
+    blocks   = parse_blocks(rows)
+    validate_blocks(blocks)
+    segments = build_segments(blocks)
 
-    start_row = rows[start_gps_idx]
-    end_row   = rows[end_gps_idx]
-    est_rows  = rows[first_e:last_e + 1]
-
-    new_fields = ["adj_pos_x_m", "adj_pos_y_m", "adj_lat", "adj_lon"]
+    n_segs = len(segments)
+    new_fields     = ["adj_pos_x_m", "adj_pos_y_m", "adj_lat", "adj_lon"]
     out_fieldnames = fieldnames + new_fields
 
-    # ── Proportional mode ───────────────────────────────────────────────────
+    # adj_pos: global row index → (adj_x, adj_y)
+    adj_pos: dict[int, tuple[float, float]] = {}
+
+    # GPS rows always pass through at their own lat/lon
+    for block in blocks:
+        if block["type"] == "G":
+            for i, row in enumerate(block["rows"]):
+                try:
+                    gx, gy = latlon_to_xy(float(row["lat"]), float(row["lon"]))
+                except ValueError as e:
+                    global_idx = block["start_idx"] + i
+                    print(f"Error: bad lat/lon in GPS row {global_idx + 2} "
+                          f"(CSV line {global_idx + 2}): lat={row['lat']!r} lon={row['lon']!r}")
+                    print(f"  {e}")
+                    sys.exit(1)
+                adj_pos[block["start_idx"] + i] = (gx, gy)
+
+    # ── Proportional mode ─────────────────────────────────────────────────────
     if args.mode == "proportional":
-        adj_positions, dr_end, (cx, cy), total_path = \
-            proportional_correct(start_row, est_rows, end_row)
+        print(f"Mode:          proportional")
+        print(f"GPS blocks:    {n_segs + 1}")
+        print(f"DR segments:   {n_segs}")
+        print()
 
-        output_rows = []
-        for i, row in enumerate(rows):
-            r = dict(row)
-            if first_e <= i <= last_e:
-                ax, ay = adj_positions[i - first_e]
-                adj_lat, adj_lon = xy_to_latlon(ax, ay)
-                r["adj_pos_x_m"] = f"{ax:.2f}"
-                r["adj_pos_y_m"] = f"{ay:.2f}"
-                r["adj_lat"]     = f"{adj_lat:.8f}"
-                r["adj_lon"]     = f"{adj_lon:.8f}"
+        for seg in segments:
+            positions, (cx, cy), total_path = proportional_correct_segment(seg)
+            for i, pos in enumerate(positions):
+                adj_pos[seg["start_idx"] + i] = pos
+
+            x0, y0 = latlon_to_xy(float(seg["start_row"]["lat"]), float(seg["start_row"]["lon"]))
+            xN, yN = latlon_to_xy(float(seg["end_row"]["lat"]),   float(seg["end_row"]["lon"]))
+            gps_gap = math.hypot(xN - x0, yN - y0)
+            closure = math.hypot(cx, cy)
+
+            print(f"  Segment {seg['num']} of {n_segs}:")
+            print(f"    GPS start:       ({float(seg['start_row']['lat']):.6f}, "
+                  f"{float(seg['start_row']['lon']):.6f})")
+            print(f"    GPS end:         ({float(seg['end_row']['lat']):.6f}, "
+                  f"{float(seg['end_row']['lon']):.6f})")
+            print(f"    GPS gap:         {gps_gap:.1f} m")
+            print(f"    Estimated rows:  {len(seg['est_rows'])}")
+            print(f"    Total path (DR): {total_path:.1f} m")
+            print(f"    DR closure err:  {closure:.1f} m  ({cx:+.1f} E, {cy:+.1f} N)  "
+                  f"({100 * closure / total_path:.1f}% of path)")
+            print(f"    After correct:   0.0000 m  (exact by construction)")
+            print()
+
+    # ── Joint mode ────────────────────────────────────────────────────────────
+    else:
+        vec_list = [compute_dr_vectors(seg) for seg in segments]
+        k_free, theta_free = solve_k_theta_multi(vec_list)
+
+        constrained = False
+        k_used     = k_free
+        theta_used = theta_free
+
+        if args.max_theta is not None:
+            max_rad = math.radians(args.max_theta)
+            clipped = max(-max_rad, min(max_rad, theta_free))
+            if clipped != theta_free:
+                constrained = True
+            theta_used = clipped
+
+        if args.max_k_error is not None:
+            clipped = max(1.0 - args.max_k_error, min(1.0 + args.max_k_error, k_free))
+            if clipped != k_free:
+                constrained = True
+            k_used = clipped
+
+        # Reintegrate with physical (k, θ) correction; collect closure gaps for reporting
+        seg_results = []  # (positions, gap_m, (gap_x, gap_y))
+        for seg in segments:
+            result = reintegrate(seg, k_used, theta_used)
+            seg_results.append(result)
+            positions, _, _ = result
+            for i, pos in enumerate(positions):
+                adj_pos[seg["start_idx"] + i] = pos
+
+        theta_free_deg = (math.degrees(theta_free) + 180) % 360 - 180
+        theta_used_deg = (math.degrees(theta_used) + 180) % 360 - 180
+
+        print(f"Mode:          joint")
+        print(f"GPS blocks:    {n_segs + 1}")
+        print(f"DR segments:   {n_segs}"
+              + ("  (LS fit, single (k,θ) applied to all)" if n_segs > 1 else ""))
+        print()
+
+        for seg, (Sx, Sy, dx, dy), (_, gap_m, (gx, gy)) in zip(segments, vec_list, seg_results):
+            raw_az = math.degrees(math.atan2(Sx, Sy))
+            req_az = math.degrees(math.atan2(dx, dy))
+            print(f"  Segment {seg['num']} of {n_segs}:")
+            print(f"    GPS start:       ({float(seg['start_row']['lat']):.6f}, "
+                  f"{float(seg['start_row']['lon']):.6f})")
+            print(f"    GPS end:         ({float(seg['end_row']['lat']):.6f}, "
+                  f"{float(seg['end_row']['lon']):.6f})")
+            print(f"    Estimated rows:  {len(seg['est_rows'])}")
+            print(f"    Raw DR:          {math.hypot(Sx, Sy):.1f} m  @ {raw_az:.1f}° az")
+            print(f"    Required:        {math.hypot(dx, dy):.1f} m  @ {req_az:.1f}° az")
+            if n_segs == 1:
+                print(f"    Closure gap:     0.0000 m  (exact, single segment)")
             else:
-                gx, gy = latlon_to_xy(float(row["lat"]), float(row["lon"]))
-                r["adj_pos_x_m"] = f"{gx:.2f}"
-                r["adj_pos_y_m"] = f"{gy:.2f}"
-                r["adj_lat"]     = row["lat"]
-                r["adj_lon"]     = row["lon"]
-            output_rows.append(r)
+                print(f"    Closure gap:     {gap_m:.2f} m  ({gx:+.1f} E, {gy:+.1f} N)")
+            print()
 
-        with open(output_file, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=out_fieldnames)
-            writer.writeheader()
-            writer.writerows(output_rows)
-
-        x0, y0 = latlon_to_xy(float(start_row["lat"]), float(start_row["lon"]))
-        xN, yN = latlon_to_xy(float(end_row["lat"]),   float(end_row["lon"]))
-        gps_gap = math.hypot(xN - x0, yN - y0)
-        closure = math.hypot(cx, cy)
-
-        print(f"Mode:               proportional")
-        print(f"GPS start:          ({float(start_row['lat']):.6f}, {float(start_row['lon']):.6f})")
-        print(f"GPS end:            ({float(end_row['lat']):.6f}, {float(end_row['lon']):.6f})")
-        print(f"GPS start→end gap:  {gps_gap:.1f} m")
-        print(f"Estimated rows:     {len(est_rows)}")
-        print(f"Total path (DR):    {total_path:.1f} m")
+        print(f"── {'Constrained' if constrained else 'Free'} solution ─────────────────────────────────────")
+        print(f"  Speed factor k:    {k_used:.4f}×"
+              + (f"  [free: {k_free:.4f}]" if constrained and k_used != k_free else ""))
+        print(f"  Heading offset θ:  {theta_used_deg:+.2f}°  "
+              f"({'compass reads low' if theta_used_deg > 0 else 'compass reads high'})"
+              + (f"  [free: {theta_free_deg:+.2f}°]" if constrained and theta_used != theta_free else ""))
         print()
-        print(f"DR end → GPS end:   {closure:.1f} m  ({cx:+.1f} E, {cy:+.1f} N)")
-        print(f"  as % of path:     {100*closure/total_path:.1f}%")
-        print(f"Peak mid-path correction: ~{closure/2:.1f} m  (at 50% of path distance)")
-        print(f"Closure error:      0.0000 m  (exact by construction)")
-        print()
-        print(f"Output:             {output_file}")
-        return
 
-    # ── Joint mode (default) ────────────────────────────────────────────────
-    k_free, theta_free, Sx, Sy, dx, dy = solve_k_theta(start_row, end_row, est_rows)
-
-    constrained = False
-    k_used     = k_free
-    theta_used = theta_free
-
-    if args.max_theta is not None:
-        max_theta_rad = math.radians(args.max_theta)
-        clipped = max(-max_theta_rad, min(max_theta_rad, theta_free))
-        if clipped != theta_free:
-            constrained = True
-        theta_used = clipped
-
-    if args.max_k_error is not None:
-        k_lo = 1.0 - args.max_k_error
-        k_hi = 1.0 + args.max_k_error
-        clipped = max(k_lo, min(k_hi, k_free))
-        if clipped != k_free:
-            constrained = True
-        k_used = clipped
-
-    adj_positions = reintegrate(start_row, est_rows, k_used, theta_used)
-    residual, _, _ = closure_error(start_row, est_rows, end_row, k_used, theta_used)
-
+    # ── Write output ──────────────────────────────────────────────────────────
     output_rows = []
     for i, row in enumerate(rows):
         r = dict(row)
-        if first_e <= i <= last_e:
-            ax, ay = adj_positions[i - first_e]
-            adj_lat, adj_lon = xy_to_latlon(ax, ay)
-            r["adj_pos_x_m"] = f"{ax:.2f}"
-            r["adj_pos_y_m"] = f"{ay:.2f}"
-            r["adj_lat"]     = f"{adj_lat:.8f}"
-            r["adj_lon"]     = f"{adj_lon:.8f}"
+        ax, ay = adj_pos[i]
+        r["adj_pos_x_m"] = f"{ax:.2f}"
+        r["adj_pos_y_m"] = f"{ay:.2f}"
+        if row["pos_src"] == "G":
+            r["adj_lat"] = row["lat"]
+            r["adj_lon"] = row["lon"]
         else:
-            gx, gy = latlon_to_xy(float(row["lat"]), float(row["lon"]))
-            r["adj_pos_x_m"] = f"{gx:.2f}"
-            r["adj_pos_y_m"] = f"{gy:.2f}"
-            r["adj_lat"]     = row["lat"]
-            r["adj_lon"]     = row["lon"]
+            adj_lat, adj_lon = xy_to_latlon(ax, ay)
+            r["adj_lat"] = f"{adj_lat:.8f}"
+            r["adj_lon"] = f"{adj_lon:.8f}"
         output_rows.append(r)
 
     with open(output_file, "w", newline="") as f:
@@ -349,34 +460,7 @@ def main():
         writer.writeheader()
         writer.writerows(output_rows)
 
-    theta_free_deg = (math.degrees(theta_free) + 180) % 360 - 180
-    theta_used_deg = (math.degrees(theta_used) + 180) % 360 - 180
-    raw_az = math.degrees(math.atan2(Sx, Sy))
-    req_az = math.degrees(math.atan2(dx, dy))
-
-    print(f"Mode:               joint")
-    print(f"GPS start:          ({float(start_row['lat']):.6f}, {float(start_row['lon']):.6f})")
-    print(f"GPS end:            ({float(end_row['lat']):.6f}, {float(end_row['lon']):.6f})")
-    print(f"Estimated rows:     {len(est_rows)}")
-    print()
-    print(f"Raw DR:             {math.hypot(Sx, Sy):.1f} m  @ {raw_az:.1f}° az")
-    print(f"Required:           {math.hypot(dx, dy):.1f} m  @ {req_az:.1f}° az")
-    print()
-    print(f"── Free solution ──────────────────────────────────")
-    print(f"  Speed factor k:   {k_free:.4f}×")
-    print(f"  Heading offset θ: {theta_free_deg:+.2f}°  "
-          f"({'compass reads low' if theta_free_deg > 0 else 'compass reads high'})")
-    print(f"  Closure error:    0.0000 m  (exact by construction)")
-    if constrained:
-        print()
-        print(f"── Constrained solution ───────────────────────────")
-        print(f"  Speed factor k:   {k_used:.4f}×"
-              + (f"  [clipped from {k_free:.4f}]" if k_used != k_free else ""))
-        print(f"  Heading offset θ: {theta_used_deg:+.2f}°"
-              + (f"  [clipped from {theta_free_deg:+.2f}°]" if theta_used != theta_free else ""))
-        print(f"  Closure error:    {residual:.2f} m")
-    print()
-    print(f"Output:             {output_file}")
+    print(f"Output:        {output_file}")
 
 
 if __name__ == "__main__":

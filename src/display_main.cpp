@@ -15,7 +15,7 @@
 #include <dpvlink.h>
 
 // ---- Link receive state ----------------------------------------------------
-static char rxBuf[512];  // enlarged for CalProgressPacket (60-bin JSON can be ~300 bytes)
+static char rxBuf[4096];  // sized for WaypointListPacket (50 waypoints ≈ 3 KB)
 static size_t rxPos = 0;
 static NavPacket lastNav{};
 static bool navValid = false;
@@ -94,6 +94,27 @@ static uint8_t       gSpeedCalChoice     = 0;    // 0=RESET+ACCEPT, 1=ACCEPT, 2=
 static uint32_t      gCountdownStartMs   = 0;    // millis() when countdown begins
 static constexpr uint32_t COUNTDOWN_TOTAL_MS = 5000;  // 5 second countdown
 
+// ---- Waypoint list cache (populated from WaypointListPacket at 1 Hz) --------
+struct CachedWaypoint {
+    char  name[13];  // 12 display chars + null
+    float lat;
+    float lon;
+};
+static CachedWaypoint gWpCache[WP_PACKET_MAX];
+static uint8_t        gWpCount      = 0;
+static uint8_t        gWpTotalCount = 0;
+
+// ---- Waypoint selection / arrival UI state ----------------------------------
+enum class WaypointUiPhase : uint8_t {
+    NONE,    // not in waypoint UI
+    SELECT,  // user choosing which waypoint to navigate TO
+    ARRIVE,  // user choosing which waypoint they have ARRIVED AT
+};
+static WaypointUiPhase gWaypointUiPhase = WaypointUiPhase::NONE;
+static uint8_t         gWaypointUiIdx  = 0;
+static char            gWpPrevTitle[24] = "";
+static char            gWpPrevName[20]  = "";
+
 // ---- Button debounce -------------------------------------------------------
 static constexpr uint32_t DEBOUNCE_MS   = 50;
 static constexpr uint32_t LONG_PRESS_MS = 2000;
@@ -136,6 +157,9 @@ static void processNavLine();
 static void processUsbCmd();
 static void sendCmd(DisplayCmd cmd);
 static void sendSpeedCalStart(uint16_t dist_ft);
+static void sendWaypointSelectCmd(uint8_t idx);
+static void sendWaypointArriveCmd(uint8_t idx);
+static void renderWaypointUi();
 static void updateButton(ButtonState& b);
 static void handleButtons();
 
@@ -305,6 +329,24 @@ void loop() {
             Serial.println("[HDG_CAL] entering Fourier heading cal");
         }
 
+        if (menu::isPendingWaypointSelect()) {
+            menu::clearWaypointSelectPending();
+            gWaypointUiPhase = WaypointUiPhase::SELECT;
+            gWaypointUiIdx   = 0;
+            gWpPrevTitle[0]  = '\0';
+            gWpPrevName[0]   = '\0';
+            Serial.println("[WP] entering Select Waypoint UI");
+        }
+
+        if (menu::isPendingWaypointArrive()) {
+            menu::clearWaypointArrivePending();
+            gWaypointUiPhase = WaypointUiPhase::ARRIVE;
+            gWaypointUiIdx   = 0;
+            gWpPrevTitle[0]  = '\0';
+            gWpPrevName[0]   = '\0';
+            Serial.println("[WP] entering Arrive Waypoint UI");
+        }
+
         display::clear();
     }
     if (menu::isOpen()) {
@@ -381,6 +423,12 @@ void loop() {
                 display::showCalGrid(lastCalProgress,
                                      lastCalProgress.cal_type == (uint8_t)CalType::MOUNTED
                                          ? "MOUNTED CAL" : "BASELINE CAL");
+                return;
+            }
+
+            // Waypoint selection / arrival UI — takes priority while active
+            if (gWaypointUiPhase != WaypointUiPhase::NONE) {
+                renderWaypointUi();
                 return;
             }
 
@@ -517,6 +565,20 @@ static void processNavLine() {
                 Serial.println("[CAL_GRID] Complete — holding DONE screen");
             }
         }
+    } else if (ptype == PacketType::WAYPOINT_LIST) {
+        WaypointListPacket wpPkt{};
+        if (bytesToWaypointListPacket(rxBuf, rxPos, wpPkt)) {
+            gWpCount      = wpPkt.count;
+            gWpTotalCount = wpPkt.total_count;
+            int n = (int)wpPkt.count;
+            if (n > WP_PACKET_MAX) n = WP_PACKET_MAX;
+            for (int i = 0; i < n; i++) {
+                strncpy(gWpCache[i].name, wpPkt.waypoints[i].name, 12);
+                gWpCache[i].name[12] = '\0';
+                gWpCache[i].lat = wpPkt.waypoints[i].lat;
+                gWpCache[i].lon = wpPkt.waypoints[i].lon;
+            }
+        }
     }
 }
 
@@ -547,6 +609,8 @@ static void processUsbCmd() {
     }
 }
 
+static char wpTxBuf[64];
+
 static void sendCmd(DisplayCmd cmd) {
     size_t n = displayCmdToBytes(cmd, txBuf, sizeof(txBuf));
     if (n > 0) {
@@ -560,6 +624,63 @@ static void sendSpeedCalStart(uint16_t dist_ft) {
         Serial1.write(txBuf, n);
         Serial.printf("[SPEED_CAL] START_SPEED_CAL dist=%uft\n", (unsigned)dist_ft);
     }
+}
+
+static void sendWaypointSelectCmd(uint8_t idx) {
+    size_t n = displaySelectWaypointToBytes(idx, wpTxBuf, sizeof(wpTxBuf));
+    if (n > 0) Serial1.write(wpTxBuf, n);
+}
+
+static void sendWaypointArriveCmd(uint8_t idx) {
+    size_t n = displayArriveWaypointToBytes(idx, wpTxBuf, sizeof(wpTxBuf));
+    if (n > 0) Serial1.write(wpTxBuf, n);
+}
+
+// ---------------------------------------------------------------------------
+// Render waypoint selection / arrival UI (full-screen takeover).
+// Uses incremental update — only redraws when content changes.
+// Layout (320×240):
+//   y=10  title   "NAV TO:" or "ARRIVED AT:" (size 2, cyan)
+//   y=60  wp name (size 3, yellow, padded to 10 chars)
+//   y=120 counter "n/N" (size 2, white)
+//   y=200 hint    (size 1, gray)
+// ---------------------------------------------------------------------------
+static void renderWaypointUi() {
+    constexpr uint16_t CLR_CYAN   = 0x07FF;
+    constexpr uint16_t CLR_YELLOW = 0xFFE0;
+    constexpr uint16_t CLR_WHITE  = 0xFFFF;
+    constexpr uint16_t CLR_GRAY   = 0x7BEF;
+
+    const char* title = (gWaypointUiPhase == WaypointUiPhase::SELECT)
+                        ? "NAV TO:     "
+                        : "ARRIVED AT: ";
+
+    if (strcmp(title, gWpPrevTitle) != 0) {
+        strncpy(gWpPrevTitle, title, sizeof(gWpPrevTitle) - 1);
+        display::drawText(4, 10, title, CLR_CYAN, 2);
+    }
+
+    const char* wpName = (gWpCount > 0) ? gWpCache[gWaypointUiIdx].name : "(no waypoints)";
+    char nameBuf[18];
+    snprintf(nameBuf, sizeof(nameBuf), "%-16s", wpName);
+    if (strcmp(nameBuf, gWpPrevName) != 0) {
+        strncpy(gWpPrevName, nameBuf, sizeof(gWpPrevName) - 1);
+        display::drawText(4, 60, nameBuf, CLR_YELLOW, 3);
+
+        char countBuf[16];
+        snprintf(countBuf, sizeof(countBuf), "%u/%u        ",
+                 gWpCount > 0 ? (uint8_t)(gWaypointUiIdx + 1) : 0, gWpTotalCount);
+        display::drawText(4, 120, countBuf, CLR_WHITE, 2);
+    }
+
+    // Static hint line — only write once per UI entry (prevTitle gate covers it)
+    if (gWpCount > 0) {
+        display::drawText(4, 200, "BTN1:next  BTN2:select", CLR_GRAY, 1);
+    } else {
+        display::drawText(4, 200, "No waypoints available ", CLR_GRAY, 1);
+    }
+
+    display::flush();
 }
 
 // ---------------------------------------------------------------------------
@@ -696,6 +817,36 @@ static void handleButtons() {
                 Serial.println("[SPEED_CAL] choice: REJECT");
             }
             gSpeedCalPhase = SpeedCalPhase::NONE;
+            display::clear();
+        }
+        return;
+    }
+
+    // --- Waypoint UI ---------------------------------------------------------
+    if (gWaypointUiPhase != WaypointUiPhase::NONE) {
+        // BTN1: cycle to next waypoint
+        if (!btn1.pressed && !btn1.fired && btn1.pressStartMs > 0) {
+            btn1.fired = true;
+            if (gWpCount > 0) {
+                gWaypointUiIdx = (gWaypointUiIdx + 1) % gWpCount;
+                gWpPrevName[0] = '\0';  // force redraw on change
+            }
+        }
+        // BTN2: confirm selection
+        if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
+            btn2.fired = true;
+            if (gWpCount > 0) {
+                if (gWaypointUiPhase == WaypointUiPhase::SELECT) {
+                    sendWaypointSelectCmd(gWaypointUiIdx);
+                    Serial.printf("[WP] SELECT waypoint idx=%u name=%s\n",
+                                  gWaypointUiIdx, gWpCache[gWaypointUiIdx].name);
+                } else {
+                    sendWaypointArriveCmd(gWaypointUiIdx);
+                    Serial.printf("[WP] ARRIVE waypoint idx=%u name=%s\n",
+                                  gWaypointUiIdx, gWpCache[gWaypointUiIdx].name);
+                }
+            }
+            gWaypointUiPhase = WaypointUiPhase::NONE;
             display::clear();
         }
         return;

@@ -74,6 +74,11 @@ void setPosition(float x_m, float y_m) {
     cur_y = y_m;
 }
 
+void snapToLatLon(float lat, float lon) {
+    cur_x = (lon - baseLon) * mPerDegLon;
+    cur_y = (lat - baseLat) * M_PER_DEG_LAT;
+}
+
 Position getPosition() {
     Position p;
     p.x_m = cur_x;

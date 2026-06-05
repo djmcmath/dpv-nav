@@ -13,8 +13,8 @@
     {
       "title": "NAV",
       "items": [
-        {"label": "Outbound", "act": 2},
-        {"label": "Home", "act": 3},
+        {"label": "Select WP", "act": 19},
+        {"label": "Arrive WP", "act": 20},
         {"label": "Mark", "act": 4},
         {"label": "Op Mode", "act": 16}
       ]

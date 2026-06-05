@@ -28,6 +28,7 @@
 #include "util/nvs_state.h"
 #include "util/speed_cal.h"
 #include "util/hdg_cal.h"
+#include "util/waypoints.h"
 #include <dpvlink.h>
 
 // ---- AHRS state -----------------------------------------------------------
@@ -57,6 +58,8 @@ static uint32_t lastSendMs    = 0;
 static uint32_t lastDiagMs    = 0;
 static uint32_t lastPosSaveMs = 0;
 static uint32_t lastFlowLogMs = 0;
+static uint32_t lastWpSendMs  = 0;
+static uint32_t lastWpSaveMs  = 0;
 static uint16_t gBattMv       = 0;  // EMA-smoothed battery voltage (mV), 0 = not yet read
 static constexpr uint32_t SEND_INTERVAL_MS     = 100;   // 10 Hz link rate
 static constexpr uint32_t LOOP_INTERVAL_US     = 10000; // 100 Hz loop rate gate
@@ -108,6 +111,7 @@ static bool gDiveMode      = false;  // Dive mode active (persisted to NVS)
 
 // ---- Serial link buffer ----------------------------------------------------
 static char linkBuf[256];
+static char wpBuf[3200];  // waypoint list packet — up to 50 waypoints in JSON
 
 // ---- NVS helpers -----------------------------------------------------------
 // Build full nav NVS state from current globals (avoids stale-read-then-write).
@@ -131,6 +135,7 @@ static void sendNavPacket(float heading, float headingRaw, float pitch, float ro
                           float distHome, float bearHome,
                           float posX, float posY,
                           const GpsFix& fix);
+static void sendWaypointListPacket();
 static void handleDisplayCmd();
 
 // ===========================================================================
@@ -211,6 +216,9 @@ void setup() {
         // Position model
         nav::init(DEFAULT_BASELINE_LAT, DEFAULT_BASELINE_LON);
         nav::setUseGps(DEFAULT_USE_GPS_POSITION);
+
+        // Waypoints (must be after LittleFS.begin())
+        waypoints::load();
 
         // AHRS
         mahonyInit(ahrs);
@@ -365,6 +373,14 @@ void loop() {
         }
     }
 
+    uint8_t gpsBars = gps::computeSignalBars(fix);
+
+    // Auto-update HOME waypoint when GPS quality is good (>= 3/4 bars ≈ 75%).
+    // Only in memory — flushed to flash every 60 s by lastWpSaveMs timer below.
+    if (gpsFresh && gpsBars >= 3) {
+        waypoints::updateHome(fix.lat, fix.lon);
+    }
+
     if (gpsFresh) {
         float cogRad = fix.course_deg * (M_PI / 180.0f);
         float s = sinf(cogRad);
@@ -422,6 +438,9 @@ void loop() {
     }
 
     // --- Dead-reckoning position update ------------------------------------
+    // Suppress DR integration when flow speed is below threshold (treats sensor
+    // noise and near-stationary drift as zero rather than accumulating error).
+    if (!useGpsSpeed && speed < DR_MIN_FLOW_SPEED_MS) speed = 0.0f;
     nav::updateDR(headingDeg, speed, dt);
 
     // --- Send NavPacket at link rate ----------------------------------------
@@ -444,7 +463,7 @@ void loop() {
             ld.pos_y_m      = pos.y_m;
             ld.lat           = pos.lat;
             ld.lon           = pos.lon;
-            ld.gpsPos        = nav::isUsingGps() && gpsFresh;
+            ld.pos_src       = (nav::isUsingGps() && gpsFresh) ? 'G' : 'E';
             ld.mag_raw       = magRaw;
             ld.accel_raw     = accelRaw;
             ld.gyro_raw      = gyroRaw;
@@ -462,6 +481,18 @@ void loop() {
         lastPosSaveMs = nowMs;
         nav::Position pos = nav::getPosition();
         nvs_nav::savePosition(pos.x_m, pos.y_m);
+    }
+
+    // --- Waypoint list broadcast at 1 Hz ------------------------------------
+    if (nowMs - lastWpSendMs >= 1000) {
+        lastWpSendMs = nowMs;
+        sendWaypointListPacket();
+    }
+
+    // --- Periodic waypoint save (HOME updates from GPS) ---------------------
+    if (nowMs - lastWpSaveMs >= 60000) {
+        lastWpSaveMs = nowMs;
+        waypoints::save();
     }
 
     // --- Accumulate mag stats for diagnostics --------------------------------
@@ -958,6 +989,25 @@ static void sendDebugPacket(const imu::Vec3f& accel, const imu::Vec3f& gyro,
 }
 #endif
 
+static void sendWaypointListPacket() {
+    WaypointListPacket pkt{};
+    int n = waypoints::count();
+    int toSend = (n > WP_PACKET_MAX) ? WP_PACKET_MAX : n;
+    pkt.count       = (uint8_t)toSend;
+    pkt.total_count = (uint8_t)(n > 255 ? 255 : n);
+    for (int i = 0; i < toSend; i++) {
+        const waypoints::Waypoint* wp = waypoints::get(i);
+        if (!wp) break;
+        pkt.waypoints[i].idx = (uint8_t)i;
+        strncpy(pkt.waypoints[i].name, wp->name, 12);
+        pkt.waypoints[i].name[12] = '\0';
+        pkt.waypoints[i].lat = wp->lat;
+        pkt.waypoints[i].lon = wp->lon;
+    }
+    size_t nb = waypointListPacketToBytes(pkt, wpBuf, sizeof(wpBuf));
+    if (nb > 0) Serial1.write(wpBuf, nb);
+}
+
 static void handleDisplayCmd() {
     static char cmdBuf[64];
     static size_t cmdPos = 0;
@@ -1187,6 +1237,48 @@ static void handleDisplayCmd() {
                                           hdg_cal::SAMPLES_FILE_PATH);
                         }
                         gHdgSampleCount = 0;
+                        break;
+                    }
+                    case DisplayCmd::SELECT_WAYPOINT: {
+                        uint8_t idx = parseWaypointIndex(cmdBuf, cmdPos);
+                        const waypoints::Waypoint* wp = waypoints::get(idx);
+                        if (wp) {
+                            nav::setTargetLatLon(wp->lat, wp->lon);
+                            sysState = SystemState::NAVIGATING;
+                            Serial.printf("CMD: SELECT_WAYPOINT idx=%u name=%s lat=%.6f lon=%.6f\n",
+                                          idx, wp->name, wp->lat, wp->lon);
+                        } else {
+                            Serial.printf("CMD: SELECT_WAYPOINT idx=%u — out of range (count=%d)\n",
+                                          idx, waypoints::count());
+                        }
+                        break;
+                    }
+                    case DisplayCmd::ARRIVE_WAYPOINT: {
+                        uint8_t idx = parseWaypointIndex(cmdBuf, cmdPos);
+                        const waypoints::Waypoint* wp = waypoints::get(idx);
+                        if (wp) {
+                            nav::snapToLatLon(wp->lat, wp->lon);
+                            Serial.printf("CMD: ARRIVE_WAYPOINT idx=%u name=%s — position snapped\n",
+                                          idx, wp->name);
+                            // Log the position correction as a waypoint-type entry
+                            if (logging::isLogging()) {
+                                nav::Position pos = nav::getPosition();
+                                logging::LogData ld{};
+                                ld.timestamp_ms = millis();
+                                ld.heading_deg  = 0.0f;
+                                ld.speed_ms     = 0.0f;
+                                ld.gpsSpeed     = false;
+                                ld.pos_x_m      = pos.x_m;
+                                ld.pos_y_m      = pos.y_m;
+                                ld.lat          = wp->lat;
+                                ld.lon          = wp->lon;
+                                ld.pos_src      = 'W';
+                                logging::logImmediate(ld);
+                            }
+                        } else {
+                            Serial.printf("CMD: ARRIVE_WAYPOINT idx=%u — out of range (count=%d)\n",
+                                          idx, waypoints::count());
+                        }
                         break;
                     }
                     case DisplayCmd::POWER_OFF: {

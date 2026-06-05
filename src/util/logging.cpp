@@ -239,7 +239,7 @@ void log(const LogData& d) {
                     d.pos_y_m,
                     d.lat,
                     d.lon,
-                    d.gpsPos ? 'G' : 'E');
+                    d.pos_src);
 
     if (gLevel == LogLevel::LEVEL_HIGH) {
         gLogFile.printf(",%.3f,%.3f,%.3f"
@@ -267,6 +267,50 @@ void log(const LogData& d) {
         lastFlushMs = now;
         gLogFile.flush();
     }
+}
+
+void logImmediate(const LogData& d) {
+    if (!gReady || gLevel == LogLevel::LEVEL_OFF || !gLogFile) return;
+
+    char localTimeBuf[24] = "";
+    time_t now_t = time(nullptr);
+    if (now_t >= 1700000000L) {
+        struct tm tm_info{};
+        localtime_r(&now_t, &tm_info);
+        strftime(localTimeBuf, sizeof(localTimeBuf), "%Y-%m-%dT%H:%M:%S", &tm_info);
+    }
+
+    gLogFile.printf("%lu,%s,%.2f,%.3f,%c,%.2f,%.2f,%.8f,%.8f,%c",
+                    d.timestamp_ms,
+                    localTimeBuf,
+                    d.heading_deg,
+                    d.speed_ms,
+                    d.gpsSpeed ? 'G' : 'F',
+                    d.pos_x_m,
+                    d.pos_y_m,
+                    d.lat,
+                    d.lon,
+                    d.pos_src);
+
+    if (gLevel == LogLevel::LEVEL_HIGH) {
+        gLogFile.printf(",%.3f,%.3f,%.3f"
+                        ",%.3f,%.3f,%.3f"
+                        ",%.3f,%.3f,%.3f"
+                        ",%.3f,%.3f,%.3f"
+                        ",%.3f,%.3f,%.3f"
+                        ",%.3f,%.3f,%.3f"
+                        ",%.2f,%.2f",
+                        d.mag_raw.x, d.mag_raw.y, d.mag_raw.z,
+                        d.accel_raw.x, d.accel_raw.y, d.accel_raw.z,
+                        d.gyro_raw.x, d.gyro_raw.y, d.gyro_raw.z,
+                        d.mag_cal.x, d.mag_cal.y, d.mag_cal.z,
+                        d.accel_cal.x, d.accel_cal.y, d.accel_cal.z,
+                        d.gyro_cal.x, d.gyro_cal.y, d.gyro_cal.z,
+                        d.pitch_deg, d.roll_deg);
+    }
+
+    gLogFile.print('\n');
+    gLogFile.flush();
 }
 
 }  // namespace logging

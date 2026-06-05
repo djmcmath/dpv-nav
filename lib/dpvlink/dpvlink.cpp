@@ -18,6 +18,7 @@ PacketType identifyPacket(const char* buf, size_t len) {
     if (t[0] == 'N') return PacketType::NAV;
     if (t[0] == 'D' && t[1] == '\0') return PacketType::DEBUG;
     if (t[0] == 'C') return PacketType::CAL_PROGRESS;
+    if (t[0] == 'W') return PacketType::WAYPOINT_LIST;
     // Backward compat: packets without "t" are assumed NavPacket
     if (doc["hdg"].is<float>()) return PacketType::NAV;
     return PacketType::UNKNOWN;
@@ -143,6 +144,86 @@ float parseCaptureHdgPoint(const char* buf, size_t len) {
     JsonDocument doc;
     if (deserializeJson(doc, buf, len)) return 0.0f;
     return doc["tgt"] | 0.0f;
+}
+
+// ---------------------------------------------------------------------------
+// Waypoint commands
+// ---------------------------------------------------------------------------
+size_t displaySelectWaypointToBytes(uint8_t idx, char* buf, size_t bufLen) {
+    JsonDocument doc;
+    doc["cmd"] = static_cast<uint8_t>(DisplayCmd::SELECT_WAYPOINT);
+    doc["idx"] = idx;
+
+    size_t n = serializeJson(doc, buf, bufLen - 1);
+    if (n == 0 || n >= bufLen - 1) return 0;
+    buf[n]     = '\n';
+    buf[n + 1] = '\0';
+    return n + 1;
+}
+
+size_t displayArriveWaypointToBytes(uint8_t idx, char* buf, size_t bufLen) {
+    JsonDocument doc;
+    doc["cmd"] = static_cast<uint8_t>(DisplayCmd::ARRIVE_WAYPOINT);
+    doc["idx"] = idx;
+
+    size_t n = serializeJson(doc, buf, bufLen - 1);
+    if (n == 0 || n >= bufLen - 1) return 0;
+    buf[n]     = '\n';
+    buf[n + 1] = '\0';
+    return n + 1;
+}
+
+uint8_t parseWaypointIndex(const char* buf, size_t len) {
+    JsonDocument doc;
+    if (deserializeJson(doc, buf, len)) return 0;
+    return doc["idx"] | (uint8_t)0;
+}
+
+// ---------------------------------------------------------------------------
+// WaypointListPacket
+// ---------------------------------------------------------------------------
+size_t waypointListPacketToBytes(const WaypointListPacket& pkt, char* buf, size_t bufLen) {
+    JsonDocument doc;
+    doc["t"]  = "W";
+    doc["c"]  = pkt.count;
+    doc["tc"] = pkt.total_count;
+
+    JsonArray wps = doc["w"].to<JsonArray>();
+    for (int i = 0; i < pkt.count; i++) {
+        JsonObject e = wps.add<JsonObject>();
+        e["i"]  = pkt.waypoints[i].idx;
+        e["n"]  = pkt.waypoints[i].name;
+        e["la"] = pkt.waypoints[i].lat;
+        e["lo"] = pkt.waypoints[i].lon;
+    }
+
+    size_t n = serializeJson(doc, buf, bufLen - 1);
+    if (n == 0 || n >= bufLen - 1) return 0;
+    buf[n]     = '\n';
+    buf[n + 1] = '\0';
+    return n + 1;
+}
+
+bool bytesToWaypointListPacket(const char* buf, size_t len, WaypointListPacket& out) {
+    JsonDocument doc;
+    if (deserializeJson(doc, buf, len)) return false;
+
+    out.count       = doc["c"]  | (uint8_t)0;
+    out.total_count = doc["tc"] | (uint8_t)0;
+
+    JsonArray wps = doc["w"];
+    int n = (int)out.count;
+    if (n > WP_PACKET_MAX) n = WP_PACKET_MAX;
+    for (int i = 0; i < n; i++) {
+        JsonObject e = wps[i];
+        out.waypoints[i].idx = e["i"] | (uint8_t)0;
+        const char* name = e["n"] | "";
+        strncpy(out.waypoints[i].name, name, 12);
+        out.waypoints[i].name[12] = '\0';
+        out.waypoints[i].lat = e["la"] | 0.0f;
+        out.waypoints[i].lon = e["lo"] | 0.0f;
+    }
+    return true;
 }
 
 // ---------------------------------------------------------------------------

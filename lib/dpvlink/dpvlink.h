@@ -123,9 +123,27 @@ struct CalProgressPacket {
 };
 
 // ---------------------------------------------------------------------------
+// Waypoint list packet  (sent from nav device at ~1 Hz)
+// ---------------------------------------------------------------------------
+constexpr int WP_PACKET_MAX = 50;  // max waypoints in one WaypointListPacket
+
+struct WaypointEntry {
+    uint8_t idx;
+    char    name[13];   // 12 display chars + null
+    float   lat;
+    float   lon;
+};
+
+struct WaypointListPacket {
+    uint8_t      count;         // entries in this packet
+    uint8_t      total_count;   // total waypoints in full list (may exceed count)
+    WaypointEntry waypoints[WP_PACKET_MAX];
+};
+
+// ---------------------------------------------------------------------------
 // Packet type discriminator (JSON "t" field)
 // ---------------------------------------------------------------------------
-enum class PacketType : uint8_t { UNKNOWN = 0, NAV, DEBUG, CAL_PROGRESS };
+enum class PacketType : uint8_t { UNKNOWN = 0, NAV, DEBUG, CAL_PROGRESS, WAYPOINT_LIST };
 
 PacketType identifyPacket(const char* buf, size_t len);
 
@@ -159,6 +177,8 @@ enum class DisplayCmd : uint8_t {
     START_HDG_FOURIER_CAL  = 26, // begin Fourier heading cal data collection (resets sample buffer)
     CAPTURE_HDG_POINT      = 27, // capture one (target, indicated) pair (carries float "tgt" field)
     FINALIZE_HDG_CAL       = 28, // end collection, save /hdg_samples.csv on nav device
+    SELECT_WAYPOINT        = 29, // select waypoint as navigation target (carries uint8 "idx" field)
+    ARRIVE_WAYPOINT        = 30, // snap position to waypoint (carries uint8 "idx" field)
 };
 
 // ---------------------------------------------------------------------------
@@ -198,3 +218,15 @@ size_t displayCaptureHdgPointToBytes(float target_deg, char* buf, size_t bufLen)
 // Extract the target heading from a CAPTURE_HDG_POINT command buffer.
 // Returns 0.0 if the "tgt" field is absent.
 float parseCaptureHdgPoint(const char* buf, size_t len);
+
+// Serialize SELECT_WAYPOINT or ARRIVE_WAYPOINT with the waypoint index.
+size_t displaySelectWaypointToBytes(uint8_t idx, char* buf, size_t bufLen);
+size_t displayArriveWaypointToBytes(uint8_t idx, char* buf, size_t bufLen);
+
+// Extract the waypoint index from a SELECT_WAYPOINT or ARRIVE_WAYPOINT buffer.
+// Returns 0 if the "idx" field is absent.
+uint8_t parseWaypointIndex(const char* buf, size_t len);
+
+// WaypointListPacket serialize / parse.
+size_t waypointListPacketToBytes(const WaypointListPacket& pkt, char* buf, size_t bufLen);
+bool   bytesToWaypointListPacket(const char* buf, size_t len, WaypointListPacket& out);

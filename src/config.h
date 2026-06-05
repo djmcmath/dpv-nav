@@ -16,6 +16,13 @@ constexpr float FLOW_CROSS_SECTION_M2 = 0.002f;  // Intake cross-section area (m
 // Flow speed averaging
 constexpr float FLOW_AVG_PERIOD_S = 3.0f;    // EMA time constant (seconds) — smooths out momentary spikes
 
+// Minimum flow speed for dead-reckoning integration.
+// Flow readings below this are treated as stationary; position is not updated.
+// Only applies when GPS speed is not available — GPS truth updates are unaffected.
+// This is mostly for when you're drifting around a wreck, or stationary doing deco somewhere -> result is that if you're below this speed, it won't register.
+// -- Side effect, if you're finning from one place to another, you'll probably be below the speed threshold, so position won't update.
+constexpr float DR_MIN_FLOW_SPEED_MS = 0.10f;  // ~0.2 kt
+
 // Speed source selection
 constexpr uint32_t GPS_FIX_STALE_MS = 3000;      // Fall back to flowmeter if GPS fix older than this
 constexpr float    KNOTS_TO_MS      = 0.514444f;  // knots → m/s conversion factor

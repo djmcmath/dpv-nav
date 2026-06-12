@@ -28,6 +28,7 @@
 #include "util/nvs_state.h"
 #include "util/speed_cal.h"
 #include "util/hdg_cal.h"
+#include "util/motor_cal.h"
 #include <dpvlink.h>
 
 // ---- AHRS state -----------------------------------------------------------
@@ -42,6 +43,7 @@ static Calib3           gyroCal;
 static Calib3           accelCal;
 static hdg_cal::HdgCal  gHdgCal;
 static bool             gHdgCalValid = false;
+static motor_cal::MotorCal gMotorCal;
 
 // Fourier heading cal sample collection (filled during CAPTURE_HDG_POINT commands)
 static constexpr int HDG_SAMPLE_MAX = 24;
@@ -316,6 +318,9 @@ void loop() {
     } else {
         headingDeg = headingRawDeg;
     }
+    // Motor-on correction: motor magnetic field not captured by bench Fourier cal.
+    // Applied after Fourier correction; heading_raw_deg in NavPacket is pre-correction.
+    headingDeg = fmodf(headingDeg + gMotorCal.heading_offset_deg + 360.0f, 360.0f);
     float pitchDeg   = euler.pitch * (180.0f / M_PI);
     float rollDeg    = euler.roll  * (180.0f / M_PI);
 
@@ -445,6 +450,8 @@ void loop() {
             ld.lat           = pos.lat;
             ld.lon           = pos.lon;
             ld.gpsPos        = nav::isUsingGps() && gpsFresh;
+            ld.gps_satellites = fix.has_fix ? fix.satellites : 0;
+            ld.gps_hdop       = fix.has_fix ? fix.hdop       : 0.0f;
             ld.mag_raw       = magRaw;
             ld.accel_raw     = accelRaw;
             ld.gyro_raw      = gyroRaw;
@@ -797,6 +804,11 @@ static void loadCalibration() {
         gBootFlags |= BOOT_HDG_CAL_OK;
         Serial.printf("Fourier heading cal loaded (%d harmonic(s))\n", gHdgCal.n);
     }
+
+    // Motor-on heading correction (optional — silently skip if absent, offset defaults to 0)
+    if (motor_cal::load(gMotorCal)) {
+        Serial.printf("Motor cal loaded (heading offset: %.1f deg)\n", gMotorCal.heading_offset_deg);
+    }
 }
 
 // Reload calibration JSON files without blocking fallbacks.
@@ -836,6 +848,13 @@ static void reloadCalibrationFiles() {
         Serial.printf("[Reload] Fourier heading cal loaded (%d harmonic(s))\n", gHdgCal.n);
     } else {
         Serial.println("[Reload] No Fourier heading cal found");
+    }
+
+    gMotorCal = motor_cal::MotorCal{};  // reset to defaults before reload
+    if (motor_cal::load(gMotorCal)) {
+        Serial.printf("[Reload] Motor cal loaded (heading offset: %.1f deg)\n", gMotorCal.heading_offset_deg);
+    } else {
+        Serial.println("[Reload] No motor cal found, heading offset = 0");
     }
 }
 

@@ -243,7 +243,7 @@ void log(const LogData& d) {
                     d.lon,
                     d.pos_src);
 
-    if (d.gpsPos) {
+    if (d.pos_src == 'G') {
         gLogFile.printf(",%u,%.1f", d.gps_satellites, d.gps_hdop);
     } else {
         gLogFile.print(",,");
@@ -299,6 +299,12 @@ void logImmediate(const LogData& d) {
                     d.lat,
                     d.lon,
                     d.pos_src);
+
+    if (d.pos_src == 'G') {
+        gLogFile.printf(",%u,%.1f", d.gps_satellites, d.gps_hdop);
+    } else {
+        gLogFile.print(",,");
+    }
 
     if (gLevel == LogLevel::LEVEL_HIGH) {
         gLogFile.printf(",%.3f,%.3f,%.3f"

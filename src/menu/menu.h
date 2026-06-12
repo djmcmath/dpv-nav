@@ -37,9 +37,11 @@ enum class Action : uint8_t {
     DISP_SPD_ETA  = 13,  // speed vs ETA
     DISP_UNITS    = 14,  // m vs ft
     DISP_HDG_TYPE = 15,  // mag vs true
-    NAV_OP_MODE   = 16,  // dive vs surface (toggle GPS + WiFi)
-    POWER_OFF     = 17,  // save state and enter deep sleep
-    CAL_HDG       = 18,  // 4-point heading calibration
+    NAV_OP_MODE          = 16,  // dive vs surface (toggle GPS + WiFi)
+    POWER_OFF            = 17,  // save state and enter deep sleep
+    CAL_HDG              = 18,  // 4-point heading calibration
+    NAV_SELECT_WAYPOINT  = 19,  // open waypoint selection UI (navigate TO a waypoint)
+    NAV_ARRIVE_WAYPOINT  = 20,  // open waypoint arrival UI (snap position TO a waypoint)
 };
 
 // ---------------------------------------------------------------------------
@@ -128,5 +130,16 @@ void clearHdgCalPending();
 // should begin the power-off sequence.  Cleared by clearPowerOffPending().
 bool isPendingPowerOff();
 void clearPowerOffPending();
+
+// Returns true if the user just selected "Select WP" — display should enter
+// waypoint-selection UI.  Cleared by clearWaypointSelectPending().
+bool isPendingWaypointSelect();
+void clearWaypointSelectPending();
+
+// Returns true if the user just selected "Arrive WP" — display should enter
+// waypoint-arrival UI (snaps position to chosen waypoint).
+// Cleared by clearWaypointArrivePending().
+bool isPendingWaypointArrive();
+void clearWaypointArrivePending();
 
 }  // namespace menu

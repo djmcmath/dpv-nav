@@ -17,7 +17,7 @@ struct LogData {
     float pos_y_m;
     float lat;            // current latitude (GPS or DR-estimated)
     float lon;            // current longitude (GPS or DR-estimated)
-    bool  gpsPos;         // true = GPS position, false = DR estimate
+    char  pos_src;        // 'G' = GPS, 'W' = waypoint snap, 'E' = DR estimate
     uint8_t gps_satellites; // satellites tracked (0 if no GPS fix)
     float   gps_hdop;       // HDOP (0.0 if no GPS fix)
     // HIGH-level fields
@@ -44,8 +44,12 @@ void cycleLevel();
 // Set level directly (e.g. to restore from NVS on boot). No-op if already at that level.
 void setLevel(LogLevel level);
 
-// Log one entry. No-op if level == OFF.
+// Log one entry. No-op if level == OFF. Respects the per-level rate limit.
 void log(const LogData& d);
+
+// Log one entry immediately, bypassing the rate limit. Use for rare events
+// (e.g., waypoint position corrections) that must not be silently dropped.
+void logImmediate(const LogData& d);
 
 // True if level != OFF.
 bool isLogging();

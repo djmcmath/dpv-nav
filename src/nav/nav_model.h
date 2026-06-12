@@ -34,6 +34,10 @@ void setUseGps(bool enable);
 // Restore a saved position (e.g. from NVS on boot).
 void setPosition(float x_m, float y_m);
 
+// Snap current position to a lat/lon without being gated by the GPS-enable flag.
+// Used for "arrived at waypoint" to correct accumulated DR error.
+void snapToLatLon(float lat, float lon);
+
 // Current position in local XY and lat/lon.
 Position getPosition();
 

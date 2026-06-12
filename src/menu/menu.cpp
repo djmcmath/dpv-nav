@@ -24,9 +24,11 @@ static SendCmdFn gSendCmd = nullptr;
 
 static bool gDiveMode = false;  // Op mode toggle state (display-side tracking)
 static uint8_t gLogLevel = 0;  // Log level tracking (0=OFF, 1=LOW, 2=HIGH)
-static bool gSpeedCalPending  = false;  // true after user selects "Speed cal"
-static bool gHdgCalPending    = false;  // true after user selects "Hdg cal"
-static bool gPowerOffPending  = false;  // true after user selects "OFF"
+static bool gSpeedCalPending        = false;
+static bool gHdgCalPending          = false;
+static bool gPowerOffPending        = false;
+static bool gWaypointSelectPending  = false;
+static bool gWaypointArrivePending  = false;
 
 // Nav-device toggle states (updated from NavPacket flags)
 static bool gGpsPosEnabled = true;
@@ -91,10 +93,10 @@ static void loadDefaults() {
     auto& nav = submenus[1];
     strncpy(nav.title, "Nav", MENU_LABEL_LEN);
     nav.count = 5;  // 4 items + back
-    strncpy(nav.items[0].label, "Outbound", MENU_LABEL_LEN);
-    nav.items[0].action = Action::NAV_OUTBOUND; nav.items[0].submenuIdx = -1;
-    strncpy(nav.items[1].label, "Home", MENU_LABEL_LEN);
-    nav.items[1].action = Action::NAV_HOME; nav.items[1].submenuIdx = -1;
+    strncpy(nav.items[0].label, "Select WP", MENU_LABEL_LEN);
+    nav.items[0].action = Action::NAV_SELECT_WAYPOINT; nav.items[0].submenuIdx = -1;
+    strncpy(nav.items[1].label, "Arrive WP", MENU_LABEL_LEN);
+    nav.items[1].action = Action::NAV_ARRIVE_WAYPOINT; nav.items[1].submenuIdx = -1;
     strncpy(nav.items[2].label, "Mark", MENU_LABEL_LEN);
     nav.items[2].action = Action::NAV_MARK; nav.items[2].submenuIdx = -1;
     strncpy(nav.items[3].label, "Op Mode", MENU_LABEL_LEN);
@@ -270,13 +272,13 @@ static void getDisplayLabel(const MenuItem& item, char* buf, size_t bufLen) {
 static void executeAction(Action act) {
     switch (act) {
         // Nav-device commands
-        case Action::NAV_OUTBOUND:
-            if (gSendCmd) gSendCmd(DisplayCmd::NAV_OUTBOUND);
-            Serial.println("[MENU] NAV_OUTBOUND");
+        case Action::NAV_SELECT_WAYPOINT:
+            gWaypointSelectPending = true;
+            Serial.println("[MENU] NAV_SELECT_WAYPOINT: entering waypoint selection");
             break;
-        case Action::NAV_HOME:
-            if (gSendCmd) gSendCmd(DisplayCmd::SET_HOME);
-            Serial.println("[MENU] NAV_HOME (SET_HOME)");
+        case Action::NAV_ARRIVE_WAYPOINT:
+            gWaypointArrivePending = true;
+            Serial.println("[MENU] NAV_ARRIVE_WAYPOINT: entering waypoint arrival UI");
             break;
         case Action::NAV_MARK:
             if (gSendCmd) gSendCmd(DisplayCmd::MARK_POSITION);
@@ -537,6 +539,22 @@ bool isPendingPowerOff() {
 
 void clearPowerOffPending() {
     gPowerOffPending = false;
+}
+
+bool isPendingWaypointSelect() {
+    return gWaypointSelectPending;
+}
+
+void clearWaypointSelectPending() {
+    gWaypointSelectPending = false;
+}
+
+bool isPendingWaypointArrive() {
+    return gWaypointArrivePending;
+}
+
+void clearWaypointArrivePending() {
+    gWaypointArrivePending = false;
 }
 
 }  // namespace menu

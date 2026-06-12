@@ -10,11 +10,18 @@ constexpr const char* WIFI_AP_PASS        = "password";
 constexpr uint32_t    WIFI_STA_TIMEOUT_MS = 10000;
 
 // Flow sensor configuration (hall-effect pulse output)
-constexpr float FLOW_K_FACTOR         = 0.168f; // freq_hz = K * flow_lpm (pulses per L/min)
+constexpr float FLOW_K_FACTOR         = 0.224f; // freq_hz = K * flow_lpm (pulses per L/min)
 constexpr float FLOW_CROSS_SECTION_M2 = 0.002f;  // Intake cross-section area (m²) — calibrate to match DPV
 
 // Flow speed averaging
 constexpr float FLOW_AVG_PERIOD_S = 3.0f;    // EMA time constant (seconds) — smooths out momentary spikes
+
+// Minimum flow speed for dead-reckoning integration.
+// Flow readings below this are treated as stationary; position is not updated.
+// Only applies when GPS speed is not available — GPS truth updates are unaffected.
+// This is mostly for when you're drifting around a wreck, or stationary doing deco somewhere -> result is that if you're below this speed, it won't register.
+// -- Side effect, if you're finning from one place to another, you'll probably be below the speed threshold, so position won't update.
+constexpr float DR_MIN_FLOW_SPEED_MS = 0.10f;  // ~0.2 kt
 
 // Speed source selection
 constexpr uint32_t GPS_FIX_STALE_MS = 3000;      // Fall back to flowmeter if GPS fix older than this
@@ -169,10 +176,10 @@ constexpr int   GPS_CAP_2D_MAX_BARS   = 2;    // 2D-only fix → max 2 bars
 // Battery voltage indicator thresholds (millivolts, single-cell LiPo on Feather v1 BAT pin)
 // GPIO35 reads VBAT/2 via the onboard 2:1 divider; adjust if battery type differs.
 // ---------------------------------------------------------------------------
-constexpr uint16_t BATT_MV_FULL   = 4200;  // fully charged (100%)
+constexpr uint16_t BATT_MV_FULL   = 4500;  // fully charged (100%)
 constexpr uint16_t BATT_MV_EMPTY  = 3300;  // protection cutoff (0%)
-constexpr uint16_t BATT_MV_GREEN  = 3900;  // >= green (good)
-constexpr uint16_t BATT_MV_YELLOW = 3600;  // >= yellow (moderate); below = red (low)
+constexpr uint16_t BATT_MV_GREEN  = 3700;  // >= green (good)
+constexpr uint16_t BATT_MV_YELLOW = 3400;  // >= yellow (moderate); below = red (low)
 constexpr int      BATT_ADC_AVG_N = 8;     // samples averaged per battery reading
 
 // ---------------------------------------------------------------------------

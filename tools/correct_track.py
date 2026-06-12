@@ -15,7 +15,19 @@ GPS block structure:
     - For a single-row GPS block (e.g. a manually inserted midpoint), both
       anchors are the same row.
 
-Two correction modes (--mode):
+Three correction modes (--mode):
+
+  reciprocal
+    Calibration mode.  Requires a GEGEG log structure — outbound leg, GPS
+    midpoint fix, return leg on a reciprocal course.  Solves simultaneously
+    for speed factor (k), heading offset (θ), and water current vector (Cx, Cy)
+    using a 4×4 linear system derived from the two GPS-constrained leg
+    displacements.  Exact solution (no LS); current and sensor errors are
+    isolated without approximation.
+
+    Corrected EPs include current drift: position = k·speed in dir (heading+θ)
+    plus current velocity, each dt.  Use this mode to characterize sensor errors
+    at different DPV speeds and measure ambient current.
 
   joint (default)
     Solves jointly for a constant speed scale (k) and constant heading
@@ -47,7 +59,7 @@ Adds columns: adj_pos_x_m, adj_pos_y_m, adj_lat, adj_lon
 In order to re-ingest into dive map, copy the adj_ columns back to the lat/lon columns.
 
 Usage:
-    python tools/correct_track.py <logfile.csv> [--mode joint|proportional]
+    python tools/correct_track.py <logfile.csv> [--mode reciprocal|joint|proportional]
                                                  [--max-theta DEG]
                                                  [--max-k-error FRAC]
 
@@ -214,6 +226,108 @@ def reintegrate(seg: dict, k: float, theta_rad: float):
     return positions, math.hypot(gap_x, gap_y), (gap_x, gap_y)
 
 
+def reintegrate_with_current(seg: dict, k: float, theta_rad: float,
+                              Cx: float, Cy: float):
+    """
+    Re-integrate one segment with DPV correction (k, θ) plus current (Cx, Cy).
+    Each step: adj += (k·spd·(sin(h+θ), cos(h+θ)) + (Cx, Cy)) · dt
+
+    Returns (positions, gap_m, (gap_x, gap_y)).  For reciprocal calibration the
+    gap is exact-solution residual (should be near-zero floating-point noise).
+    """
+    start_row = seg["start_row"]
+    end_row   = seg["end_row"]
+    est_rows  = seg["est_rows"]
+
+    x, y = latlon_to_xy(float(start_row["lat"]), float(start_row["lon"]))
+    xN, yN = latlon_to_xy(float(end_row["lat"]), float(end_row["lon"]))
+
+    prev_ts = int(start_row["timestamp_ms"])
+    positions: list[tuple[float, float]] = []
+
+    for row in est_rows:
+        ts  = int(row["timestamp_ms"])
+        dt  = (ts - prev_ts) / 1000.0
+        hr  = math.radians(float(row["heading_deg"]))
+        spd = float(row["speed_ms"])
+        x += (k * spd * math.sin(hr + theta_rad) + Cx) * dt
+        y += (k * spd * math.cos(hr + theta_rad) + Cy) * dt
+        prev_ts = ts
+        positions.append((x, y))
+
+    gap_x = xN - positions[-1][0]
+    gap_y = yN - positions[-1][1]
+    return positions, math.hypot(gap_x, gap_y), (gap_x, gap_y)
+
+
+def _leg_stats(seg: dict) -> tuple[float, float]:
+    """Return (Σspd·dt, elapsed_s) for a segment — average speed = ratio."""
+    prev_ts   = int(seg["start_row"]["timestamp_ms"])
+    spd_int   = 0.0
+    for row in seg["est_rows"]:
+        ts      = int(row["timestamp_ms"])
+        dt      = (ts - prev_ts) / 1000.0
+        spd_int += float(row["speed_ms"]) * dt
+        prev_ts  = ts
+    elapsed = (int(seg["est_rows"][-1]["timestamp_ms"]) -
+               int(seg["start_row"]["timestamp_ms"])) / 1000.0
+    return spd_int, elapsed
+
+
+def solve_reciprocal(seg1: dict, seg2: dict,
+                     vec1: tuple, vec2: tuple) -> tuple:
+    """
+    Exact solution for (k, θ, Cx, Cy) from a reciprocal run pair.
+
+    For each leg the corrected ground displacement equals the GPS displacement:
+        c·Sx₁ + s·Sy₁ + Cx·t₁ = dx     (1x)
+        c·Sy₁ − s·Sx₁ + Cy·t₁ = dy     (1y)
+        c·Sx₂ + s·Sy₂ + Cx·t₂ = ex     (2x)
+        c·Sy₂ − s·Sx₂ + Cy·t₂ = ey     (2y)
+    where c = k·cosθ, s = k·sinθ.
+
+    Substituting Cx, Cy from equations (1) into (2) eliminates the current
+    and yields a 2×2 system in (c, s) with closed-form solution:
+        α = t₂/t₁
+        E = Sx₂ − Sx₁·α,   F = Sy₂ − Sy₁·α
+        G = ex  − dx·α,     H = ey  − dy·α
+        c = (G·E + H·F) / (E²+F²)
+        s = (G·F − H·E) / (E²+F²)
+
+    E²+F² = 0 only if both legs have identical DR direction per unit time —
+    impossible for truly reciprocal courses.
+
+    Returns (k, theta_rad, Cx, Cy, t1, t2, avg_spd1, avg_spd2).
+    """
+    Sx1, Sy1, dx, dy = vec1
+    Sx2, Sy2, ex, ey = vec2
+
+    spd_int1, t1 = _leg_stats(seg1)
+    spd_int2, t2 = _leg_stats(seg2)
+
+    alpha = t2 / t1
+    E = Sx2 - Sx1 * alpha
+    F = Sy2 - Sy1 * alpha
+    G = ex  - dx  * alpha
+    H = ey  - dy  * alpha
+
+    denom = E * E + F * F
+    if denom < 1e-6:
+        print("Error: degenerate reciprocal geometry — legs too similar in direction.")
+        sys.exit(1)
+
+    c = (G * E + H * F) / denom
+    s = (G * F - H * E) / denom
+
+    Cx = (dx - c * Sx1 - s * Sy1) / t1
+    Cy = (dy - c * Sy1 + s * Sx1) / t1
+
+    avg_spd1 = spd_int1 / t1 if t1 > 0 else 0.0
+    avg_spd2 = spd_int2 / t2 if t2 > 0 else 0.0
+
+    return math.hypot(c, s), math.atan2(s, c), Cx, Cy, t1, t2, avg_spd1, avg_spd2
+
+
 # ── Joint solver ──────────────────────────────────────────────────────────────
 
 def solve_k_theta_multi(vec_list: list[tuple]) -> tuple[float, float]:
@@ -299,8 +413,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("input_file")
-    parser.add_argument("--mode", choices=["joint", "proportional"], default="joint",
-                        help="Correction mode (default: joint)")
+    parser.add_argument("--mode", choices=["reciprocal", "joint", "proportional"],
+                        default="joint", help="Correction mode (default: joint)")
     parser.add_argument("--max-theta", type=float, default=None, metavar="DEG",
                         help="[joint] Constrain heading correction to ±DEG degrees")
     parser.add_argument("--max-k-error", type=float, default=None, metavar="FRAC",
@@ -344,8 +458,91 @@ def main():
                     sys.exit(1)
                 adj_pos[block["start_idx"] + i] = (gx, gy)
 
+    # ── Reciprocal calibration mode ───────────────────────────────────────────
+    if args.mode == "reciprocal":
+        if n_segs != 2:
+            print(f"Error: reciprocal mode requires exactly 2 DR segments (G-E-G-E-G), "
+                  f"found {n_segs}.")
+            sys.exit(1)
+
+        seg1, seg2 = segments[0], segments[1]
+        vec1 = compute_dr_vectors(seg1)
+        vec2 = compute_dr_vectors(seg2)
+
+        k, theta_rad, Cx, Cy, t1, t2, avg_spd1, avg_spd2 = \
+            solve_reciprocal(seg1, seg2, vec1, vec2)
+
+        for seg in segments:
+            positions, gap_m, _ = reintegrate_with_current(seg, k, theta_rad, Cx, Cy)
+            for i, pos in enumerate(positions):
+                adj_pos[seg["start_idx"] + i] = pos
+
+        # ── Calibration report ────────────────────────────────────────────────
+        theta_deg    = (math.degrees(theta_rad) + 180) % 360 - 180
+        current_spd  = math.hypot(Cx, Cy)
+        current_dir  = math.degrees(math.atan2(Cx, Cy)) % 360
+
+        g_start = seg1["start_row"]   # last G of first block
+        g_mid   = seg1["end_row"]     # first G of middle block (turnaround)
+        g_end   = seg2["end_row"]     # first G of last block
+        x0, y0  = latlon_to_xy(float(g_start["lat"]), float(g_start["lon"]))
+        xm, ym  = latlon_to_xy(float(g_mid["lat"]),   float(g_mid["lon"]))
+        xe, ye  = latlon_to_xy(float(g_end["lat"]),   float(g_end["lon"]))
+
+        mid_dist = math.hypot(xm - x0, ym - y0)
+        mid_az   = math.degrees(math.atan2(xm - x0, ym - y0)) % 360
+        end_dist = math.hypot(xe - x0, ye - y0)
+
+        Sx1, Sy1, dx, dy = vec1
+        Sx2, Sy2, ex, ey = vec2
+
+        gap1 = reintegrate_with_current(seg1, k, theta_rad, Cx, Cy)[1]
+        gap2 = reintegrate_with_current(seg2, k, theta_rad, Cx, Cy)[1]
+
+        print(f"Mode:          reciprocal calibration")
+        print(f"GPS start:     ({float(g_start['lat']):.6f}, {float(g_start['lon']):.6f})")
+        print(f"GPS midpoint:  ({float(g_mid['lat']):.6f}, {float(g_mid['lon']):.6f})"
+              f"  — {mid_dist:.1f} m @ {mid_az:.1f}°")
+        print(f"GPS end:       ({float(g_end['lat']):.6f}, {float(g_end['lon']):.6f})"
+              f"  — {end_dist:.1f} m from start"
+              + (f"  (good return)" if end_dist < 10 else f"  (WARNING: not back at start)"))
+        print()
+        print(f"  Leg 1 (outbound):")
+        print(f"    Duration:        {t1:.1f} s")
+        print(f"    Avg sensor spd:  {avg_spd1:.3f} m/s  ({avg_spd1 * 1.9438:.2f} kn)")
+        print(f"    Raw DR:          {math.hypot(Sx1, Sy1):.1f} m"
+              f"  @ {math.degrees(math.atan2(Sx1, Sy1)) % 360:.1f}° az")
+        print(f"    Required:        {math.hypot(dx, dy):.1f} m"
+              f"  @ {math.degrees(math.atan2(dx, dy)) % 360:.1f}° az")
+        print()
+        print(f"  Leg 2 (return):")
+        print(f"    Duration:        {t2:.1f} s")
+        print(f"    Avg sensor spd:  {avg_spd2:.3f} m/s  ({avg_spd2 * 1.9438:.2f} kn)")
+        print(f"    Raw DR:          {math.hypot(Sx2, Sy2):.1f} m"
+              f"  @ {math.degrees(math.atan2(Sx2, Sy2)) % 360:.1f}° az")
+        print(f"    Required:        {math.hypot(ex, ey):.1f} m"
+              f"  @ {math.degrees(math.atan2(ex, ey)) % 360:.1f}° az")
+        print()
+        print(f"── Calibration results ─────────────────────────────────────────")
+        print(f"  Speed factor k:    {k:.4f}×")
+        true_spd1 = k * avg_spd1
+        true_spd2 = k * avg_spd2
+        print(f"  True DPV speed:    {true_spd1:.3f} m/s  ({true_spd1 * 1.9438:.2f} kn)"
+              f"  [leg 1 avg sensor]")
+        if abs(true_spd1 - true_spd2) > 0.02:
+            print(f"                     {true_spd2:.3f} m/s  ({true_spd2 * 1.9438:.2f} kn)"
+                  f"  [leg 2 — speeds differ, check throttle]")
+        print(f"  Heading offset θ:  {theta_deg:+.2f}°"
+              f"  ({'compass reads low' if theta_deg > 0 else 'compass reads high'})")
+        print(f"  Current speed:     {current_spd:.3f} m/s  ({current_spd * 1.9438:.2f} kn)")
+        print(f"  Current toward:    {current_dir:.1f}°")
+        print()
+        print(f"  Closure leg 1:     {gap1:.4f} m  (should be ~0)")
+        print(f"  Closure leg 2:     {gap2:.4f} m  (should be ~0)")
+        print()
+
     # ── Proportional mode ─────────────────────────────────────────────────────
-    if args.mode == "proportional":
+    elif args.mode == "proportional":
         print(f"Mode:          proportional")
         print(f"GPS blocks:    {n_segs + 1}")
         print(f"DR segments:   {n_segs}")

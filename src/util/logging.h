@@ -18,6 +18,8 @@ struct LogData {
     float lat;            // current latitude (GPS or DR-estimated)
     float lon;            // current longitude (GPS or DR-estimated)
     bool  gpsPos;         // true = GPS position, false = DR estimate
+    uint8_t gps_satellites; // satellites tracked (0 if no GPS fix)
+    float   gps_hdop;       // HDOP (0.0 if no GPS fix)
     // HIGH-level fields
     imu::Vec3f mag_raw, accel_raw, gyro_raw;
     imu::Vec3f mag_cal, accel_cal, gyro_cal;

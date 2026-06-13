@@ -52,6 +52,10 @@ struct NavPacket {
     // Boot status flags — set once during nav device setup(), sent in every packet.
     // Display uses these to show the boot results screen after first link contact.
     uint8_t boot_flags;  // see BOOT_* constants below
+
+    uint8_t gps_hdop_x10;  // HDOP × 10 (0=no fix/unknown; 12 = HDOP 1.2)
+    uint8_t gps_antenna;   // 0=unknown, 1=error/shorted, 2=internal, 3=active external
+    uint8_t flags2;        // see FLAG2_* constants below
 };
 
 // NavPacket.boot_flags bit definitions
@@ -71,6 +75,9 @@ constexpr uint8_t FLAG_WIFI_ENABLED    = 0x10;  // 1 = WiFi radio enabled
 constexpr uint8_t FLAG_GPS_SPD_ENABLED = 0x20;  // 1 = GPS speed usage enabled
 constexpr uint8_t FLAG_LOG_LEVEL_MASK  = 0xC0;  // bits 7:6 — log level (0=OFF, 1=LOW, 2=HIGH)
 constexpr uint8_t FLAG_LOG_LEVEL_SHIFT = 6;
+
+// NavPacket.flags2 bit definitions
+constexpr uint8_t FLAG2_WIFI_CLIENT = 0x01;  // 1 = connected to stored AP (client), 0 = own AP mode
 
 // ---------------------------------------------------------------------------
 // Debug packet  (sent alongside NavPacket when debug mode enabled)

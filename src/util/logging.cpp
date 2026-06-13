@@ -85,10 +85,12 @@ static void writeHeader() {
     if (!gLogFile) return;
     if (gLevel == LogLevel::LEVEL_LOW) {
         gLogFile.print("timestamp_ms,local_time,heading_deg,speed_ms,speed_src,"
-                       "pos_x_m,pos_y_m,lat,lon,pos_src\n");
+                       "pos_x_m,pos_y_m,lat,lon,pos_src,"
+                       "gps_satellites,gps_hdop\n");
     } else if (gLevel == LogLevel::LEVEL_HIGH) {
         gLogFile.print("timestamp_ms,local_time,heading_deg,speed_ms,speed_src,"
                        "pos_x_m,pos_y_m,lat,lon,pos_src,"
+                       "gps_satellites,gps_hdop,"
                        "mag_x_raw,mag_y_raw,mag_z_raw,"
                        "accel_x_raw,accel_y_raw,accel_z_raw,"
                        "gyro_x_raw,gyro_y_raw,gyro_z_raw,"
@@ -241,6 +243,12 @@ void log(const LogData& d) {
                     d.lon,
                     d.pos_src);
 
+    if (d.pos_src == 'G') {
+        gLogFile.printf(",%u,%.1f", d.gps_satellites, d.gps_hdop);
+    } else {
+        gLogFile.print(",,");
+    }
+
     if (gLevel == LogLevel::LEVEL_HIGH) {
         gLogFile.printf(",%.3f,%.3f,%.3f"
                         ",%.3f,%.3f,%.3f"
@@ -291,6 +299,12 @@ void logImmediate(const LogData& d) {
                     d.lat,
                     d.lon,
                     d.pos_src);
+
+    if (d.pos_src == 'G') {
+        gLogFile.printf(",%u,%.1f", d.gps_satellites, d.gps_hdop);
+    } else {
+        gLogFile.print(",,");
+    }
 
     if (gLevel == LogLevel::LEVEL_HIGH) {
         gLogFile.printf(",%.3f,%.3f,%.3f"

@@ -59,7 +59,10 @@ struct NavCache {
     bool    bottomDirty   = false;  // true → bottom half overwritten by menu, needs redraw
     // Status bar
     uint8_t gpsSignalBars = 0xFF;   // 0–4 computed signal bar count
-    uint8_t statusFlags   = 0xFF;   // relevant flag bits (WiFi, P, S)
+    uint8_t gpsSatellites = 0xFF;
+    uint8_t gpsHdopX10    = 0xFF;
+    uint8_t gpsAntenna    = 0xFF;
+    uint8_t wifiDispFlags = 0xFF;   // FLAG_WIFI_ENABLED | FLAG2_WIFI_CLIENT combined
     uint8_t battLevel     = 0xFF;   // 0=unknown,1=red,2=yellow,3=green (avoids redraw on mV jitter)
     // BRG cell
     bool    hasHome       = false;
@@ -224,25 +227,23 @@ void drawHLine(int x, int y, int w, uint16_t color) {
 // ===========================================================================
 
 static void drawStatusBar(const NavPacket& pkt) {
+    // Layout (size-2 text = 12px/char × 16px tall; bar height = 24px):
+    //   x=2:   BATT (48px) + level bar
+    //   x=72:  WiFi (48px) + "AP" when in AP mode
+    //   x=158: GPS (36px) + signal bars + sat count + antenna char + HDOP
     tft.setTextSize(2);
 
-    // Layout: BATT  CAL  WiFi  GPS  P  S
-    // Each size-2 char is 12px wide.
-    // Positions chosen for even spacing across 320px.
-
-    // BATT label color and small vertical level bar (x=54, 4px wide × 14px tall)
-    // batt_mv==0 means nav device hasn't read yet → gray
+    // ---- BATT ---------------------------------------------------------------
     uint16_t battColor;
-    if      (pkt.batt_mv == 0)                    battColor = COLOR_GRAY;
-    else if (pkt.batt_mv >= BATT_MV_GREEN)        battColor = COLOR_GREEN;
-    else if (pkt.batt_mv >= BATT_MV_YELLOW)       battColor = COLOR_YELLOW;
-    else                                           battColor = COLOR_RED;
+    if      (pkt.batt_mv == 0)              battColor = COLOR_GRAY;
+    else if (pkt.batt_mv >= BATT_MV_GREEN)  battColor = COLOR_GREEN;
+    else if (pkt.batt_mv >= BATT_MV_YELLOW) battColor = COLOR_YELLOW;
+    else                                     battColor = COLOR_RED;
 
     tft.setTextColor(battColor, COLOR_BLACK);
     tft.setCursor(2, 4);
     tft.print("BATT");
 
-    // Draw battery level bar: outline + proportional fill (bottom-aligned)
     static constexpr int BBAR_X = 54;
     static constexpr int BBAR_Y = 5;
     static constexpr int BBAR_W = 4;
@@ -253,7 +254,6 @@ static void drawStatusBar(const NavPacket& pkt) {
                     : pkt.batt_mv > BATT_MV_FULL  ? BATT_MV_FULL
                     : pkt.batt_mv;
         int fillH = (int)((mv - BATT_MV_EMPTY) * (BBAR_H - 2) / (BATT_MV_FULL - BATT_MV_EMPTY));
-        // clear interior then fill from bottom
         tft.fillRect(BBAR_X + 1, BBAR_Y + 1, BBAR_W - 2, BBAR_H - 2, COLOR_BLACK);
         if (fillH > 0)
             tft.fillRect(BBAR_X + 1, BBAR_Y + 1 + (BBAR_H - 2 - fillH), BBAR_W - 2, fillH, battColor);
@@ -261,51 +261,93 @@ static void drawStatusBar(const NavPacket& pkt) {
         tft.fillRect(BBAR_X + 1, BBAR_Y + 1, BBAR_W - 2, BBAR_H - 2, COLOR_BLACK);
     }
 
-    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
-    tft.setCursor(66, 4);
-    tft.print("CAL");
+    // ---- WiFi ---------------------------------------------------------------
+    // Colors: gray=disabled, yellow=own AP, green=connected to stored AP
+    bool wifiEnabled = (pkt.flags  & FLAG_WIFI_ENABLED) != 0;
+    bool wifiClient  = (pkt.flags2 & FLAG2_WIFI_CLIENT) != 0;
 
-    uint16_t wifiColor = (pkt.flags & FLAG_WIFI_ENABLED) ? COLOR_WHITE : COLOR_GRAY;
+    uint16_t wifiColor;
+    if      (!wifiEnabled) wifiColor = COLOR_GRAY;
+    else if (wifiClient)   wifiColor = COLOR_GREEN;
+    else                   wifiColor = COLOR_YELLOW;
+
     tft.setTextColor(wifiColor, COLOR_BLACK);
-    tft.setCursor(122, 4);
+    tft.setCursor(72, 4);
     tft.print("WiFi");
 
-    // GPS label: grey when both GPS usage flags are off (dive mode), white otherwise.
+    // "AP" badge visible only when enabled and in AP mode; cleared otherwise
+    if (wifiEnabled && !wifiClient) {
+        tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
+        tft.setCursor(122, 4);
+        tft.print("AP");
+    } else {
+        tft.fillRect(122, 0, 24, STATUS_BAR_H, COLOR_BLACK);
+    }
+
+    // ---- GPS ----------------------------------------------------------------
+    // Label: gray when both GPS usage flags are off (dive mode)
     bool gpsEnabled = (pkt.flags & (FLAG_GPS_POS_ENABLED | FLAG_GPS_SPD_ENABLED)) != 0;
-    uint16_t gpsLabelColor = gpsEnabled ? COLOR_WHITE : COLOR_GRAY;
-    tft.setTextColor(gpsLabelColor, COLOR_BLACK);
-    tft.setCursor(207, 4);
+    uint16_t gpsBaseColor = gpsEnabled ? COLOR_WHITE : COLOR_GRAY;
+
+    tft.setTextColor(gpsBaseColor, COLOR_BLACK);
+    tft.setCursor(158, 4);
     tft.print("GPS");
 
-    // Signal bars: 4 bottom-aligned rectangles, growing taller left-to-right.
-    // Active bars (within pkt.gps_signal_bars) drawn in label color; empty in dim gray.
-    // Layout: bar 0 at x=246, each bar 3px wide, 2px gap → bar 3 ends at x=263.
-    static constexpr int   BAR_X0         = 246;
-    static constexpr int   BAR_W          = 3;
-    static constexpr int   BAR_GAP        = 2;
-    static constexpr int   BAR_BOTTOM_Y   = 21;
-    static constexpr int   BAR_HEIGHTS[4] = { 5, 9, 13, 17 };
+    // Signal bars (x=198; 4 bars × 3px wide, 2px gap each)
+    static constexpr int BAR_X0         = 198;
+    static constexpr int BAR_W          = 3;
+    static constexpr int BAR_GAP        = 2;
+    static constexpr int BAR_BOTTOM_Y   = 21;
+    static constexpr int BAR_HEIGHTS[4] = { 5, 9, 13, 17 };
 
-    int numBars = pkt.gps_signal_bars;  // 0–4
+    int numBars = pkt.gps_signal_bars;
     for (int i = 0; i < 4; i++) {
         int x = BAR_X0 + i * (BAR_W + BAR_GAP);
         int h = BAR_HEIGHTS[i];
         int y = BAR_BOTTOM_Y - h + 1;
-        uint16_t barColor = (i < numBars) ? gpsLabelColor : COLOR_DIM_GRAY;
+        uint16_t barColor = (i < numBars) ? gpsBaseColor : COLOR_DIM_GRAY;
         tft.fillRect(x, y, BAR_W, h, barColor);
-        // Clear pixels above the bar (shorter bar may leave old taller-bar pixels)
         if (y > 1) tft.fillRect(x, 1, BAR_W, y - 1, COLOR_BLACK);
     }
 
-    uint16_t posColor = (pkt.flags & FLAG_GPS_POS_ENABLED) ? COLOR_WHITE : COLOR_GRAY;
-    tft.setTextColor(posColor, COLOR_BLACK);
-    tft.setCursor(268, 4);
-    tft.print("P");
+    // Satellite count (x=220; 2 chars right-aligned, white when fix active)
+    uint16_t satColor = (gpsEnabled && pkt.gps_satellites > 0) ? COLOR_WHITE : COLOR_GRAY;
+    tft.setTextColor(satColor, COLOR_BLACK);
+    tft.setCursor(220, 4);
+    char satBuf[3];
+    snprintf(satBuf, sizeof(satBuf), "%2u", (unsigned)pkt.gps_satellites);
+    tft.print(satBuf);
 
-    uint16_t spdColor = (pkt.flags & FLAG_GPS_SPD_ENABLED) ? COLOR_WHITE : COLOR_GRAY;
-    tft.setTextColor(spdColor, COLOR_BLACK);
-    tft.setCursor(294, 4);
-    tft.print("S");
+    // Antenna indicator (x=248; single char)
+    // 0=unknown→gray "?", 1=error→red "!", 2=internal→white "I", 3=external→green "E"
+    uint16_t antColor;
+    char antChar;
+    switch (pkt.gps_antenna) {
+        case 1:  antColor = COLOR_RED;    antChar = '!'; break;
+        case 2:  antColor = COLOR_WHITE;  antChar = 'I'; break;
+        case 3:  antColor = COLOR_GREEN;  antChar = 'E'; break;
+        default: antColor = COLOR_GRAY;   antChar = '?'; break;
+    }
+    tft.setTextColor(antColor, COLOR_BLACK);
+    tft.setCursor(248, 4);
+    tft.print(antChar);
+
+    // HDOP (x=264; "X.X" colored by quality; "---" when no fix)
+    uint16_t hdopColor;
+    char hdopBuf[4];
+    if (pkt.gps_hdop_x10 == 0) {
+        hdopColor = COLOR_GRAY;
+        snprintf(hdopBuf, sizeof(hdopBuf), "---");
+    } else {
+        uint8_t hd = pkt.gps_hdop_x10 > 99 ? 99 : pkt.gps_hdop_x10;
+        if      (hd < 15) hdopColor = COLOR_GREEN;   // < 1.5
+        else if (hd < 25) hdopColor = COLOR_YELLOW;  // 1.5–2.4
+        else              hdopColor = COLOR_RED;      // ≥ 2.5
+        snprintf(hdopBuf, sizeof(hdopBuf), "%u.%u", hd / 10, hd % 10);
+    }
+    tft.setTextColor(hdopColor, COLOR_BLACK);
+    tft.setCursor(264, 4);
+    tft.print(hdopBuf);
 }
 
 static void drawNavGrid() {
@@ -489,7 +531,7 @@ void showNav(const NavPacket& pkt) {
     int    distCm     = hasHome ? (int)(pkt.distance_home_m * 100.0f) : -1;
     int    headingInt = (int)(pkt.heading_deg + 0.5f) % 360;
     uint8_t logLevel  = (pkt.flags & FLAG_LOG_LEVEL_MASK) >> FLAG_LOG_LEVEL_SHIFT;
-    uint8_t statFlags = pkt.flags & (FLAG_WIFI_ENABLED | FLAG_GPS_POS_ENABLED | FLAG_GPS_SPD_ENABLED);
+    uint8_t wifiDispFlags = (pkt.flags & FLAG_WIFI_ENABLED) | (pkt.flags2 & FLAG2_WIFI_CLIENT);
     uint8_t battLevel = (pkt.batt_mv == 0)              ? 0
                       : (pkt.batt_mv >= BATT_MV_GREEN)  ? 3
                       : (pkt.batt_mv >= BATT_MV_YELLOW) ? 2
@@ -501,8 +543,12 @@ void showNav(const NavPacket& pkt) {
 #endif
 
     // Determine which elements changed — evaluate all before updating cache
-    bool statusChanged  = (statFlags != navCache.statusFlags || pkt.gps_signal_bars != navCache.gpsSignalBars
-                           || battLevel != navCache.battLevel);
+    bool statusChanged  = (wifiDispFlags          != navCache.wifiDispFlags
+                        || pkt.gps_signal_bars   != navCache.gpsSignalBars
+                        || pkt.gps_satellites    != navCache.gpsSatellites
+                        || pkt.gps_hdop_x10      != navCache.gpsHdopX10
+                        || pkt.gps_antenna       != navCache.gpsAntenna
+                        || battLevel             != navCache.battLevel);
     bool brgChanged     = (bearingInt != navCache.bearingInt || hasHome != navCache.hasHome || trueHdg != navCache.trueHeading);
     bool rngChanged     = (distCm != navCache.distCm        || hasHome != navCache.hasHome);
     bool hdgChanged     = (headingInt != navCache.headingInt || trueHdg != navCache.trueHeading);
@@ -518,9 +564,12 @@ void showNav(const NavPacket& pkt) {
     if (logChanged)     drawLogIndicator(pkt);
 
     // Update cache
-    navCache.statusFlags   = statFlags;
-    navCache.gpsSignalBars = pkt.gps_signal_bars;
-    navCache.battLevel     = battLevel;
+    navCache.wifiDispFlags  = wifiDispFlags;
+    navCache.gpsSignalBars  = pkt.gps_signal_bars;
+    navCache.gpsSatellites  = pkt.gps_satellites;
+    navCache.gpsHdopX10     = pkt.gps_hdop_x10;
+    navCache.gpsAntenna     = pkt.gps_antenna;
+    navCache.battLevel      = battLevel;
     navCache.hasHome       = hasHome;
     navCache.trueHeading   = trueHdg;
     navCache.bearingInt    = bearingInt;
@@ -574,18 +623,25 @@ void showNavTop(const NavPacket& pkt) {
     bool trueHdg  = (pkt.flags & FLAG_TRUE_HEADING) != 0;
     int  bearingInt = hasHome ? ((int)(pkt.bearing_home_deg + 0.5f) % 360) : -1;
     int  distCm     = hasHome ? (int)(pkt.distance_home_m * 100.0f) : -1;
-    uint8_t statFlags = pkt.flags & (FLAG_WIFI_ENABLED | FLAG_GPS_POS_ENABLED | FLAG_GPS_SPD_ENABLED);
+    uint8_t wifiDispFlags2 = (pkt.flags & FLAG_WIFI_ENABLED) | (pkt.flags2 & FLAG2_WIFI_CLIENT);
     uint8_t battLevel = (pkt.batt_mv == 0)              ? 0
                       : (pkt.batt_mv >= BATT_MV_GREEN)  ? 3
                       : (pkt.batt_mv >= BATT_MV_YELLOW) ? 2
                       : 1;
 
-    if (statFlags != navCache.statusFlags || pkt.gps_signal_bars != navCache.gpsSignalBars
-        || battLevel != navCache.battLevel) {
+    if (wifiDispFlags2        != navCache.wifiDispFlags
+     || pkt.gps_signal_bars   != navCache.gpsSignalBars
+     || pkt.gps_satellites    != navCache.gpsSatellites
+     || pkt.gps_hdop_x10      != navCache.gpsHdopX10
+     || pkt.gps_antenna       != navCache.gpsAntenna
+     || battLevel             != navCache.battLevel) {
         drawStatusBar(pkt);
-        navCache.statusFlags   = statFlags;
-        navCache.gpsSignalBars = pkt.gps_signal_bars;
-        navCache.battLevel     = battLevel;
+        navCache.wifiDispFlags  = wifiDispFlags2;
+        navCache.gpsSignalBars  = pkt.gps_signal_bars;
+        navCache.gpsSatellites  = pkt.gps_satellites;
+        navCache.gpsHdopX10     = pkt.gps_hdop_x10;
+        navCache.gpsAntenna     = pkt.gps_antenna;
+        navCache.battLevel      = battLevel;
     }
     if (bearingInt != navCache.bearingInt || hasHome != navCache.hasHome || trueHdg != navCache.trueHeading) {
         drawBearing(pkt);

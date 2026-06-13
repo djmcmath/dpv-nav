@@ -67,4 +67,7 @@ struct GpsFix {
   uint8_t utc_minute;   // 0-59
   uint8_t utc_second;   // 0-59
   bool    has_time;     // true once GPS has parsed a valid date/time sentence
+  // Antenna status from PGTOP sentence (enabled by PGCMD_ANTENNA in gps::init).
+  // 0=unknown (no PGTOP yet), 1=error/shorted, 2=internal/passive, 3=active external
+  uint8_t antenna_status;
 };

@@ -27,4 +27,17 @@ bool hasFix();
 // Scoring thresholds and weights are configured in config.h (GPS_SCORE_*/GPS_WEIGHT_*).
 uint8_t computeSignalBars(const GpsFix& fix);
 
+// Returns the last raw $PGTOP sentence received (empty string if none yet).
+// Populated by update() before parse() so the raw bytes are always visible.
+const char* getLastPgtopSentence();
+
+// Returns the number of GPGSV sentences cached from the most recent 1 Hz group (0–4).
+int getGsvLineCount();
+// Returns the raw GPGSV sentence at index idx, or "" if out of range.
+const char* getGsvLine(int idx);
+
+// When enabled, every complete NMEA sentence is printed to Serial with [NMEA] prefix.
+// Useful for confirming which sentences the module is actually emitting.
+void setRawNmeaDebug(bool enable);
+
 }

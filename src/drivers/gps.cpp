@@ -7,6 +7,14 @@
 static Adafruit_GPS adaGps(&Serial2);
 static bool initialized = false;
 static bool enabled = true;
+static char lastPgtopSentence[80] = {};
+static bool rawNmeaDebug = false;
+
+// GPGSV sentence cache — one group of sentences per 1 Hz update cycle.
+// A group starts when sentence 1-of-N arrives; earlier cached lines are discarded.
+static constexpr int MAX_GSV_LINES = 4;  // covers up to 16 sats (4 per sentence)
+static char gsvLines[MAX_GSV_LINES][90] = {};
+static int  gsvLineCount = 0;
 
 namespace gps {
 
@@ -19,9 +27,10 @@ bool init() {
 
   adaGps.begin(9600);
 
-  // Request RMC (position + speed), GGA (fix + altitude + satellites), and
-  // GSA (2D/3D fix type) — GSA populates adaGps.fixquality_3d used for signal scoring.
-  adaGps.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGAGSA);
+  // Request RMC, GGA, GSA, and GSV.
+  // GSA populates fixquality_3d; GSV provides per-satellite SNR for diagnostics.
+  // Checksum derived from ALLDATA (1,1,1,1,1,1→*28) with GLL+VTG cleared (two *0x01 = cancel).
+  adaGps.sendCommand("$PMTK314,0,1,0,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0*28");
 
   // 1 Hz update rate
   adaGps.sendCommand(PMTK_SET_NMEA_UPDATE_1HZ);
@@ -30,6 +39,10 @@ bool init() {
   // Requires VBACKUP pin connected to a coin cell for almanac to persist across power cycles.
   // Only supported at 1 Hz (already set above). MTK3339-specific command.
   adaGps.sendCommand("$PMTK869,1,1*35");
+
+  // Enable antenna status reporting via PGTOP sentences.
+  // After this the module emits $PGTOP,11,x where x: 1=error, 2=internal, 3=active external.
+  adaGps.sendCommand(PGCMD_ANTENNA);
 
   initialized = true;
   Serial.println("GPS: initialized on Serial2 (9600 baud)");
@@ -45,17 +58,39 @@ void setEnabled(bool enable) {
 bool update() {
   if (!initialized || !enabled) return false;
 
-  // Read all available bytes from GPS serial (non-blocking)
+  // Process one byte at a time so every complete sentence is handled before the
+  // next one overwrites lastNMEA(). The old drain-then-check approach lost any
+  // sentence that arrived earlier in the burst (e.g. PGTOP before GPRMC).
+  bool parsed = false;
   while (Serial2.available()) {
     adaGps.read();
+    if (adaGps.newNMEAreceived()) {
+      char* sentence = adaGps.lastNMEA();
+      if (rawNmeaDebug) Serial.printf("[NMEA] %s\n", sentence);
+      if (strncmp(sentence, "$PGTOP", 6) == 0) {
+        strncpy(lastPgtopSentence, sentence, sizeof(lastPgtopSentence) - 1);
+        lastPgtopSentence[sizeof(lastPgtopSentence) - 1] = '\0';
+      }
+      // Cache GPGSV sentences. The group header ($GPGSV,N,1,...) resets the
+      // cache so stale lines from the previous second are discarded on new data.
+      if (strncmp(sentence, "$GPGSV", 6) == 0 || strncmp(sentence, "$GLGSV", 6) == 0
+          || strncmp(sentence, "$GNGSV", 6) == 0) {
+        // Field 2 is the sentence index within the group (1-based).
+        // Find the second comma to reach field 2.
+        const char* p = sentence;
+        int commas = 0;
+        while (*p && commas < 2) { if (*p++ == ',') commas++; }
+        if (*p == '1') gsvLineCount = 0;  // first sentence of group — reset
+        if (gsvLineCount < MAX_GSV_LINES) {
+          strncpy(gsvLines[gsvLineCount], sentence, sizeof(gsvLines[0]) - 1);
+          gsvLines[gsvLineCount][sizeof(gsvLines[0]) - 1] = '\0';
+          gsvLineCount++;
+        }
+      }
+      if (adaGps.parse(sentence)) parsed = true;
+    }
   }
-
-  // Check if a complete NMEA sentence was received and parse it
-  if (adaGps.newNMEAreceived()) {
-    return adaGps.parse(adaGps.lastNMEA());
-  }
-
-  return false;
+  return parsed;
 }
 
 GpsFix getFix() {
@@ -89,6 +124,8 @@ GpsFix getFix() {
   fix.utc_minute = adaGps.minute;
   fix.utc_second = adaGps.seconds;
   fix.has_time   = (adaGps.year > 0);
+
+  fix.antenna_status = adaGps.antenna;
 
   return fix;
 }
@@ -146,5 +183,12 @@ uint8_t computeSignalBars(const GpsFix& fix) {
 
   return (uint8_t)bars;
 }
+
+const char* getLastPgtopSentence() { return lastPgtopSentence; }
+
+int         getGsvLineCount()        { return gsvLineCount; }
+const char* getGsvLine(int idx)      { return (idx >= 0 && idx < gsvLineCount) ? gsvLines[idx] : ""; }
+
+void setRawNmeaDebug(bool enable) { rawNmeaDebug = enable; }
 
 }

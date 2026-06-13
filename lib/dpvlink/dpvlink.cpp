@@ -63,6 +63,10 @@ size_t navPacketToBytes(const NavPacket& pkt, char* buf, size_t bufLen) {
     if (pkt.heading_raw_deg != pkt.heading_deg) doc["hr"] = pkt.heading_raw_deg;
     // Battery voltage — only include when we have a reading
     if (pkt.batt_mv > 0) doc["bv"] = pkt.batt_mv;
+    // GPS detail fields — only include when populated
+    if (pkt.gps_hdop_x10 > 0) doc["gh"] = pkt.gps_hdop_x10;
+    if (pkt.gps_antenna  > 0) doc["ga"] = pkt.gps_antenna;
+    if (pkt.flags2       > 0) doc["f2"] = pkt.flags2;
 
     size_t n = serializeJson(doc, buf, bufLen - 1);
     if (n == 0 || n >= bufLen - 1) return 0;
@@ -101,6 +105,9 @@ bool bytesToNavPacket(const char* buf, size_t len, NavPacket& out) {
     // heading_raw_deg: fall back to heading_deg if not present (no hdg_cal active)
     out.heading_raw_deg      = doc["hr"]  | out.heading_deg;
     out.batt_mv              = doc["bv"]  | (uint16_t)0;
+    out.gps_hdop_x10         = doc["gh"]  | (uint8_t)0;
+    out.gps_antenna          = doc["ga"]  | (uint8_t)0;
+    out.flags2               = doc["f2"]  | (uint8_t)0;
     return true;
 }
 

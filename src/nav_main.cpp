@@ -65,9 +65,10 @@ static constexpr uint32_t SEND_INTERVAL_MS     = 100;   // 10 Hz link rate
 static constexpr uint32_t LOOP_INTERVAL_US     = 10000; // 100 Hz loop rate gate
 static constexpr uint32_t DIAG_INTERVAL_MS     = 1000;  // 1 Hz sensor diagnostics
 static constexpr uint32_t FLOW_LOG_INTERVAL_MS = 250;   // 4 Hz flow debug logging
-static constexpr bool FULL_DIAG_ENABLE = false;  // set to false to disable periodic diagnostic prints
-static constexpr bool GPS_DIAG_ENABLE  = true;   // GPS position/speed/COG coherence diagnostics
-static constexpr bool FLOW_LOG_ENABLE  = false;   // set to false to disable flow debug logging
+static constexpr bool FULL_DIAG_ENABLE    = false;  // set to false to disable periodic diagnostic prints
+static constexpr bool GPS_DIAG_ENABLE     = false;   // GPS position/speed/COG coherence diagnostics
+static constexpr bool GPS_RAW_NMEA_ENABLE = false;  // print every raw NMEA sentence (noisy — use to confirm PGTOP)
+static constexpr bool FLOW_LOG_ENABLE     = false;  // set to false to disable flow debug logging
 
 // ---- Calibration mode tracking -----------------------------------------------
 // cal_mode in NavPacket:
@@ -195,6 +196,7 @@ void setup() {
         } else {
             Serial.println("WARNING: GPS init failed");
         }
+        gps::setRawNmeaDebug(GPS_RAW_NMEA_ENABLE);
 
         // Flow sensor
         {
@@ -566,18 +568,23 @@ void loop() {
         }
 
         if (GPS_DIAG_ENABLE) {
-            Serial.printf("[GPS ] fix=%d  sat=%d  hdop=%.1f\t",
-                          fix.has_fix, fix.satellites, fix.hdop);
-            Serial.printf("pos=(%.6f, %.6f)  alt=%.1f m\n",
-                          fix.lat, fix.lon, fix.altitude_m);
-            Serial.printf("[GPS ] SOG=%.2f kn (%.2f m/s)  COG=%.1f deg\t",
-                          fix.speed_knots, fix.speed_knots * KNOTS_TO_MS,
-                          fix.course_deg);
-            Serial.printf("coherence=%.3f [%s]  speed_used=%.2f m/s (%s)\n",
-                          cogCoherence,
+            Serial.printf("[GPS ] fix=%d  3d=%d  sat=%d  hdop=%.1f  bars=%d/4\n",
+                          fix.has_fix, fix.fix_type_3d, fix.satellites,
+                          (double)fix.hdop, gpsBars);
+            Serial.printf("[GPS ] pos=(%.6f, %.6f)  alt=%.1f m\n",
+                          (double)fix.lat, (double)fix.lon, (double)fix.altitude_m);
+            Serial.printf("[GPS ] SOG=%.2f kn  COG=%.1f deg  coherence=%.3f [%s]  speed=%.2f m/s (%s)\n",
+                          (double)fix.speed_knots, (double)fix.course_deg,
+                          (double)cogCoherence,
                           cogCoherence >= GPS_COG_COHERENCE_THRESH ? "PASS" : "FAIL",
-                          speed,
-                          useGpsSpeed ? "GPS" : "FLOW");
+                          (double)speed, useGpsSpeed ? "GPS" : "FLOW");
+            int gsvN = gps::getGsvLineCount();
+            if (gsvN == 0) {
+                Serial.println("[GSV ] (none yet)");
+            } else {
+                for (int i = 0; i < gsvN; i++)
+                    Serial.printf("[GSV ] %s\n", gps::getGsvLine(i));
+            }
         }
 
         mStatN = 0;  // reset for next window
@@ -917,6 +924,18 @@ static void sendNavPacket(float heading, float headingRaw, float pitch, float ro
     flags |= (static_cast<uint8_t>(logging::getLevel()) << FLAG_LOG_LEVEL_SHIFT) & FLAG_LOG_LEVEL_MASK;
     pkt.flags      = flags;
     pkt.boot_flags = gBootFlags;
+
+    // GPS detail fields
+    pkt.gps_antenna  = fix.antenna_status;
+    float hdop = fix.hdop;
+    pkt.gps_hdop_x10 = (hdop <= 0.0f || !fix.has_fix) ? 0
+                     : (hdop >= 25.5f) ? 255
+                     : (uint8_t)(hdop * 10.0f + 0.5f);
+
+    // WiFi mode: client (connected to stored AP) vs. own AP
+    uint8_t flags2 = 0;
+    if (gWifiEnabled && wifi::isStaConnected()) flags2 |= FLAG2_WIFI_CLIENT;
+    pkt.flags2 = flags2;
 
     updateBattMv();
     pkt.batt_mv = gBattMv;

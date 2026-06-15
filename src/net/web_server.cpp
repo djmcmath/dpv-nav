@@ -214,6 +214,16 @@ async function delWp(name) {
   document.getElementById('wpstatus').textContent = r.ok ? 'Deleted' : 'Delete failed';
   if (r.ok) loadWaypoints();
 }
+['wplat','wplon'].forEach(id => {
+  document.getElementById(id).addEventListener('paste', e => {
+    const text = (e.clipboardData || window.clipboardData).getData('text').trim();
+    const m = text.match(/^(-?\d+\.?\d*)[,\s]+(-?\d+\.?\d*)$/);
+    if (!m) return;
+    e.preventDefault();
+    document.getElementById('wplat').value = m[1];
+    document.getElementById('wplon').value = m[2];
+  });
+});
 async function loadWifi() {
   try {
     const [nets, status] = await Promise.all([

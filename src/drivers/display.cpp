@@ -1,4 +1,5 @@
 #include "display.h"
+#include "logo_bitmap.h"
 #include "../board_pins.h"
 #include "../config.h"
 #include <dpvlink.h>
@@ -141,24 +142,12 @@ void flush() {
     // Kept for API compatibility with callers (menu system).
 }
 
-void selfTest() {
-    Serial.println("Display self-test: color cycle...");
-    tft.fillScreen(COLOR_RED);   delay(500);
-    tft.fillScreen(COLOR_GREEN); delay(500);
-    tft.fillScreen(COLOR_BLUE);  delay(500);
-    tft.fillScreen(COLOR_BLACK); delay(500);
-
-    tft.setTextColor(COLOR_WHITE);
-    tft.setTextSize(3);
-    tft.setCursor(20, 80);
-    tft.println("DPV-Nav");
-
-    tft.setTextSize(2);
-    tft.setTextColor(COLOR_CYAN);
-    tft.setCursor(20, 130);
-    tft.println("Display OK");
-    delay(50);
-    Serial.println("Display self-test complete");
+void showLogo() {
+    if (!tftReady) return;
+    tft.fillScreen(COLOR_BLACK);
+    int16_t x = (SCREEN_WIDTH  - LOGO_W) / 2;
+    int16_t y = (SCREEN_HEIGHT - LOGO_H) / 2;
+    tft.drawBitmap(x, y, logo_bitmap, LOGO_W, LOGO_H, COLOR_WHITE, COLOR_BLACK);
 }
 
 void clear() {

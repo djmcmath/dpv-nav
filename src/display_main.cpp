@@ -46,12 +46,15 @@ static uint32_t idleCounter    = 0;
 static bool     wasLinkDead    = false;
 
 // ---- Boot phase state machine -----------------------------------------------
-// WAITING  → loop shows "Waiting..." counter until first NavPacket
+// LOGO     → boot splash (Tern logo centered); after LOGO_MIN_MS adds "Waiting..." counter
+//            until first NavPacket arrives, then transitions to STATUS
 // STATUS   → shows nav-device boot results for BOOT_STATUS_HOLD_MS, then DONE
 // DONE     → normal nav/cal/menu rendering
-enum class BootPhase : uint8_t { WAITING, STATUS, DONE };
-static BootPhase gBootPhase     = BootPhase::WAITING;
+enum class BootPhase : uint8_t { LOGO, STATUS, DONE };
+static BootPhase gBootPhase     = BootPhase::LOGO;
 static uint32_t  gBootShowMs    = 0;
+static uint32_t  gLogoStartMs   = 0;
+static constexpr uint32_t LOGO_MIN_MS         = 3000;
 static constexpr uint32_t BOOT_STATUS_HOLD_MS = 4000;
 
 // Track whether we need to redraw nav after menu closes
@@ -215,14 +218,15 @@ void setup() {
     Serial.print("Display init: ");
     Serial.println(displayOk ? "OK" : "FAIL");
 
-    // Self-test: R/G/B color fills + "DPV-Nav" splash
-    display::selfTest();
-    display::clear();
-
-    // Initialize menu system
+    // Initialize menu system (no display interaction)
     menu::init(sendCmd);
 
+    // Re-stabilize the SPI controller, then draw the boot logo.
+    // reinit() must come before showLogo() — it blanks the screen.
     display::reinit();
+    lastReinitMs = millis();
+    display::showLogo();
+    gLogoStartMs = millis();
     Serial.println("Display device ready — waiting for nav data");
 }
 
@@ -365,15 +369,24 @@ void loop() {
     // Skip normal rendering while any self-test is running
     if (display::isRandomRectTestActive() || display::isRandomTextTestActive()) return;
 
-    if (gBootPhase == BootPhase::WAITING) {
-        // No nav contact yet — show animated "Waiting..." counter at 1 Hz
-        if (now - lastCounterMs >= COUNTER_INTERVAL_MS) {
-            lastCounterMs = now;
-            idleCounter++;
-            char buf[22];
-            snprintf(buf, sizeof(buf), "Waiting... %lus", (unsigned long)idleCounter);
-            display::drawText(4, 44, buf, 0x07E0, 1);
-            display::flush();
+    if (gBootPhase == BootPhase::LOGO) {
+        uint32_t elapsed = now - gLogoStartMs;
+        if (elapsed >= LOGO_MIN_MS) {
+            if (navValid) {
+                // Nav came up during the logo hold — transition now that 3 s have passed.
+                gBootPhase  = BootPhase::STATUS;
+                gBootShowMs = now;
+                display::showBootStatus(lastNav.boot_flags);
+            } else {
+                // Still waiting — overlay counter at bottom of logo screen at 1 Hz.
+                if (now - lastCounterMs >= COUNTER_INTERVAL_MS) {
+                    lastCounterMs = now;
+                    idleCounter++;
+                    char buf[22];
+                    snprintf(buf, sizeof(buf), "Waiting... %lus", (unsigned long)idleCounter);
+                    display::drawText(4, 224, buf, 0x07E0, 1);
+                }
+            }
         }
         return;
     }
@@ -522,10 +535,14 @@ static void processNavLine() {
             navValid  = true;
             lastNavMs = millis();
             menu::updateNavState(lastNav.flags);
-            if (gBootPhase == BootPhase::WAITING) {
-                gBootPhase  = BootPhase::STATUS;
-                gBootShowMs = millis();
-                display::showBootStatus(lastNav.boot_flags);
+            if (gBootPhase == BootPhase::LOGO) {
+                // Only switch to STATUS if the logo minimum hold has elapsed;
+                // otherwise navValid is now true and loop() will handle it at the 3 s mark.
+                if (millis() - gLogoStartMs >= LOGO_MIN_MS) {
+                    gBootPhase  = BootPhase::STATUS;
+                    gBootShowMs = millis();
+                    display::showBootStatus(lastNav.boot_flags);
+                }
             }
             // Advance speed cal phase based on cal_mode from nav device.
             // Only advance forward — never reset backward on a single packet.

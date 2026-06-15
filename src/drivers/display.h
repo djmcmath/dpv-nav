@@ -11,8 +11,8 @@ namespace display {
 // Initialize SPI bus and ST7789 TFT (320x240 landscape).  Call once during setup.
 bool init();
 
-// Cycle through solid color fills to verify display is working.
-void selfTest();
+// Draw the boot logo splash screen (Tern logo, centered, white on black).
+void showLogo();
 
 // Fill screen black (both canvas and hardware display).
 void clear();

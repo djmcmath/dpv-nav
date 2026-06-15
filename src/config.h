@@ -172,6 +172,16 @@ constexpr int   GPS_CAP_HDOP_MAX_BARS = 1;
 constexpr int   GPS_CAP_2D_MAX_BARS   = 2;    // 2D-only fix → max 2 bars
 // SNR cap (GPS_SNR_THRESH_25 → max 2 bars) — not enforced while SNR is unavailable
 
+// GPS position confidence gate
+// Before accepting a GPS position update, we require a minimum bar count that
+// scales with how recently we last had a good fix (confidence). A 4-bar fix sets
+// confidence to 1.0; a 2-bar fix sets it to 0.5. Confidence then decays linearly
+// to zero over GPS_CONFIDENCE_DECAY_S seconds. Required bars = ceil(confidence × 4),
+// floored at GPS_POS_MIN_ACCEPT_BARS so we never accept a truly poor fix even after
+// a long gap (e.g. when resurfacing after a dive and the first fix is mediocre).
+constexpr float   GPS_CONFIDENCE_DECAY_S  = 120.0f;  // seconds from accepted fix to full decay
+constexpr uint8_t GPS_POS_MIN_ACCEPT_BARS = 2;        // floor: never accept fewer than this
+
 // ---------------------------------------------------------------------------
 // Battery voltage indicator thresholds (millivolts, single-cell LiPo on Feather v1 BAT pin)
 // GPIO35 reads VBAT/2 via the onboard 2:1 divider; adjust if battery type differs.

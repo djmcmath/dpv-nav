@@ -346,6 +346,9 @@ void loop() {
     static float cogSinEma = 0.0f, cogCosEma = 0.0f;
     static bool  cogPrimed = false;
 
+    static uint32_t gLastGpsPosMs   = 0;  // millis() of last accepted GPS position update
+    static uint8_t  gLastGpsPosBars = 0;  // bar count of that fix (sets initial confidence)
+
     GpsFix fix = gps::getFix();
     bool gpsFresh = fix.has_fix && (millis() - fix.fix_age_ms) < GPS_FIX_STALE_MS;
 
@@ -382,6 +385,20 @@ void loop() {
 
     uint8_t gpsBars = gps::computeSignalBars(fix);
 
+    // GPS position confidence gate.
+    // Confidence = (bars of last accepted fix / 4) × decay since that fix.
+    // Required bars = ceil(confidence × 4), floored at GPS_POS_MIN_ACCEPT_BARS.
+    // Effect: fresh 4-bar fix demands 4 bars for the next 30 s, relaxing to 3/2/2
+    // as time passes. A 2-bar accepted fix starts at 0.5 confidence, immediately
+    // requiring only 2 bars. Floor prevents accepting poor first fixes on resurfacing.
+    float gpsElapsed = (gLastGpsPosMs == 0)
+        ? GPS_CONFIDENCE_DECAY_S
+        : (millis() - gLastGpsPosMs) / 1000.0f;
+    float gpsConfidence = (gLastGpsPosBars / 4.0f) *
+        constrain(1.0f - gpsElapsed / GPS_CONFIDENCE_DECAY_S, 0.0f, 1.0f);
+    uint8_t gpsRequiredBars = (uint8_t)ceilf(gpsConfidence * 4.0f);
+    if (gpsRequiredBars < GPS_POS_MIN_ACCEPT_BARS) gpsRequiredBars = GPS_POS_MIN_ACCEPT_BARS;
+
     // Auto-update HOME waypoint when GPS quality is good (>= 3/4 bars ≈ 75%).
     // Only in memory — flushed to flash every 60 s by lastWpSaveMs timer below.
     if (gpsFresh && gpsBars >= 3) {
@@ -414,7 +431,11 @@ void loop() {
     float speed;
     bool useGpsSpeed = false;
     if (gpsFresh) {
-        nav::updateGPS(fix.lat, fix.lon);
+        if (gpsBars >= gpsRequiredBars) {
+            nav::updateGPS(fix.lat, fix.lon);
+            gLastGpsPosMs   = millis();
+            gLastGpsPosBars = gpsBars;
+        }
         bool sogTrusted = false;
         if (fix.speed_knots >= GPS_SOG_TRUST_FLOOR_KN) {
             sogTrusted = true;
@@ -578,6 +599,9 @@ void loop() {
             Serial.printf("[GPS ] fix=%d  3d=%d  sat=%d  hdop=%.1f  bars=%d/4\n",
                           fix.has_fix, fix.fix_type_3d, fix.satellites,
                           (double)fix.hdop, gpsBars);
+            Serial.printf("[GPS ] conf=%.2f  required=%d/4  pos_update=%s\n",
+                          (double)gpsConfidence, gpsRequiredBars,
+                          (gpsFresh && gpsBars >= gpsRequiredBars) ? "YES" : "NO");
             Serial.printf("[GPS ] pos=(%.6f, %.6f)  alt=%.1f m\n",
                           (double)fix.lat, (double)fix.lon, (double)fix.altitude_m);
             Serial.printf("[GPS ] SOG=%.2f kn  COG=%.1f deg  coherence=%.3f [%s]  speed=%.2f m/s (%s)\n",

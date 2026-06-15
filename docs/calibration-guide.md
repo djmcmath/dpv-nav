@@ -14,6 +14,7 @@ DPV-Nav calibrates four sensors/subsystems: magnetometer, gyroscope, acceleromet
 /accel_cal.json     — Accelerometer bias + scale
 /hdg_samples.csv    — Raw (target, indicated) pairs from heading cal collection run
 /hdg_fourier.json   — Fourier heading correction (n harmonics + coefficient array, optional)
+/motor_cal.json     — Motor-on heading offset (single float, optional)
 /speed_cal.json     — Flow sensor k-factor history (rolling 6-run average)
 ```
 
@@ -235,6 +236,28 @@ Files are stored on LittleFS (ESP32 internal flash). Total calibration data is <
 | Gyro bias very large (>500) | Device moved during cal | Repeat on stable surface, no vibration |
 | Accel scale way off (>1.1) | Wrong orientation or sensor issue | Verify axis labeling, check sensor |
 | "LittleFS mount failed" | Flash partition not configured | Check `board_build.filesystem = littlefs` in platformio.ini |
+
+## Motor-On Heading Correction
+
+**Purpose:** The Fourier heading calibration is collected with the motor off (bench procedure). When the DPV motor runs, its magnetic field adds a roughly constant heading bias — typically a fixed offset that doesn't depend on heading angle or motor speed. `/motor_cal.json` stores this single correction value.
+
+**When to do it:** After completing Fourier heading cal. Run a reciprocal-leg test on a known bearing with the motor running; compare indicated headings against expected and note the offset. Alternatively, use `tools/correct_track.py` with a calibration run CSV (reciprocal legs between two known GPS points) to derive the offset automatically.
+
+**File format** (`/motor_cal.json`):
+```json
+{ "heading_offset_deg": -3.0 }
+```
+
+- Positive value: compass reads low (offset is added to get true heading)
+- Negative value: compass reads high (offset is subtracted from indicated heading)
+
+**Loading:** The nav device loads `/motor_cal.json` at boot (and on "Reload Cal Files" from the web page). If the file is absent or invalid, no motor correction is applied.
+
+**Creating the file manually:**
+1. Align the running DPV to a known magnetic bearing.
+2. Note the difference: `offset = actual − indicated`.
+3. Create `motor_cal.json` with that value and upload it to LittleFS root.
+4. Reboot or use "Reload Cal Files" on the web page.
 
 ## Speed Calibration (Flow Sensor)
 

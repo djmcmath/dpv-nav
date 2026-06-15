@@ -36,10 +36,11 @@ Workflow and usage:
 On a Dive:
 - Plug in the battery, close the housing, make sure the unit boots cleanly
 - Let it get a GPS fix on the beach.  GPS doesn't like water at all, so powering everything on and getting this first fix at your car is probably better than doing it while the scooter is at the water's edge.
-- Use the web page to set a waypoint (e.g. the wreck you're trying to get to)
+- Use the web page (tern.local) to add named waypoints — go to the Waypoints section and enter a name, latitude, and longitude for each destination you plan to navigate to (e.g. "Bomber Line", "MV Scout bow")
 - Once GPS has a solid fix (4 bars) and you've set the waypoint, you can go ahead and put the unit in standby (menu "OFF").  This conserves power, but keeps GPS soft-powered, so it'll reconnect within a few seconds of getting adequate signal.  When you're ready to use it again, press and hold both buttons for about a second (much like a Shearwater).
-- Use the menu to set navigation mode to be "outbound," e.g. to the waypoint.
+- Use the menu (**NAV > Select WP**) to scroll through your saved waypoints and select the destination.
 - You'll get bearing and range to the waypoint.  (Future dev will include cross-track error and ETA)
+- At intermediate known locations (surface fix, known waypoint), use **NAV > Arrive WP** to snap position and reset accumulated error before the next leg.
 - Some tips:
 -- Get a fix as close to the target as possible.  e.g. if you can surface transit for a bit, make sure to get 4-bar GPS fix before submerging.  
 -- Long straight runs at constant speed probably yield best results (need to test to confirm this).  If you're doing a lot of big circles, you're probably losing a little accuracy every time you do it.

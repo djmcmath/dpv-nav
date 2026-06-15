@@ -21,15 +21,17 @@ v1 features (implemented):
 - Speed from flowmeter (hall-effect pulse) or GPS (filtered: SOG deadband + COG coherence check rejects position-jitter noise at rest)
 - DR position in local frame (flat-earth XY meters from baseline)
 - GPS position truth override (optional, configurable — can disable for surface testing)
-- "Home" waypoint set via button press; display shows distance + bearing back to home
+- Named waypoints: up to 200 waypoints (HOME + user-defined) stored as lat/lon in `/config/waypoints.json`, managed via web UI; SELECT navigates to a waypoint, ARRIVE snaps position to a known location to reset accumulated DR error
 - Default baseline position (47°N, 122°W) until GPS provides a fix
-- Calibration persistence (mag, gyro, accel, heading) to LittleFS with auto-load on boot
+- Calibration persistence (mag, gyro, accel, heading, motor) to LittleFS with auto-load on boot
 - Two display modes: Navigation (status bar + 2×2 grid) and Debug (raw sensor data), switchable at runtime via menu
 - Separate DebugPacket protocol for sensor data inspection (opt-in via `ENABLE_DEBUG_PACKET`)
 - Configurable units: metric or imperial, switchable at runtime via menu
 - Operational mode toggle: surface (GPS + WiFi active) vs dive (GPS + WiFi disabled), switchable at runtime via NAV > Op Mode
-- Menu system with JSON-configurable structure: NAV (outbound/home/mark/op mode), CAL (baseline/mounted/hdg cal/speed), INPUT (GPS/WiFi/logging toggles), DISPLAY (mode/units/heading)
+- Menu system with JSON-configurable structure: NAV (select WP/arrive WP/mark/op mode), CAL (baseline/mounted/hdg cal/speed), INPUT (GPS/WiFi/logging toggles), DISPLAY (mode/units/heading)
 - Menu loaded from `/menu.json` on LittleFS; hardcoded fallback if file missing
 - Bin-aware magnetometer calibration: two-stage baseline (off-scooter) + mounted (on-scooter) cal, each collecting samples across a heading×elevation grid until coverage is sufficient
 - Fourier heading calibration: guided 12-point on-device collection at 30° intervals, offline 4-harmonic Fourier fit (`fourier_fit.py`), JSON upload; reduces residual error to ~2° max
+- Motor-on heading correction: single fixed offset (`motor_cal.json`) applied after Fourier cal to account for motor magnetic bias during running
 - Interactive speed calibration: swim a known distance (150–500 ft), automatic run detection (flow threshold + heading-change stop), k-factor computed from total pulse count, rolling 6-run average stored to `/speed_cal.json`
+- GPS signal quality display: 0–4 bars computed from HDOP, fix type (2D/3D), and satellite count; antenna status from PGTOP sentence

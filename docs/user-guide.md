@@ -25,9 +25,20 @@
 
 ## Setting Home
 
-- Open the menu (BTN1), navigate to **NAV > Home**, press BTN2 to set home
-- This snapshots your current position as the home waypoint
-- Display shows distance/bearing relative to home
+HOME is always waypoint index 0. Its lat/lon is updated automatically whenever GPS signal quality reaches ≥ 3 bars. No manual action is needed — by the time you enter the water the HOME waypoint reflects the last good GPS fix.
+
+To navigate back to your starting point: open **NAV > Select WP**, cycle to **HOME**, and confirm. The display will switch to showing bearing and range back to the HOME position.
+
+## Setting Waypoints
+
+Named waypoints are managed via the web interface at `tern.local` (or `192.168.4.1` when connected to the Tern AP).
+
+On the web page, scroll to the **Waypoints** section:
+- The table shows all stored waypoints (name, lat, lon). HOME cannot be deleted.
+- To add or update: enter a name (max 19 characters), latitude, and longitude, then click **Save**. You can paste a `lat, lon` pair directly into the Lat field and both fields fill automatically.
+- To delete: click the **Delete** button next to any non-HOME waypoint.
+
+Up to 200 named waypoints can be stored. They are saved to `/config/waypoints.json` on the nav device's LittleFS and persist across reboots.
 
 ## Menu System
 
@@ -44,9 +55,10 @@ Press **BTN1** to open the on-screen menu. The menu appears in the lower half of
 ### Menu Structure
 ```
 MENU
+├── OFF            — enter deep sleep (wake: hold both buttons ~1s)
 ├── NAV
-│   ├── Outbound   — select outbound waypoint as destination
-│   ├── Home       — set current position as home waypoint
+│   ├── Select WP  — open waypoint selector: navigate TO a named waypoint
+│   ├── Arrive WP  — open waypoint selector: snap current position to a known waypoint
 │   ├── Mark       — mark current position in logs
 │   └── Op Mode    — toggle dive/surface mode (shows DIVE or SURF)
 ├── CAL
@@ -66,7 +78,30 @@ MENU
     └── Heading    — toggle magnetic vs true heading
 ```
 
-Toggle items show their current state (e.g., "Units: m", "Op Mode: SURF") and stay open after toggling. Non-toggle items (Home, Mark, Baseline, Mounted, Hdg cal) execute and close the menu.
+Toggle items show their current state (e.g., "Units: m", "Op Mode: SURF") and stay open after toggling. Non-toggle items (Baseline, Mounted, Hdg cal, Mark) execute and close the menu. Select WP and Arrive WP open the waypoint selector UI.
+
+### Waypoint Selector UI (NAV > Select WP and Arrive WP)
+
+Selecting **NAV > Select WP** or **NAV > Arrive WP** opens a full-screen waypoint picker:
+
+```
+NAV TO:           (or "ARRIVED AT:")
+─────────────────────────────────────
+  Bomber Line
+  1 / 4
+─────────────────────────────────────
+BTN1: next   BTN2: confirm
+```
+
+- **BTN1** cycles forward through the waypoint list (wraps around)
+- **BTN2** confirms the selection:
+  - **Select WP**: sets that waypoint as the navigation destination; display switches to bearing/range
+  - **Arrive WP**: snaps the dead-reckoning position to that waypoint's lat/lon — use this when you arrive at a known location to reset accumulated error before the next leg
+- After BTN2 confirms, the selector closes and the display returns to navigation
+
+**HOME** is always the first waypoint (index 0). User-defined waypoints appear after it in the order they were added.
+
+Waypoints are managed via the web interface (see **Setting Waypoints** below).
 
 All toggle states (GPS Pos, GPS Spd, WiFi, Op Mode, Log level, and all Display settings) are saved to NVS immediately on change and restored on next boot.
 
@@ -250,15 +285,16 @@ Requires `ENABLE_DEBUG_PACKET 1` on the nav device to send sensor data:
 
 ## Dive Navigation Workflow
 
-1. At the surface: set home (NAV > Home), then switch to dive mode (NAV > Op Mode → DIVE) to disable GPS and WiFi.
+1. At the surface: use **NAV > Select WP** to select your destination waypoint. Switch to dive mode (**NAV > Op Mode → DIVE**) to disable GPS and WiFi.
 2. Descend with DPV, unit active.
 3. Device runs dead-reckoning integration at ~100 Hz:
     - Flow sensor updates speed (or GPS speed, if fix is fresh and passes SOG deadband + COG coherence filter)
-    - AHRS updates heading from gyro/accel/mag fusion; Fourier heading correction applied if `hdg_fourier.json` loaded
+    - AHRS updates heading from gyro/accel/mag fusion; Fourier heading correction applied if `hdg_fourier.json` loaded; motor-on heading offset applied if `motor_cal.json` loaded
     - Nav model integrates position: `x += speed × sin(heading) × dt`, `y += speed × cos(heading) × dt`
 4. Display updates at 10 Hz, showing bearing, range, heading, and speed.
-5. To return home: follow the bearing shown on the upper-left cell.
-6. On surfacing: switch back to surface mode (NAV > Op Mode → SURF) to re-enable GPS and WiFi.
+5. **At an intermediate known location** (e.g. a mooring ball or prior waypoint): use **NAV > Arrive WP** to snap the dead-reckoning position to that waypoint's true lat/lon. This resets accumulated error for the next leg.
+6. To navigate home: use **NAV > Select WP** → HOME.
+7. On surfacing: switch back to surface mode (**NAV > Op Mode → SURF**) to re-enable GPS and WiFi.
 
 ## Recommended Calibration Order (New Installation)
 

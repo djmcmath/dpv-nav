@@ -28,7 +28,9 @@ static constexpr uint16_t COLOR_DIM_GRAY = 0x2104;  // very dark gray for empty 
 #define SPI_CLOCK_HZ 40000000
 
 // Set the rotation such that the EyeSPI connector is on the bottom
-#define rotation 3
+// rotation 3: SPI connector on the bottom
+// rotation 1: SPI connector on the top
+#define rotation 1
 
 // Hardware SPI — uses ESP32 VSPI peripheral
 static Adafruit_ST7789 tft(TFT_CS, TFT_DC, TFT_RST);

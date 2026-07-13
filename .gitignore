@@ -8,3 +8,6 @@ nul
 *.log
 *.tar.gz
 tools/old csv/*
+*.ods
+.~lock.*#
+*.lock

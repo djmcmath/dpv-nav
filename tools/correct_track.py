@@ -566,8 +566,9 @@ def main():
             print(f"    GPS gap:         {gps_gap:.1f} m")
             print(f"    Estimated rows:  {len(seg['est_rows'])}")
             print(f"    Total path (DR): {total_path:.1f} m")
+            pct_str = f"{100 * closure / total_path:.1f}% of path" if total_path > 0 else "n/a, zero DR path"
             print(f"    DR closure err:  {closure:.1f} m  ({cx:+.1f} E, {cy:+.1f} N)  "
-                  f"({100 * closure / total_path:.1f}% of path)")
+                  f"({pct_str})")
             print(f"    After correct:   0.0000 m  (exact by construction)")
             print()
 

@@ -234,7 +234,65 @@ check("adjacent G and W rows form a single anchor block",
       f"got {[(b['type'], len(b['rows'])) for b in adj_blocks]}")
 
 
-# ── 6. Nothing to solve against degrades, it does not crash ───────────────────
+# ── 6. Auto mode picks what the geometry can actually support ─────────────────
+#
+# The mode is not a preference.  Each both-anchored segment gives 2 equations;
+# the unknowns are k, θ, and (if the water moved) the current.  Auto's job is to
+# refuse to report a correction the data cannot support.
+
+print("\nAuto mode: pick the correction the geometry can support")
+
+
+def leg(t0: float, x0: float, x1: float, n: int = 60):
+    """DR rows running from x0 to x1 metres east of the origin, 1 row/second."""
+    rows = []
+    for i in range(1, n + 1):
+        x = x0 + (x1 - x0) * i / n
+        lat, lon = east_of(LAT0, LON0, x)
+        rows.append(dr_row(t0 + i, lat, lon, speed=abs(x1 - x0) / n))
+        rows[-1]["heading_deg"] = "90" if x1 > x0 else "270"
+    return rows
+
+
+def auto_for(rows):
+    segs = prepare(rows)
+    solvable = [s for s in segs if s["anchored"] == "both"]
+    n_runs = len({r["_run"] for r in rows})
+    return ct.choose_mode(segs, solvable, n_runs)[0]
+
+
+# One straight leg out to a fix 300 m away: net displacement is the whole path.
+# Two equations, two unknowns → joint.
+straight = ([gps_row(0, LAT0, LON0)] + leg(0, 0, 300)
+            + [gps_row(61, *east_of(LAT0, LON0, 300))])
+check("one informative leg -> joint", auto_for(straight) == "joint",
+      f"got {auto_for(straight)}")
+
+# Out to the wreck and straight back to the beach, with NO fix at the wreck.
+# One segment, and it ends where it began: net displacement ~0 however far the
+# diver swam.  Nothing is identifiable — the track can be drawn but not measured.
+loop = ([gps_row(0, LAT0, LON0)] + leg(0, 0, 300) + leg(60, 300, 0)
+        + [gps_row(121, LAT0, LON0)])
+check("an out-and-back with no mid-dive fix -> proportional (nothing identifiable)",
+      auto_for(loop) == "proportional", f"got {auto_for(loop)}")
+
+# The same dive, but the diver snapped a waypoint at the wreck.  That one row
+# splits the useless loop into two informative legs: 4 equations, 4 unknowns,
+# so k, θ AND the current all become solvable.  This is the whole argument for
+# snapping a waypoint at the far end of a dive.
+with_snap = ([gps_row(0, LAT0, LON0)] + leg(0, 0, 300)
+             + [dict(gps_row(61, *east_of(LAT0, LON0, 300)), pos_src="W")]
+             + leg(61, 300, 0) + [gps_row(122, LAT0, LON0)])
+check("...but snap a waypoint at the wreck and it becomes reciprocal",
+      auto_for(with_snap) == "reciprocal", f"got {auto_for(with_snap)}")
+
+# Nothing anchored at both ends: place by the single fix, correct nothing.
+tail_only = leg(0, 0, 300) + [gps_row(61, *east_of(LAT0, LON0, 300))]
+check("no both-anchored segment -> no correction (joint applies the identity)",
+      auto_for(tail_only) == "joint", f"got {auto_for(tail_only)}")
+
+
+# ── 7. Nothing to solve against degrades, it does not crash ───────────────────
 
 print("\nUnconstrained: a dive with no both-anchored segment must still produce a track")
 check("solver returns None rather than exiting", ct.solve_k_theta_multi([]) is None)

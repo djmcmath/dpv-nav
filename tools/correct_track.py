@@ -63,7 +63,33 @@ is treated as an implicit discontinuity (see --max-dt) rather than being
 integrated through.
 
 
-Three correction modes (--mode):
+Correction modes (--mode):
+
+  auto (default)
+    Works out which of the modes below the data can actually support, and says
+    why.  This is not a convenience — it is the difference between a measurement
+    and a fabrication.
+
+    Each both-anchored segment supplies exactly 2 equations.  The unknowns are
+    the speed factor k, the heading offset θ, and — if the water was moving — the
+    two components of the current:
+
+        2 informative segments (4 eqns) → k, θ, Cx, Cy       [reciprocal]
+        1 informative segment  (2 eqns) → k, θ, no current   [joint]
+        0 informative segments          → nothing is identifiable
+
+    A segment is only informative if its *net* displacement is a real fraction of
+    the distance travelled.  On an out-and-back the diver returns to where they
+    started, so net displacement is near zero however far they swam: the system
+    goes singular and the fit will drive k towards zero to reconcile a long path
+    with a short displacement.  That is a genuine least-squares minimiser and
+    physical nonsense.  Auto refuses to report it as a sensor correction, falls
+    back to proportional, and says the track is cosmetic.
+
+    The practical consequence for divers: an anchor in the MIDDLE of the dive is
+    worth far more than fixes at both ends of a round trip.  Snapping a waypoint
+    at the wreck turns one useless loop into two informative legs — and makes the
+    current solvable.
 
   reciprocal
     Calibration mode.  Requires an A-E-A-E-A log structure — outbound leg,
@@ -77,7 +103,7 @@ Three correction modes (--mode):
     plus current velocity, each dt.  Use this mode to characterize sensor errors
     at different DPV speeds and measure ambient current.
 
-  joint (default)
+  joint
     Solves jointly for a constant speed scale (k) and constant heading
     offset (θ) using closed-form weighted least squares across all
     both-anchored DR segments.  A single (k, θ) pair is applied to every
@@ -108,7 +134,7 @@ Adds columns: adj_pos_x_m, adj_pos_y_m, adj_lat, adj_lon
 In order to re-ingest into dive map, copy the adj_ columns back to the lat/lon columns.
 
 Usage:
-    python tools/correct_track.py <logfile.csv> [--mode reciprocal|joint|proportional]
+    python tools/correct_track.py <logfile.csv> [--mode auto|reciprocal|joint|proportional]
                                                  [--max-theta DEG]
                                                  [--max-k-error FRAC]
                                                  [--max-dt SECONDS]
@@ -582,6 +608,115 @@ def proportional_correct_segment(seg: dict):
     return positions, (closure_x, closure_y), total
 
 
+# ── Mode selection ────────────────────────────────────────────────────────────
+#
+# Which correction is valid is not a preference — it is decided by the anchor
+# geometry, because that geometry is what determines *what can be identified at
+# all*.
+#
+# Every both-anchored segment supplies exactly 2 equations (the east and north
+# components of its required displacement).  The unknowns are the speed factor k,
+# the heading offset θ, and — if the water was moving — the two components of the
+# current.  So:
+#
+#   2 segments (4 equations)  →  k, θ, Cx, Cy      all four, exactly    [reciprocal]
+#   1 segment  (2 equations)  →  k, θ              assuming no current  [joint]
+#   0 segments (0 equations)  →  nothing
+#
+# A segment only counts if its *net* displacement is a meaningful fraction of the
+# distance travelled.  On an out-and-back the diver returns to where they began,
+# so net displacement is near zero no matter how far they swam — the equations go
+# singular and the fit will cheerfully drive k towards zero to reconcile a long
+# path with a short displacement.  That is a real least-squares minimiser and
+# complete physical nonsense, so we refuse to report it as a sensor correction.
+
+MIN_CLOSURE_RATIO = 0.25   # net displacement / DR displacement, below which a segment tells us nothing
+MIN_DR_M          = 20.0   # a segment that barely moved cannot constrain anything either
+
+
+def segment_metrics(seg: dict) -> tuple[float, float, float]:
+    """(DR displacement, required displacement, ratio) for a both-anchored segment."""
+    Sx, Sy, dx, dy = compute_dr_vectors(seg)
+    S = math.hypot(Sx, Sy)
+    D = math.hypot(dx, dy)
+    return S, D, (D / S if S > 1e-6 else 0.0)
+
+
+def is_informative(seg: dict) -> bool:
+    S, _D, ratio = segment_metrics(seg)
+    return S >= MIN_DR_M and ratio >= MIN_CLOSURE_RATIO
+
+
+def reciprocal_conditioned(seg1: dict, seg2: dict) -> bool:
+    """
+    True when two segments are geometrically distinct enough to separate sensor
+    error from current.  The reciprocal solve inverts (E² + F²); that vanishes
+    when both legs have the same DR direction per unit time, i.e. the diver never
+    really turned around.
+    """
+    Sx1, Sy1, _, _ = compute_dr_vectors(seg1)
+    Sx2, Sy2, _, _ = compute_dr_vectors(seg2)
+    _, t1 = _leg_stats(seg1)
+    _, t2 = _leg_stats(seg2)
+    if t1 <= 0:
+        return False
+    alpha = t2 / t1
+    E = Sx2 - Sx1 * alpha
+    F = Sy2 - Sy1 * alpha
+    return (E * E + F * F) > 1.0
+
+
+def choose_mode(segments: list[dict], solvable: list[dict], n_runs: int) -> tuple[str, list[str]]:
+    """
+    Pick the correction the data can actually support, and explain the choice.
+    Returns (mode, diagnosis lines).
+    """
+    lines = []
+    informative = [s for s in solvable if is_informative(s)]
+
+    lines.append(f"{len(segments)} DR segment(s); {len(solvable)} anchored at both ends, "
+                 f"{len(informative)} of those informative.")
+    for seg in solvable:
+        S, D, ratio = segment_metrics(seg)
+        verdict = "informative" if is_informative(seg) else "returns to its start — tells us nothing"
+        lines.append(f"  segment {seg['num']}: DR {S:.0f} m, net {D:.0f} m "
+                     f"({100 * ratio:.0f}% of DR) — {verdict}")
+
+    if (len(segments) == 2 and len(solvable) == 2 and len(informative) == 2
+            and n_runs == 1 and reciprocal_conditioned(*solvable)):
+        lines.append("")
+        lines.append("→ reciprocal: two informative legs give 4 equations for 4 unknowns.")
+        lines.append("  Solving for speed factor, heading offset AND current — all of them,")
+        lines.append("  exactly, with no assumption left over.")
+        return "reciprocal", lines
+
+    if informative:
+        lines.append("")
+        lines.append("→ joint: one informative leg gives 2 equations for 2 unknowns.")
+        lines.append("  Solving for speed factor and heading offset, ASSUMING no current.")
+        lines.append("  A current would be silently absorbed into those two numbers; with only")
+        lines.append("  one leg there is no way to tell the difference.")
+        if len(informative) == 1:
+            lines.append("  To separate them, snap a waypoint at the far end of the dive — that")
+            lines.append("  turns one leg into two and makes the current solvable.")
+        return "joint", lines
+
+    if solvable:
+        lines.append("")
+        lines.append("→ proportional: every leg here returns to where it started, so nothing")
+        lines.append("  about the sensors or the water can be recovered from this dive.")
+        lines.append("  The track will be distributed to close on the fixes, which produces a")
+        lines.append("  plausible-looking path — but it is cosmetic, not a measurement.")
+        lines.append("  Next time, snap a waypoint at the far end of the dive: an anchor in the")
+        lines.append("  MIDDLE is worth far more than fixes at both ends of a round trip.")
+        return "proportional", lines
+
+    lines.append("")
+    lines.append("→ no correction: nothing is anchored at both ends.  Segments will be placed")
+    lines.append("  by whichever single fix they have, with their shape left as logged.")
+    return "joint", lines
+
+
 # ── Reporting helpers ─────────────────────────────────────────────────────────
 
 ANCHOR_NOTE = {
@@ -615,8 +750,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("input_file")
-    parser.add_argument("--mode", choices=["reciprocal", "joint", "proportional"],
-                        default="joint", help="Correction mode (default: joint)")
+    parser.add_argument("--mode", choices=["auto", "reciprocal", "joint", "proportional"],
+                        default="auto",
+                        help="Correction mode (default: auto — picks whichever correction the "
+                             "anchor geometry can actually support, and says why)")
     parser.add_argument("--max-theta", type=float, default=None, metavar="DEG",
                         help="[joint] Constrain heading correction to ±DEG degrees")
     parser.add_argument("--max-k-error", type=float, default=None, metavar="FRAC",
@@ -669,6 +806,16 @@ def main():
         print(f"  at their raw logged coordinates and are NOT corrected.")
         print()
 
+    # ── Mode selection ────────────────────────────────────────────────────────
+    if args.mode == "auto":
+        mode, diagnosis = choose_mode(segments, solvable, n_runs)
+        print("── What this dive can tell us ──────────────────────────────────")
+        for line in diagnosis:
+            print(f"  {line}" if line else "")
+        print()
+    else:
+        mode = args.mode
+
     new_fields     = ["adj_pos_x_m", "adj_pos_y_m", "adj_lat", "adj_lon"]
     out_fieldnames = fieldnames + [f for f in new_fields if f not in fieldnames]
 
@@ -691,7 +838,7 @@ def main():
                 adj_pos[block["start_idx"] + i] = (gx, gy)
 
     # ── Reciprocal calibration mode ───────────────────────────────────────────
-    if args.mode == "reciprocal":
+    if mode == "reciprocal":
         if len(solvable) != 2 or n_segs != 2:
             print(f"Error: reciprocal mode requires exactly 2 fully-anchored DR segments "
                   f"(A-E-A-E-A), found {n_segs} segment(s), {len(solvable)} fully anchored.")
@@ -778,7 +925,7 @@ def main():
         print()
 
     # ── Proportional mode ─────────────────────────────────────────────────────
-    elif args.mode == "proportional":
+    elif mode == "proportional":
         print(f"Mode:          proportional")
         print(f"Anchor blocks: {sum(1 for b in blocks if b['type'] == 'A')}  (GPS fixes / waypoint snaps)")
         print(f"DR segments:   {n_segs}"

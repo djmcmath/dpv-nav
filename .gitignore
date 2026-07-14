@@ -10,4 +10,4 @@ nul
 tools/old csv/*
 *.ods
 .~lock.*#
-*.lock
+*.lock__pycache__/

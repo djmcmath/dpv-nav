@@ -313,10 +313,11 @@ static void executeAction(Action act) {
             Serial.println("[MENU] TOGGLE_WIFI");
             break;
         case Action::INPUT_LOG_CYCLE:
-            gLogLevel = (gLogLevel + 1) % 3;  // 0->1->2->0
+            // Fire-and-forget: nav device owns the log level and echoes it back
+            // in NavPacket flags (see updateNavState). gLogLevel is not touched
+            // here — it tracks the authoritative value from the next packet.
             if (gSendCmd) gSendCmd(DisplayCmd::CYCLE_LOG_LEVEL);
-            Serial.printf("[MENU] Log level: %s\n",
-                          gLogLevel == 0 ? "OFF" : (gLogLevel == 1 ? "LOW" : "HIGH"));
+            Serial.println("[MENU] CYCLE_LOG_LEVEL sent");
             break;
         // Local display settings
         case Action::DISP_MODE:
@@ -515,6 +516,7 @@ void updateNavState(uint8_t flags) {
     gGpsPosEnabled = (flags & FLAG_GPS_POS_ENABLED) != 0;
     gGpsSpdEnabled = (flags & FLAG_GPS_SPD_ENABLED) != 0;
     gWifiEnabled   = (flags & FLAG_WIFI_ENABLED)    != 0;
+    gLogLevel      = (flags & FLAG_LOG_LEVEL_MASK) >> FLAG_LOG_LEVEL_SHIFT;
 }
 
 bool isPendingSpeedCal() {

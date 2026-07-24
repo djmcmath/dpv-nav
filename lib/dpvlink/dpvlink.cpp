@@ -19,6 +19,8 @@ PacketType identifyPacket(const char* buf, size_t len) {
     if (t[0] == 'D' && t[1] == '\0') return PacketType::DEBUG;
     if (t[0] == 'C') return PacketType::CAL_PROGRESS;
     if (t[0] == 'W') return PacketType::WAYPOINT_LIST;
+    if (t[0] == 'R') return PacketType::CAL_CLOUD_RESULT;
+    if (t[0] == 'L') return PacketType::CLOUD_LINK_RESULT;
     // Backward compat: packets without "t" are assumed NavPacket
     if (doc["hdg"].is<float>()) return PacketType::NAV;
     return PacketType::UNKNOWN;
@@ -340,6 +342,112 @@ bool bytesToCalProgressPacket(const char* buf, size_t len, CalProgressPacket& ou
     out.fit_valid       = doc["fv"]  | false;
     out.fit_hdg_err_deg = doc["fe"]  | 0.0f;
     out.fit_delta       = doc["fd"]  | 0.0f;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// CalCloudResultPacket
+// ---------------------------------------------------------------------------
+size_t calCloudResultPacketToBytes(const CalCloudResultPacket& pkt, char* buf, size_t bufLen) {
+    JsonDocument doc;
+    doc["t"]  = "R";
+    doc["ct"] = pkt.cal_type;
+    doc["cs"] = pkt.stage;
+    if (pkt.stage == (uint8_t)CalCloudStage::DONE) {
+        doc["cq"]  = pkt.quality;
+        doc["crp"] = pkt.rms_pct;
+        doc["crc"] = pkt.recommendation;
+        doc["cid"] = pkt.calibration_id;
+    } else if (pkt.stage == (uint8_t)CalCloudStage::FAILED) {
+        doc["cer"] = pkt.error;
+    }
+
+    size_t n = serializeJson(doc, buf, bufLen - 1);
+    if (n == 0 || n >= bufLen - 1) return 0;
+    buf[n]     = '\n';
+    buf[n + 1] = '\0';
+    return n + 1;
+}
+
+bool bytesToCalCloudResultPacket(const char* buf, size_t len, CalCloudResultPacket& out) {
+    JsonDocument doc;
+    if (deserializeJson(doc, buf, len)) return false;
+
+    out.cal_type = doc["ct"]  | (uint8_t)0;
+    out.stage    = doc["cs"]  | (uint8_t)0;
+    out.quality  = doc["cq"]  | (uint8_t)0;
+    out.rms_pct  = doc["crp"] | 0.0f;
+
+    const char* rec = doc["crc"] | "";
+    strncpy(out.recommendation, rec, sizeof(out.recommendation) - 1);
+    out.recommendation[sizeof(out.recommendation) - 1] = '\0';
+
+    const char* err = doc["cer"] | "";
+    strncpy(out.error, err, sizeof(out.error) - 1);
+    out.error[sizeof(out.error) - 1] = '\0';
+
+    const char* cid = doc["cid"] | "";
+    strncpy(out.calibration_id, cid, sizeof(out.calibration_id) - 1);
+    out.calibration_id[sizeof(out.calibration_id) - 1] = '\0';
+    return true;
+}
+
+size_t displayCloudCalRespondToBytes(DisplayCmd cmd, const char* calibrationId,
+                                      char* buf, size_t bufLen) {
+    JsonDocument doc;
+    doc["cmd"] = static_cast<uint8_t>(cmd);
+    doc["cid"] = calibrationId;
+
+    size_t n = serializeJson(doc, buf, bufLen - 1);
+    if (n == 0 || n >= bufLen - 1) return 0;
+    buf[n]     = '\n';
+    buf[n + 1] = '\0';
+    return n + 1;
+}
+
+void parseCloudCalId(const char* buf, size_t len, char* idOut, size_t idOutLen) {
+    if (idOutLen == 0) return;
+    idOut[0] = '\0';
+    JsonDocument doc;
+    if (deserializeJson(doc, buf, len)) return;
+    const char* cid = doc["cid"] | "";
+    strncpy(idOut, cid, idOutLen - 1);
+    idOut[idOutLen - 1] = '\0';
+}
+
+// ---------------------------------------------------------------------------
+// CloudLinkResultPacket
+// ---------------------------------------------------------------------------
+size_t cloudLinkResultPacketToBytes(const CloudLinkResultPacket& pkt, char* buf, size_t bufLen) {
+    JsonDocument doc;
+    doc["t"]  = "L";
+    doc["ls"] = pkt.stage;
+    if (pkt.stage == (uint8_t)CloudLinkStage::CODE_READY) {
+        doc["luc"] = pkt.user_code;
+    } else if (pkt.stage == (uint8_t)CloudLinkStage::FAILED) {
+        doc["ler"] = pkt.error;
+    }
+
+    size_t n = serializeJson(doc, buf, bufLen - 1);
+    if (n == 0 || n >= bufLen - 1) return 0;
+    buf[n]     = '\n';
+    buf[n + 1] = '\0';
+    return n + 1;
+}
+
+bool bytesToCloudLinkResultPacket(const char* buf, size_t len, CloudLinkResultPacket& out) {
+    JsonDocument doc;
+    if (deserializeJson(doc, buf, len)) return false;
+
+    out.stage = doc["ls"] | (uint8_t)0;
+
+    const char* uc = doc["luc"] | "";
+    strncpy(out.user_code, uc, sizeof(out.user_code) - 1);
+    out.user_code[sizeof(out.user_code) - 1] = '\0';
+
+    const char* err = doc["ler"] | "";
+    strncpy(out.error, err, sizeof(out.error) - 1);
+    out.error[sizeof(out.error) - 1] = '\0';
     return true;
 }
 

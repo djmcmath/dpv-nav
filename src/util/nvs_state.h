@@ -10,8 +10,7 @@
 namespace nvs_nav {
 
 struct State {
-    bool    gps_pos;    // GPS position enabled
-    bool    gps_spd;    // GPS speed enabled
+    bool    gps;        // GPS enabled (position + speed)
     bool    wifi;       // WiFi enabled
     bool    dive_mode;  // Dive mode active (true=dive, false=surface)
     uint8_t log_level;  // Logging level (0=OFF, 1=LOW, 2=HIGH)

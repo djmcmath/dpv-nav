@@ -97,6 +97,45 @@ void showHdgFourierCalPrompt(int step, int total, float targetDeg, float indicat
 //   nPoints — number of samples collected
 void showHdgFourierCalDone(int nPoints);
 
+// Cloud calibration screens (docs/cloud-calibration-plan.md). Shown after a
+// bin-coverage cal (Baseline/Mounted) completes and the nav device uploads
+// the CSV for fitting.
+//
+// Waiting: shown immediately, before the (blocking, on the nav device)
+// upload+fit round trip has a result. secondsWaiting is cosmetic only.
+void showCloudCalWaiting(uint32_t secondsWaiting);
+
+// No WiFi connection — upload was skipped. BTN2 dismisses.
+void showCloudCalOffline();
+
+// Upload/fit failed, or the nav device never responded. BTN2 dismisses.
+void showCloudCalFailed(const char* message);
+
+// Fit succeeded — accept/reject the result.
+//   quality: 0=good, 1=warn, 2=bad (CalCloudQuality)
+//   choice:  0=ACCEPT, 1=REJECT (highlighted item)
+void showCloudCalResult(uint8_t quality, float rmsPct, const char* recommendation,
+                         uint8_t choice);
+
+// Cloud account-link screens (device-code account link). Shown after the
+// diver selects "Link acct" from the Config menu. No URL is ever shown --
+// the diver enters this same code under "My Devices" in account settings.
+//
+// Waiting: shown immediately, before the nav device's first response (empty
+// userCode), and again once the code arrives (nav then polls for approval
+// in the background, up to ~10 min -- BTN2 cancels). secondsWaiting is
+// cosmetic.
+void showCloudLinkWaiting(const char* userCode, uint32_t secondsWaiting);
+
+// No WiFi connection — flow was not attempted. BTN2 dismisses.
+void showCloudLinkOffline();
+
+// Begin/poll failed, or the nav device never responded. BTN2 dismisses.
+void showCloudLinkFailed(const char* message);
+
+// Approved — token saved on the nav device. BTN2 dismisses.
+void showCloudLinkDone();
+
 // --- Random-rect self-test --------------------------------------------------
 // Draws a random-color rectangle at a random position once per second.
 // coveragePct (1–100) controls the fraction of screen area the rect fills.

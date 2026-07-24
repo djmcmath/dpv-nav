@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 //Compile-time and runtime config defaults
 
 // WiFi configuration
@@ -217,3 +219,19 @@ constexpr float SPEED_CAL_MIN_RUN_S           = 30.0f;
 // EMA alpha for heading tracking during the speed cal run.
 // Low alpha = slow-moving reference that represents the "stable" course.
 constexpr float SPEED_CAL_HDG_EMA_ALPHA       = 0.02f;
+
+// ---------------------------------------------------------------------------
+// Cloud calibration (docs/cloud-calibration-plan.md)
+// ---------------------------------------------------------------------------
+
+// divemap backend host. No scheme -- cloud_client builds the full HTTPS URL.
+constexpr const char* CLOUD_API_HOST     = "divemap.diverdaniel.com";
+constexpr uint16_t    CLOUD_API_PORT     = 443;
+constexpr uint32_t    CLOUD_HTTP_TIMEOUT_MS = 15000;  // per-request timeout
+
+// Device-auth polling (RFC 8628), per docs/architecture/device-uploads-plan.md.
+constexpr uint32_t CLOUD_AUTH_POLL_INTERVAL_MS = 5000;
+// Must stay <= the backend's DEVICE_CODE_TTL_MINUTES (backend/src/handlers/device.rs) --
+// otherwise the device keeps polling a user_code the server already considers
+// expired_token, well past the point where the diver was told linking succeeded.
+constexpr uint32_t CLOUD_AUTH_POLL_TIMEOUT_MS  = 5 * 60 * 1000;  // 5 min, matches server-side code TTL

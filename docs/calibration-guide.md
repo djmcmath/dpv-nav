@@ -1,5 +1,11 @@
 # Sensor Calibration Guide
 
+> **Planned:** magnetometer calibration (Baseline/Mounted) is planned to move to an
+> over-WiFi round-trip with Dive Map instead of the manual laptop-script step described
+> below — see [cloud-calibration-plan.md](./cloud-calibration-plan.md). Nothing below has
+> changed yet; the manual workflow remains the current, working procedure and will stay
+> the fallback path once the cloud flow ships.
+
 ## Overview
 
 DPV-Nav calibrates four sensors/subsystems: magnetometer, gyroscope, accelerometer, and heading. Calibration data is persisted to LittleFS as JSON files on the nav device. On boot, saved calibration loads in under a second; if files are missing, blocking calibration runs automatically (except for heading, which is optional).
@@ -100,6 +106,12 @@ Both calibrations collect raw samples using a **bin-aware** approach: the screen
 ### Forcing re-calibration
 
 Delete the corresponding JSON file(s) from LittleFS and reboot, or run the menu cal workflow to generate new sample CSVs.
+
+**Planned cloud workflow:** see [cloud-calibration-plan.md](./cloud-calibration-plan.md) —
+the offline steps above (export CSV, run `mag_calibration.py` locally, upload the
+result) are planned to become "unit uploads the CSV over WiFi, gets a fitted result and
+a quality verdict back, accept or reject on the spot." The on-device steps (positioning,
+menu navigation, bin-coverage collection) are unchanged either way.
 
 ## Gyroscope Calibration
 

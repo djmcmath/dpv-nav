@@ -70,9 +70,9 @@ constexpr uint8_t BOOT_HDG_CAL_OK   = 0x20;  // Fourier heading calibration load
 constexpr uint8_t FLAG_TRUE_HEADING    = 0x01;  // 1 = true heading, 0 = magnetic
 constexpr uint8_t FLAG_GPS_SPEED       = 0x02;  // 1 = GPS speed, 0 = flow sensor
 constexpr uint8_t FLAG_HAS_HOME        = 0x04;  // 1 = home position set
-constexpr uint8_t FLAG_GPS_POS_ENABLED = 0x08;  // 1 = GPS position usage enabled
+constexpr uint8_t FLAG_GPS_ENABLED     = 0x08;  // 1 = GPS usage enabled (position + speed)
 constexpr uint8_t FLAG_WIFI_ENABLED    = 0x10;  // 1 = WiFi radio enabled
-constexpr uint8_t FLAG_GPS_SPD_ENABLED = 0x20;  // 1 = GPS speed usage enabled
+// 0x20 retired (was FLAG_GPS_SPD_ENABLED — GPS position/speed toggles merged into one)
 constexpr uint8_t FLAG_LOG_LEVEL_MASK  = 0xC0;  // bits 7:6 — log level (0=OFF, 1=LOW, 2=HIGH)
 constexpr uint8_t FLAG_LOG_LEVEL_SHIFT = 6;
 
@@ -130,6 +130,49 @@ struct CalProgressPacket {
 };
 
 // ---------------------------------------------------------------------------
+// Cloud calibration result packet  (sent once, nav -> display, after a bin-
+// coverage cal finishes and the nav device uploads it for fitting)
+// See docs/cloud-calibration-plan.md.
+// ---------------------------------------------------------------------------
+
+enum class CalCloudStage : uint8_t {
+    OFFLINE = 0,  // no WiFi connection; upload was skipped
+    FAILED  = 1,  // upload or fit failed; see `error`
+    DONE    = 2,  // fit succeeded; quality/rms_pct/recommendation are valid
+};
+
+enum class CalCloudQuality : uint8_t { GOOD = 0, WARN = 1, BAD = 2 };
+
+struct CalCloudResultPacket {
+    uint8_t cal_type;             // CalType enum value (baseline/mounted)
+    uint8_t stage;                // CalCloudStage enum value
+    uint8_t quality;              // CalCloudQuality enum value (stage == DONE only)
+    float   rms_pct;              // stage == DONE only
+    char    recommendation[96];   // shown to the diver as-is; stage == DONE only
+    char    error[64];            // shown to the diver as-is; stage == FAILED only
+    char    calibration_id[40];   // UUID string; needed to accept/reject
+};
+
+// ---------------------------------------------------------------------------
+// Cloud account-link result packet  (nav -> display), device-auth bootstrap
+// (RFC 8628) for the divemap.diverdaniel.com cloud link.
+// See docs/cloud-calibration-plan.md and net/cloud_client.h.
+// ---------------------------------------------------------------------------
+
+enum class CloudLinkStage : uint8_t {
+    CODE_READY = 0,  // device/user code obtained; poll for approval in progress
+    DONE       = 1,  // approved; bearer token saved on the nav device
+    FAILED     = 2,  // denied, expired, or a network/server error; see `error`
+    OFFLINE    = 3,  // no WiFi connection; flow was not attempted
+};
+
+struct CloudLinkResultPacket {
+    uint8_t stage;                  // CloudLinkStage enum value
+    char    user_code[16];          // stage == CODE_READY only
+    char    error[64];              // stage == FAILED only
+};
+
+// ---------------------------------------------------------------------------
 // Waypoint list packet  (sent from nav device at ~1 Hz)
 // ---------------------------------------------------------------------------
 constexpr int WP_PACKET_MAX = 50;  // max waypoints in one WaypointListPacket
@@ -150,7 +193,7 @@ struct WaypointListPacket {
 // ---------------------------------------------------------------------------
 // Packet type discriminator (JSON "t" field)
 // ---------------------------------------------------------------------------
-enum class PacketType : uint8_t { UNKNOWN = 0, NAV, DEBUG, CAL_PROGRESS, WAYPOINT_LIST };
+enum class PacketType : uint8_t { UNKNOWN = 0, NAV, DEBUG, CAL_PROGRESS, WAYPOINT_LIST, CAL_CLOUD_RESULT, CLOUD_LINK_RESULT };
 
 PacketType identifyPacket(const char* buf, size_t len);
 
@@ -172,8 +215,8 @@ enum class DisplayCmd : uint8_t {
     START_BASELINE_CAL = 23, // start baseline (off-scooter) mag cal data collection
     START_MOUNTED_CAL  = 24, // start mounted (on-scooter) mag cal data collection
     START_SPEED_CAL      = 14, // start speed calibration (with embedded dist_ft field)
-    TOGGLE_GPS_POS       = 15, // toggle GPS position usage
-    TOGGLE_GPS_SPD       = 16, // toggle GPS speed usage
+    TOGGLE_GPS           = 15, // toggle GPS usage (position + speed together)
+    // 16 retired (was TOGGLE_GPS_SPD — split GPS pos/speed toggles merged into one)
     TOGGLE_WIFI          = 17, // toggle WiFi on/off
     CYCLE_LOG_LEVEL      = 18, // cycle logging level
     TOGGLE_OP_MODE       = 19, // toggle dive/surface mode (GPS + WiFi)
@@ -186,6 +229,10 @@ enum class DisplayCmd : uint8_t {
     FINALIZE_HDG_CAL       = 28, // end collection, save /hdg_samples.csv on nav device
     SELECT_WAYPOINT        = 29, // select waypoint as navigation target (carries uint8 "idx" field)
     ARRIVE_WAYPOINT        = 30, // snap position to waypoint (carries uint8 "idx" field)
+    ACCEPT_CLOUD_CAL       = 31, // accept a cloud calibration result (carries "cid" calibration id)
+    REJECT_CLOUD_CAL       = 32, // reject a cloud calibration result (carries "cid" calibration id)
+    LINK_ACCOUNT           = 33, // begin device-auth cloud account link (RFC 8628)
+    CANCEL_LINK            = 34, // cancel an in-progress account-link poll (BTN2 during wait)
 };
 
 // ---------------------------------------------------------------------------
@@ -204,6 +251,20 @@ bool   bytesToNavPacket(const char* buf, size_t len, NavPacket& out);
 
 size_t calProgressPacketToBytes(const CalProgressPacket& pkt, char* buf, size_t bufLen);
 bool   bytesToCalProgressPacket(const char* buf, size_t len, CalProgressPacket& out);
+
+size_t calCloudResultPacketToBytes(const CalCloudResultPacket& pkt, char* buf, size_t bufLen);
+bool   bytesToCalCloudResultPacket(const char* buf, size_t len, CalCloudResultPacket& out);
+
+size_t cloudLinkResultPacketToBytes(const CloudLinkResultPacket& pkt, char* buf, size_t bufLen);
+bool   bytesToCloudLinkResultPacket(const char* buf, size_t len, CloudLinkResultPacket& out);
+
+// Serialize ACCEPT_CLOUD_CAL / REJECT_CLOUD_CAL with the calibration id embedded.
+size_t displayCloudCalRespondToBytes(DisplayCmd cmd, const char* calibrationId,
+                                      char* buf, size_t bufLen);
+
+// Extract the calibration id from an ACCEPT_CLOUD_CAL / REJECT_CLOUD_CAL buffer.
+// idOut is left empty ("") if the "cid" field is absent or malformed.
+void parseCloudCalId(const char* buf, size_t len, char* idOut, size_t idOutLen);
 
 size_t debugPacketToBytes(const DebugPacket& pkt, char* buf, size_t bufLen);
 bool   bytesToDebugPacket(const char* buf, size_t len, DebugPacket& out);

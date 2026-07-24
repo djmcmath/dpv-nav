@@ -32,7 +32,9 @@ static uint32_t calCompleteShownMs = 0;
 static bool calCompleteHolding = false;
 
 // ---- Link transmit buffer --------------------------------------------------
-static char txBuf[64];
+// 96, not 64: ACCEPT_CLOUD_CAL/REJECT_CLOUD_CAL carry a 36-char UUID ("cid")
+// plus JSON overhead, which doesn't fit the old 64-byte size.
+static char txBuf[96];
 
 // ---- Timing ----------------------------------------------------------------
 static constexpr uint32_t DISPLAY_INTERVAL_MS = 250;  // 4 Hz refresh
@@ -97,6 +99,56 @@ static uint8_t       gSpeedCalChoice     = 0;    // 0=RESET+ACCEPT, 1=ACCEPT, 2=
 static uint32_t      gCountdownStartMs   = 0;    // millis() when countdown begins
 static constexpr uint32_t COUNTDOWN_TOTAL_MS = 5000;  // 5 second countdown
 
+// ---- Cloud calibration UI state (docs/cloud-calibration-plan.md) -----------
+// Entered automatically when a bin-coverage cal's DONE-hold ends. The nav
+// device then blocks on its own upload+fit call (see net/cloud_client.h), so
+// no NavPacket/CalProgress updates arrive until a CalCloudResultPacket lands.
+// gCloudCalPhase overrides the normal link-timeout ("NO LINK") check for that
+// window rather than reporting a false dead link -- see linkAlive below.
+enum class CloudCalUiPhase : uint8_t {
+    NONE,     // not in cloud-cal UI
+    WAITING,  // upload/fit in progress on the nav device (blocking there)
+    OFFLINE,  // no WiFi -- upload was skipped
+    FAILED,   // upload/fit failed, or nav device never responded
+    RESULT,   // fit succeeded -- accept/reject
+};
+
+static CloudCalUiPhase   gCloudCalPhase          = CloudCalUiPhase::NONE;
+static uint32_t          gCloudCalWaitStartMs    = 0;
+static constexpr uint32_t CLOUD_CAL_WAIT_TIMEOUT_MS = 40000;  // > nav's ~30s worst case
+static uint8_t           gCloudCalChoice         = 0;  // 0=ACCEPT, 1=REJECT
+static uint8_t           gCloudCalQuality        = 0;
+static float             gCloudCalRmsPct         = 0.0f;
+static char              gCloudCalRecommendation[96] = "";
+static char              gCloudCalError[64]          = "";
+static char              gCloudCalId[40]             = "";
+
+// ---- Cloud account-link UI state (device-auth bootstrap, RFC 8628) --------
+// Entered when the diver selects "Link acct" from the Config menu. The nav
+// device runs cloud::beginAuthorize() (fast, blocking) then polls for
+// approval via the non-blocking cloud::updateAuthorizePoll() state machine
+// (up to CLOUD_AUTH_POLL_TIMEOUT_MS, config.h) -- see net/cloud_client.h.
+// BTN2 sends CANCEL_LINK to back out at any point during STARTING/WAITING.
+// gCloudLinkPhase overrides the normal link-timeout check the same way
+// gCloudCalPhase does, for the whole window.
+enum class CloudLinkUiPhase : uint8_t {
+    NONE,      // not in cloud-link UI
+    STARTING,  // LINK_ACCOUNT sent, waiting for the device/user code
+    WAITING,   // code received, polling for approval (cancelable via BTN2)
+    OFFLINE,   // no WiFi -- flow was not attempted
+    FAILED,    // begin/poll failed, or the nav device never responded
+    DONE,      // approved -- token saved on the nav device
+};
+
+static CloudLinkUiPhase  gCloudLinkPhase          = CloudLinkUiPhase::NONE;
+static uint32_t          gCloudLinkWaitStartMs    = 0;
+// > nav's CLOUD_AUTH_POLL_TIMEOUT_MS (config.h) plus margin for the two HTTP
+// round trips, so nav has a chance to deliver its own FAILED/DONE result
+// packet before this independent display-side watchdog gives up first.
+static constexpr uint32_t CLOUD_LINK_WAIT_TIMEOUT_MS = CLOUD_AUTH_POLL_TIMEOUT_MS + 30 * 1000;
+static char              gCloudLinkUserCode[16]        = "";
+static char              gCloudLinkError[64]           = "";
+
 // ---- Waypoint list cache (populated from WaypointListPacket at 1 Hz) --------
 struct CachedWaypoint {
     char  name[13];  // 12 display chars + null
@@ -159,6 +211,7 @@ static void enterDeepSleep() {
 static void processNavLine();
 static void processUsbCmd();
 static void sendCmd(DisplayCmd cmd);
+static void sendCloudCalRespond(DisplayCmd cmd, const char* calId);
 static void sendSpeedCalStart(uint16_t dist_ft);
 static void sendWaypointSelectCmd(uint8_t idx);
 static void sendWaypointArriveCmd(uint8_t idx);
@@ -351,6 +404,15 @@ void loop() {
             Serial.println("[WP] entering Arrive Waypoint UI");
         }
 
+        if (menu::isPendingCloudLink()) {
+            menu::clearCloudLinkPending();
+            sendCmd(DisplayCmd::LINK_ACCOUNT);
+            gCloudLinkPhase       = CloudLinkUiPhase::STARTING;
+            gCloudLinkWaitStartMs = millis();
+            gCloudLinkUserCode[0] = '\0';
+            Serial.println("[CLOUD_LINK] requesting device-auth code");
+        }
+
         display::clear();
     }
     if (menu::isOpen()) {
@@ -407,7 +469,13 @@ void loop() {
     }
 
     // --- BootPhase::DONE — normal operation ----------------------------------
-    bool linkAlive = navValid && (now - lastNavMs < NAV_TIMEOUT_MS);
+    // Cloud-cal UI overrides the link-timeout check: the nav device blocks on
+    // its own upload+fit call while awaiting a result, so no packets arrive
+    // for up to ~30s even though the link is fine. See CloudCalUiPhase above.
+    bool awaitingCloudCal  = (gCloudCalPhase != CloudCalUiPhase::NONE);
+    bool awaitingCloudLink = (gCloudLinkPhase != CloudLinkUiPhase::NONE);
+    bool linkAlive = awaitingCloudCal || awaitingCloudLink ||
+                     (navValid && (now - lastNavMs < NAV_TIMEOUT_MS));
 
     if (linkAlive) {
         if (wasLinkDead) {
@@ -426,7 +494,84 @@ void loop() {
                 if (now - calCompleteShownMs >= CAL_COMPLETE_HOLD_MS) {
                     calCompleteHolding = false;
                     calProgressValid   = false;
+                    // The nav device uploads the CSV next (blocking there) --
+                    // show the waiting screen until a CalCloudResultPacket lands.
+                    gCloudCalPhase       = CloudCalUiPhase::WAITING;
+                    gCloudCalWaitStartMs = now;
                     display::clear();
+                }
+                return;
+            }
+
+            // Cloud calibration result UI — takes priority over everything else,
+            // including the normal link-timeout screen (see linkAlive above).
+            if (gCloudCalPhase != CloudCalUiPhase::NONE) {
+                switch (gCloudCalPhase) {
+                    case CloudCalUiPhase::WAITING:
+                        if (now - gCloudCalWaitStartMs >= CLOUD_CAL_WAIT_TIMEOUT_MS) {
+                            gCloudCalPhase = CloudCalUiPhase::FAILED;
+                            strncpy(gCloudCalError, "No response from nav device",
+                                    sizeof(gCloudCalError) - 1);
+                            gCloudCalError[sizeof(gCloudCalError) - 1] = '\0';
+                            display::showCloudCalFailed(gCloudCalError);
+                        } else {
+                            display::showCloudCalWaiting((now - gCloudCalWaitStartMs) / 1000);
+                        }
+                        break;
+                    case CloudCalUiPhase::OFFLINE:
+                        display::showCloudCalOffline();
+                        break;
+                    case CloudCalUiPhase::FAILED:
+                        display::showCloudCalFailed(gCloudCalError);
+                        break;
+                    case CloudCalUiPhase::RESULT:
+                        display::showCloudCalResult(gCloudCalQuality, gCloudCalRmsPct,
+                                                    gCloudCalRecommendation, gCloudCalChoice);
+                        break;
+                    default:
+                        break;
+                }
+                return;
+            }
+
+            // Cloud account-link UI — takes priority over everything else,
+            // including the normal link-timeout screen (see linkAlive above).
+            if (gCloudLinkPhase != CloudLinkUiPhase::NONE) {
+                switch (gCloudLinkPhase) {
+                    case CloudLinkUiPhase::STARTING:
+                        if (now - gCloudLinkWaitStartMs >= CLOUD_LINK_WAIT_TIMEOUT_MS) {
+                            gCloudLinkPhase = CloudLinkUiPhase::FAILED;
+                            strncpy(gCloudLinkError, "No response from nav device",
+                                    sizeof(gCloudLinkError) - 1);
+                            gCloudLinkError[sizeof(gCloudLinkError) - 1] = '\0';
+                            display::showCloudLinkFailed(gCloudLinkError);
+                        } else {
+                            display::showCloudLinkWaiting("", (now - gCloudLinkWaitStartMs) / 1000);
+                        }
+                        break;
+                    case CloudLinkUiPhase::WAITING:
+                        if (now - gCloudLinkWaitStartMs >= CLOUD_LINK_WAIT_TIMEOUT_MS) {
+                            gCloudLinkPhase = CloudLinkUiPhase::FAILED;
+                            strncpy(gCloudLinkError, "No response from nav device",
+                                    sizeof(gCloudLinkError) - 1);
+                            gCloudLinkError[sizeof(gCloudLinkError) - 1] = '\0';
+                            display::showCloudLinkFailed(gCloudLinkError);
+                        } else {
+                            display::showCloudLinkWaiting(gCloudLinkUserCode,
+                                                          (now - gCloudLinkWaitStartMs) / 1000);
+                        }
+                        break;
+                    case CloudLinkUiPhase::OFFLINE:
+                        display::showCloudLinkOffline();
+                        break;
+                    case CloudLinkUiPhase::FAILED:
+                        display::showCloudLinkFailed(gCloudLinkError);
+                        break;
+                    case CloudLinkUiPhase::DONE:
+                        display::showCloudLinkDone();
+                        break;
+                    default:
+                        break;
                 }
                 return;
             }
@@ -596,6 +741,47 @@ static void processNavLine() {
                 gWpCache[i].lon = wpPkt.waypoints[i].lon;
             }
         }
+    } else if (ptype == PacketType::CAL_CLOUD_RESULT) {
+        CalCloudResultPacket pkt{};
+        if (bytesToCalCloudResultPacket(rxBuf, rxPos, pkt)) {
+            lastNavMs = millis();  // keep link-alive timer refreshed
+            if (pkt.stage == (uint8_t)CalCloudStage::OFFLINE) {
+                gCloudCalPhase = CloudCalUiPhase::OFFLINE;
+            } else if (pkt.stage == (uint8_t)CalCloudStage::FAILED) {
+                gCloudCalPhase = CloudCalUiPhase::FAILED;
+                strncpy(gCloudCalError, pkt.error, sizeof(gCloudCalError) - 1);
+                gCloudCalError[sizeof(gCloudCalError) - 1] = '\0';
+            } else {
+                gCloudCalPhase   = CloudCalUiPhase::RESULT;
+                gCloudCalQuality = pkt.quality;
+                gCloudCalRmsPct  = pkt.rms_pct;
+                gCloudCalChoice  = 0;
+                strncpy(gCloudCalRecommendation, pkt.recommendation, sizeof(gCloudCalRecommendation) - 1);
+                gCloudCalRecommendation[sizeof(gCloudCalRecommendation) - 1] = '\0';
+                strncpy(gCloudCalId, pkt.calibration_id, sizeof(gCloudCalId) - 1);
+                gCloudCalId[sizeof(gCloudCalId) - 1] = '\0';
+            }
+            Serial.printf("[CLOUD_CAL] result stage=%u\n", pkt.stage);
+        }
+    } else if (ptype == PacketType::CLOUD_LINK_RESULT) {
+        CloudLinkResultPacket pkt{};
+        if (bytesToCloudLinkResultPacket(rxBuf, rxPos, pkt)) {
+            lastNavMs = millis();  // keep link-alive timer refreshed
+            if (pkt.stage == (uint8_t)CloudLinkStage::OFFLINE) {
+                gCloudLinkPhase = CloudLinkUiPhase::OFFLINE;
+            } else if (pkt.stage == (uint8_t)CloudLinkStage::FAILED) {
+                gCloudLinkPhase = CloudLinkUiPhase::FAILED;
+                strncpy(gCloudLinkError, pkt.error, sizeof(gCloudLinkError) - 1);
+                gCloudLinkError[sizeof(gCloudLinkError) - 1] = '\0';
+            } else if (pkt.stage == (uint8_t)CloudLinkStage::CODE_READY) {
+                gCloudLinkPhase = CloudLinkUiPhase::WAITING;
+                strncpy(gCloudLinkUserCode, pkt.user_code, sizeof(gCloudLinkUserCode) - 1);
+                gCloudLinkUserCode[sizeof(gCloudLinkUserCode) - 1] = '\0';
+            } else {
+                gCloudLinkPhase = CloudLinkUiPhase::DONE;
+            }
+            Serial.printf("[CLOUD_LINK] result stage=%u\n", pkt.stage);
+        }
     }
 }
 
@@ -633,6 +819,11 @@ static void sendCmd(DisplayCmd cmd) {
     if (n > 0) {
         Serial1.write(txBuf, n);
     }
+}
+
+static void sendCloudCalRespond(DisplayCmd cmd, const char* calId) {
+    size_t n = displayCloudCalRespondToBytes(cmd, calId, txBuf, sizeof(txBuf));
+    if (n > 0) Serial1.write(txBuf, n);
 }
 
 static void sendSpeedCalStart(uint16_t dist_ft) {
@@ -834,6 +1025,64 @@ static void handleButtons() {
                 Serial.println("[SPEED_CAL] choice: REJECT");
             }
             gSpeedCalPhase = SpeedCalPhase::NONE;
+            display::clear();
+        }
+        return;
+    }
+
+    // --- Cloud calibration result UI -----------------------------------------
+    if (gCloudCalPhase == CloudCalUiPhase::OFFLINE || gCloudCalPhase == CloudCalUiPhase::FAILED) {
+        // BTN2: dismiss
+        if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
+            btn2.fired = true;
+            gCloudCalPhase = CloudCalUiPhase::NONE;
+            display::clear();
+        }
+        return;
+    }
+    if (gCloudCalPhase == CloudCalUiPhase::RESULT) {
+        // BTN1: cycle ACCEPT/REJECT
+        if (!btn1.pressed && !btn1.fired && btn1.pressStartMs > 0) {
+            btn1.fired = true;
+            gCloudCalChoice = (gCloudCalChoice + 1) % 2;
+        }
+        // BTN2: confirm choice
+        if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
+            btn2.fired = true;
+            DisplayCmd cmd = (gCloudCalChoice == 0) ? DisplayCmd::ACCEPT_CLOUD_CAL
+                                                     : DisplayCmd::REJECT_CLOUD_CAL;
+            sendCloudCalRespond(cmd, gCloudCalId);
+            Serial.printf("[CLOUD_CAL] choice: %s\n", gCloudCalChoice == 0 ? "ACCEPT" : "REJECT");
+            gCloudCalPhase = CloudCalUiPhase::NONE;
+            display::clear();
+        }
+        return;
+    }
+    // WAITING: no button action -- the nav device is mid-upload and won't see
+    // anything sent right now anyway (it's blocked on the network call).
+    if (gCloudCalPhase == CloudCalUiPhase::WAITING) {
+        return;
+    }
+
+    // --- Cloud account-link UI ------------------------------------------------
+    if (gCloudLinkPhase == CloudLinkUiPhase::OFFLINE || gCloudLinkPhase == CloudLinkUiPhase::FAILED ||
+        gCloudLinkPhase == CloudLinkUiPhase::DONE) {
+        // BTN2: dismiss
+        if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
+            btn2.fired = true;
+            gCloudLinkPhase = CloudLinkUiPhase::NONE;
+            display::clear();
+        }
+        return;
+    }
+    // STARTING/WAITING: BTN2 cancels. The nav-side poll is a non-blocking
+    // state machine (see cloud_client.h), so CANCEL_LINK reaches it and
+    // takes effect immediately instead of queuing behind a blocked call.
+    if (gCloudLinkPhase == CloudLinkUiPhase::STARTING || gCloudLinkPhase == CloudLinkUiPhase::WAITING) {
+        if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
+            btn2.fired = true;
+            sendCmd(DisplayCmd::CANCEL_LINK);
+            gCloudLinkPhase = CloudLinkUiPhase::NONE;
             display::clear();
         }
         return;

@@ -1,0 +1,28 @@
+# Custom 4MB partition table for the nav environment (board: featheresp32).
+#
+# Rationale (2026-07-23): the default Arduino/ESP32 4MB table gives 1280KB per
+# OTA app slot and 1408KB to the LittleFS data partition. Once cloud_client.cpp
+# (WiFi + TLS + HTTPClient) is actually called, nav firmware sits at ~93% of
+# app0/app1 (1.22MB / 1.28MB) -- see docs/cloud-calibration-plan.md "Flash
+# budget is tight". LittleFS only needs to hold: mag_base.json/mag_mount.json/
+# hdg_fourier.json/speed_cal.json (all small) + wifi_networks.json + on-device
+# log files, whose worst case is one continuous ~2hr dive at 1 log row/sec
+# (~500KB, per field data) before the diver syncs/clears them. logging.cpp's
+# cleanupOldLogs() prunes oldest-first down to a 32KB floor at runtime, so the
+# partition just needs headroom above the worst-case file, not a fixed
+# reservation matching the old default.
+#
+# This reallocates 640KB from littlefs (1408KB -> 768KB, still >1x the 500KB
+# worst-case log plus config files and the 32KB prune floor) into app0/app1
+# (1280KB -> 1600KB each), preserving dual-OTA capability while taking nav
+# firmware from ~80KB to ~400KB+ of headroom per slot. All offsets stay
+# 0x10000-aligned for the two app partitions; table totals exactly 4MB (no
+# unused tail), matching the original layout's alignment.
+#
+# Name,     Type, SubType,  Offset,   Size,     Flags
+nvs,        data, nvs,      0x9000,   0x5000,
+otadata,    data, ota,      0xe000,   0x2000,
+app0,       app,  ota_0,    0x10000,  0x190000,
+app1,       app,  ota_1,    0x1A0000, 0x190000,
+spiffs,     data, spiffs,   0x330000, 0xC0000,
+coredump,   data, coredump, 0x3F0000, 0x10000,

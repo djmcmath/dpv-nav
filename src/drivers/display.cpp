@@ -97,6 +97,15 @@ static int bootLineY = 0;
 // the current cal session.  Reset by clear() so each new session starts fresh.
 static bool g_calGridStaticDrawn = false;
 
+// Cloud-link waiting screen: same idea as g_calGridStaticDrawn -- the static
+// header/instructions/code are drawn once, and each subsequent call (this
+// screen is redrawn at 4 Hz while the elapsed-seconds counter ticks) only
+// repaints the small counter region. Reset by clear() so each new session
+// starts fresh; also forced by a userCode change (STARTING's "" -> the real
+// code once CODE_READY arrives changes the static content itself).
+static bool g_cloudLinkWaitingStaticDrawn = false;
+static char g_cloudLinkWaitingLastCode[16] = "";
+
 // ---------------------------------------------------------------------------
 // Nav mode layout constants
 // ---------------------------------------------------------------------------
@@ -155,6 +164,8 @@ void showLogo() {
 void clear() {
     invalidateNavCache();
     g_calGridStaticDrawn = false;  // next showCalGrid call redraws static elements
+    g_cloudLinkWaitingStaticDrawn = false;
+    g_cloudLinkWaitingLastCode[0] = '\0';
     tft.fillScreen(COLOR_BLACK);
     delay(50);
     bootLineY = 0;
@@ -167,6 +178,8 @@ void reinit() {
     delay(50);
     invalidateNavCache();
     g_calGridStaticDrawn = false;  // display is blank after reinit; force full redraw
+    g_cloudLinkWaitingStaticDrawn = false;
+    g_cloudLinkWaitingLastCode[0] = '\0';
     Serial.println("[DISP] reinit complete");
 }
 
@@ -276,8 +289,8 @@ static void drawStatusBar(const NavPacket& pkt) {
     }
 
     // ---- GPS ----------------------------------------------------------------
-    // Label: gray when both GPS usage flags are off (dive mode)
-    bool gpsEnabled = (pkt.flags & (FLAG_GPS_POS_ENABLED | FLAG_GPS_SPD_ENABLED)) != 0;
+    // Label: gray when GPS usage is off (dive mode)
+    bool gpsEnabled = (pkt.flags & FLAG_GPS_ENABLED) != 0;
     uint16_t gpsBaseColor = gpsEnabled ? COLOR_WHITE : COLOR_GRAY;
 
     tft.setTextColor(gpsBaseColor, COLOR_BLACK);
@@ -1254,6 +1267,339 @@ void showHdgFourierCalDone(int nPoints) {
 }
 
 // ---------------------------------------------------------------------------
+// Cloud calibration (docs/cloud-calibration-plan.md)
+// ---------------------------------------------------------------------------
+
+// Greedy word-wrap for short status text at text size 1. maxCharsPerLine
+// should stay comfortably under SCREEN_WIDTH / 6 (the default GFX font is
+// ~6px wide per char at size 1); no other screen in this file has needed
+// multi-line body text before now, so this is new rather than reused.
+static void printWrapped(int16_t x, int16_t y, const char* text, int maxCharsPerLine,
+                          int16_t lineHeight, int maxLines) {
+    if (!text) return;
+    int len = (int)strlen(text);
+    int pos = 0;
+    for (int line = 0; line < maxLines && pos < len; line++) {
+        int remaining = len - pos;
+        int take = remaining < maxCharsPerLine ? remaining : maxCharsPerLine;
+        if (take < remaining) {
+            int lastSpace = -1;
+            for (int i = take; i > 0; i--) {
+                if (text[pos + i - 1] == ' ') { lastSpace = i - 1; break; }
+            }
+            if (lastSpace > 0) take = lastSpace;
+        }
+        char lineBuf[64];
+        int n = take < (int)sizeof(lineBuf) - 1 ? take : (int)sizeof(lineBuf) - 1;
+        memcpy(lineBuf, text + pos, n);
+        lineBuf[n] = '\0';
+        tft.setCursor(x, y + line * lineHeight);
+        tft.print(lineBuf);
+        pos += take;
+        while (pos < len && text[pos] == ' ') pos++;  // skip the space we broke on
+    }
+}
+
+void showCloudCalWaiting(uint32_t secondsWaiting) {
+    if (!tftReady) return;
+    invalidateNavCache();
+    tft.fillScreen(COLOR_BLACK);
+
+    tft.setTextSize(2);
+    tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
+    tft.setCursor(4, 4);
+    tft.print("CLOUD CAL");
+    tft.drawFastHLine(0, 28, SCREEN_WIDTH, COLOR_CYAN);
+
+    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+    tft.setCursor(4, 60);
+    tft.print("Uploading...");
+
+    tft.setTextSize(1);
+    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+    tft.setCursor(4, 92);
+    tft.print("Please wait, this can take");
+    tft.setCursor(4, 106);
+    tft.print("up to 30 seconds.");
+
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%lus", (unsigned long)secondsWaiting);
+    tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
+    tft.setCursor(4, 130);
+    tft.print(buf);
+}
+
+void showCloudCalOffline() {
+    if (!tftReady) return;
+    invalidateNavCache();
+    tft.fillScreen(COLOR_BLACK);
+
+    tft.setTextSize(2);
+    tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
+    tft.setCursor(4, 4);
+    tft.print("CLOUD CAL");
+    tft.drawFastHLine(0, 28, SCREEN_WIDTH, COLOR_CYAN);
+
+    tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
+    tft.setCursor(4, 50);
+    tft.print("No WiFi");
+
+    tft.setTextSize(1);
+    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+    tft.setCursor(4, 84);
+    tft.print("Connect to WiFi to finish");
+    tft.setCursor(4, 98);
+    tft.print("calibration in the cloud.");
+    tft.setCursor(4, 114);
+    tft.print("Raw samples are saved --");
+    tft.setCursor(4, 128);
+    tft.print("nothing is lost.");
+
+    tft.drawFastHLine(0, 152, SCREEN_WIDTH, COLOR_CYAN);
+    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+    tft.setCursor(4, 160);
+    tft.print("Press BTN2 to exit");
+}
+
+void showCloudCalFailed(const char* message) {
+    if (!tftReady) return;
+    invalidateNavCache();
+    tft.fillScreen(COLOR_BLACK);
+
+    tft.setTextSize(2);
+    tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
+    tft.setCursor(4, 4);
+    tft.print("CLOUD CAL");
+    tft.drawFastHLine(0, 28, SCREEN_WIDTH, COLOR_CYAN);
+
+    tft.setTextColor(COLOR_RED, COLOR_BLACK);
+    tft.setCursor(4, 50);
+    tft.print("Upload failed");
+
+    tft.setTextSize(1);
+    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+    printWrapped(4, 84, message ? message : "unknown error", 50, 12, 3);
+
+    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+    tft.setCursor(4, 132);
+    tft.print("Raw samples are saved --");
+    tft.setCursor(4, 146);
+    tft.print("retry from the CAL menu.");
+
+    tft.drawFastHLine(0, 168, SCREEN_WIDTH, COLOR_CYAN);
+    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+    tft.setCursor(4, 176);
+    tft.print("Press BTN2 to exit");
+}
+
+void showCloudCalResult(uint8_t quality, float rmsPct, const char* recommendation,
+                         uint8_t choice) {
+    if (!tftReady) return;
+    invalidateNavCache();
+    tft.fillScreen(COLOR_BLACK);
+
+    tft.setTextSize(2);
+    tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
+    tft.setCursor(4, 4);
+    tft.print("CLOUD CAL");
+
+    uint16_t bandColor  = COLOR_GREEN;
+    const char* bandLabel = "GOOD";
+    if (quality == 1)      { bandColor = COLOR_YELLOW; bandLabel = "MARGINAL"; }
+    else if (quality == 2) { bandColor = COLOR_RED;    bandLabel = "BAD"; }
+
+    char buf[28];
+    snprintf(buf, sizeof(buf), "%s  %.0f%% RMS", bandLabel, (double)rmsPct);
+    tft.setTextColor(bandColor, COLOR_BLACK);
+    tft.setCursor(4, 30);
+    tft.print(buf);
+
+    tft.drawFastHLine(0, 54, SCREEN_WIDTH, COLOR_CYAN);
+
+    // Recommendation text comes straight from the backend (already short —
+    // see device-calibration-plan.md's `recommendation` field); wrap rather
+    // than truncate since "recommend rejecting" is the important half.
+    tft.setTextSize(1);
+    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+    printWrapped(4, 64, recommendation ? recommendation : "", 50, 12, 3);
+
+    tft.drawFastHLine(0, 112, SCREEN_WIDTH, COLOR_CYAN);
+
+    static const char* const labels[2] = { "ACCEPT", "REJECT" };
+    const int rowY[2] = { 122, 148 };
+    for (int i = 0; i < 2; i++) {
+        if (i == (int)choice) {
+            tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
+            tft.setCursor(4, rowY[i]);
+            tft.print("> ");
+            tft.print(labels[i]);
+        } else {
+            tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+            tft.setCursor(4, rowY[i]);
+            tft.print("  ");
+            tft.print(labels[i]);
+        }
+    }
+
+    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+    tft.setCursor(4, 200);
+    tft.print("BTN1:cycle  BTN2:confirm");
+}
+
+void showCloudLinkWaiting(const char* userCode, uint32_t secondsWaiting) {
+    if (!tftReady) return;
+
+    const char* code = userCode ? userCode : "";
+    bool codeChanged  = strcmp(code, g_cloudLinkWaitingLastCode) != 0;
+
+    // --- Static layout: draw only once per code (STARTING's "" and the real
+    // code once CODE_READY arrives are different static content -- the code
+    // appears and the instructions/waiting line join it). clear() resets
+    // this flag so a fresh link attempt always starts with a full redraw.
+    if (!g_cloudLinkWaitingStaticDrawn || codeChanged) {
+        invalidateNavCache();
+        tft.fillScreen(COLOR_BLACK);
+
+        tft.setTextSize(2);
+        tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
+        tft.setCursor(4, 4);
+        tft.print("LINK ACCOUNT");
+        tft.drawFastHLine(0, 28, SCREEN_WIDTH, COLOR_CYAN);
+
+        if (code[0] == '\0') {
+            tft.setTextSize(2);
+            tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+            tft.setCursor(4, 60);
+            tft.print("Requesting code...");
+        } else {
+            // Bumped from size 1 -> 2: at size 1 this paragraph only used
+            // about a third of the screen width, leaving the rest blank.
+            tft.setTextSize(2);
+            tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+            tft.setCursor(4, 34);
+            tft.print("Log in to Dive Map and");
+            tft.setCursor(4, 56);
+            tft.print("select 'Link a device'");
+            tft.setCursor(4, 78);
+            tft.print("under My Devices");
+
+            // Size-4 glyphs are 24px wide; center the 4-digit code on the 320px screen.
+            tft.setTextSize(4);
+            tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
+            tft.setCursor((SCREEN_WIDTH - 4 * 24) / 2, 104);
+            tft.print(code);
+
+            tft.drawFastHLine(0, 144, SCREEN_WIDTH, COLOR_CYAN);
+            tft.setTextSize(1);
+            tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+            tft.setCursor(4, 152);
+            tft.print("Waiting for approval...");
+        }
+
+        tft.setTextSize(1);
+        tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+        tft.setCursor(4, 180);
+        tft.print("Press BTN2 to cancel");
+
+        strncpy(g_cloudLinkWaitingLastCode, code, sizeof(g_cloudLinkWaitingLastCode) - 1);
+        g_cloudLinkWaitingLastCode[sizeof(g_cloudLinkWaitingLastCode) - 1] = '\0';
+        g_cloudLinkWaitingStaticDrawn = true;
+    }
+
+    // --- Dynamic: elapsed-seconds counter only. Cleared first so a shorter
+    // string (there isn't one in practice within a session, but be safe)
+    // can't leave stray digits from the previous frame.
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%lus", (unsigned long)secondsWaiting);
+    tft.fillRect(4, 200, 60, 10, COLOR_BLACK);
+    tft.setTextSize(1);
+    tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
+    tft.setCursor(4, 200);
+    tft.print(buf);
+}
+
+void showCloudLinkOffline() {
+    if (!tftReady) return;
+    invalidateNavCache();
+    tft.fillScreen(COLOR_BLACK);
+
+    tft.setTextSize(2);
+    tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
+    tft.setCursor(4, 4);
+    tft.print("LINK ACCOUNT");
+    tft.drawFastHLine(0, 28, SCREEN_WIDTH, COLOR_CYAN);
+
+    tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
+    tft.setCursor(4, 50);
+    tft.print("No WiFi");
+
+    tft.setTextSize(1);
+    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+    tft.setCursor(4, 84);
+    tft.print("Connect to WiFi to link");
+    tft.setCursor(4, 98);
+    tft.print("this device to your account.");
+
+    tft.drawFastHLine(0, 152, SCREEN_WIDTH, COLOR_CYAN);
+    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+    tft.setCursor(4, 160);
+    tft.print("Press BTN2 to exit");
+}
+
+void showCloudLinkFailed(const char* message) {
+    if (!tftReady) return;
+    invalidateNavCache();
+    tft.fillScreen(COLOR_BLACK);
+
+    tft.setTextSize(2);
+    tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
+    tft.setCursor(4, 4);
+    tft.print("LINK ACCOUNT");
+    tft.drawFastHLine(0, 28, SCREEN_WIDTH, COLOR_CYAN);
+
+    tft.setTextColor(COLOR_RED, COLOR_BLACK);
+    tft.setCursor(4, 50);
+    tft.print("Link failed");
+
+    tft.setTextSize(1);
+    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+    printWrapped(4, 84, message ? message : "unknown error", 50, 12, 3);
+
+    tft.drawFastHLine(0, 168, SCREEN_WIDTH, COLOR_CYAN);
+    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+    tft.setCursor(4, 176);
+    tft.print("Press BTN2 to exit");
+}
+
+void showCloudLinkDone() {
+    if (!tftReady) return;
+    invalidateNavCache();
+    tft.fillScreen(COLOR_BLACK);
+
+    tft.setTextSize(2);
+    tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
+    tft.setCursor(4, 4);
+    tft.print("LINK ACCOUNT");
+    tft.drawFastHLine(0, 28, SCREEN_WIDTH, COLOR_CYAN);
+
+    tft.setTextColor(COLOR_GREEN, COLOR_BLACK);
+    tft.setCursor(4, 60);
+    tft.print("Linked!");
+
+    tft.setTextSize(1);
+    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+    tft.setCursor(4, 100);
+    tft.print("This device is now linked");
+    tft.setCursor(4, 114);
+    tft.print("to your divemap account.");
+
+    tft.drawFastHLine(0, 152, SCREEN_WIDTH, COLOR_CYAN);
+    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+    tft.setCursor(4, 160);
+    tft.print("Press BTN2 to exit");
+}
+
+// ---------------------------------------------------------------------------
 // Bin-coverage calibration grid
 // Layout (320×240):
 //   y=0..19   — title row
@@ -1284,8 +1630,14 @@ void showCalGrid(const CalProgressPacket& pkt, const char* title) {
         tft.setCursor(4, 2);
         tft.print(title);
 
-        // Heading labels (N, NE, E … repeating across 12 cols)
-        const char* hdgLabels[12] = { "N","NE","E","SE","S","SW","W","NW","N","NE","E","SE" };
+        // Heading labels: only the 4 columns that land exactly on a cardinal
+        // heading are labeled (col*30° == 0/90/180/270 at cols 0/3/6/9). The
+        // other 8 columns are 30°-wide bins that don't correspond to any
+        // standard compass point, so they're left blank rather than mislabeled
+        // (an 8-point compass rose doesn't divide evenly into 12 columns —
+        // labeling all of them previously produced duplicate, incorrect names).
+        // The white current-bin highlight provides orientation between cardinals.
+        const char* hdgLabels[12] = { "N","","","E","","","S","","","W","","" };
         tft.setTextSize(1);
         tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
         for (int c = 0; c < HDG_COLS; c++) {

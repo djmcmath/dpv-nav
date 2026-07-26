@@ -97,6 +97,11 @@ static int bootLineY = 0;
 // the current cal session.  Reset by clear() so each new session starts fresh.
 static bool g_calGridStaticDrawn = false;
 
+// Baseline ROUGH_SCAN screen: same idea, separate flag since it's a different
+// static layout from showCalGrid. Baseline stays in ROUGH_SCAN for its whole
+// session now (see display_main.cpp's FINISH_BASELINE_COLLECTION handler).
+static bool g_roughScanStaticDrawn = false;
+
 // Cloud-link waiting screen: same idea as g_calGridStaticDrawn -- the static
 // header/instructions/code are drawn once, and each subsequent call (this
 // screen is redrawn at 4 Hz while the elapsed-seconds counter ticks) only
@@ -164,6 +169,7 @@ void showLogo() {
 void clear() {
     invalidateNavCache();
     g_calGridStaticDrawn = false;  // next showCalGrid call redraws static elements
+    g_roughScanStaticDrawn = false;
     g_cloudLinkWaitingStaticDrawn = false;
     g_cloudLinkWaitingLastCode[0] = '\0';
     tft.fillScreen(COLOR_BLACK);
@@ -178,6 +184,7 @@ void reinit() {
     delay(50);
     invalidateNavCache();
     g_calGridStaticDrawn = false;  // display is blank after reinit; force full redraw
+    g_roughScanStaticDrawn = false;
     g_cloudLinkWaitingStaticDrawn = false;
     g_cloudLinkWaitingLastCode[0] = '\0';
     Serial.println("[DISP] reinit complete");
@@ -1393,7 +1400,7 @@ void showCloudCalFailed(const char* message) {
 }
 
 void showCloudCalResult(uint8_t quality, float rmsPct, const char* recommendation,
-                         uint8_t choice) {
+                         int16_t coverageGaps, uint8_t choice) {
     if (!tftReady) return;
     invalidateNavCache();
     tft.fillScreen(COLOR_BLACK);
@@ -1422,6 +1429,22 @@ void showCloudCalResult(uint8_t quality, float rmsPct, const char* recommendatio
     tft.setTextSize(1);
     tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
     printWrapped(4, 64, recommendation ? recommendation : "", 50, 12, 3);
+
+    // Coverage-gap note (baseline-cal-coverage-feedback-plan.md, step 5): a
+    // second, independent axis from RMS quality above -- a "good" fit can
+    // still be missing coverage in specific orientations. Terse by design
+    // (screen only has this one line of room before the accept/reject rule);
+    // full detail lives on the website. Silent when not applicable (mounted,
+    // pre-9-axis CSV) or when coverage is already full, rather than clutter
+    // the screen with a "0 gaps" non-finding.
+    if (coverageGaps > 0) {
+        char covBuf[40];
+        snprintf(covBuf, sizeof(covBuf), "%d orientation gap%s -- see website",
+                  coverageGaps, coverageGaps == 1 ? "" : "s");
+        tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+        tft.setCursor(4, 100);
+        tft.print(covBuf);
+    }
 
     tft.drawFastHLine(0, 112, SCREEN_WIDTH, COLOR_CYAN);
 
@@ -1600,7 +1623,9 @@ void showCloudLinkDone() {
 }
 
 // ---------------------------------------------------------------------------
-// Bin-coverage calibration grid
+// Bin-coverage calibration grid — mounted cal only (COLLECT phase). Baseline
+// no longer reaches this screen at all; see showBaselineRoughScan() below,
+// which is baseline's only screen for its entire session.
 // Layout (320×240):
 //   y=0..19   — title row
 //   y=20..35  — heading labels (N NE E SE S SW W NW N NE E SE)
@@ -1637,6 +1662,11 @@ void showCalGrid(const CalProgressPacket& pkt, const char* title) {
         // (an 8-point compass rose doesn't divide evenly into 12 columns —
         // labeling all of them previously produced duplicate, incorrect names).
         // The white current-bin highlight provides orientation between cardinals.
+        //
+        // These labels are only as good as the live heading estimate behind
+        // them. For baseline, that's COLLECT's rough post-ROUGH_SCAN bias —
+        // better than raw-uncalibrated, but still approximate; see
+        // docs/baseline-cal-two-pass.md.
         const char* hdgLabels[12] = { "N","","","E","","","S","","","W","","" };
         tft.setTextSize(1);
         tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
@@ -1738,7 +1768,7 @@ void showCalGrid(const CalProgressPacket& pkt, const char* title) {
                 tft.print("  ~");
             }
         } else {
-            // Orientation readout until enough samples for a valid fit
+            // Orientation readout until enough samples for a valid fit.
             float hdg   = pkt.cur_hdg_deg;
             float pitch = pkt.cur_pitch_deg;
             if (hdg < 0.0f) hdg += 360.0f;
@@ -1753,6 +1783,140 @@ void showCalGrid(const CalProgressPacket& pkt, const char* title) {
             tft.print(obuf);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Baseline's only screen, for its entire collection session (see
+// divemap/docs/architecture/baseline-cal-coverage-feedback-plan.md; the
+// two-pass ROUGH_SCAN->COLLECT design docs/baseline-cal-two-pass.md
+// describes is retired). No grid: AHRS heading isn't trustworthy yet
+// (magnetometer uncalibrated), so there's nothing spatial worth promising.
+// Just raw per-axis spread, sample count, and the live fit-quality readout
+// (same incremental fitter showCalGrid uses — it doesn't depend on a bias
+// estimate at all, so it's meaningful even here). The diver ends the session
+// themselves (BTN2 -> FINISH_BASELINE_COLLECTION); the CSV uploads for real
+// grading server-side.
+// Layout (320×240):
+//   y=0..19    — title row
+//   y=22..30   — instruction line
+//   y=40..112  — 3 axis-coverage bars (X/Y/Z)
+//   y=125..145 — sample count
+//   y=150..190 — live fit quality (reuses showCalGrid's color/format)
+//   y=205..225 — "BTN2: done" prompt (dim + sample count needed, if under floor;
+//                "uploading..." once complete)
+// ---------------------------------------------------------------------------
+void showBaselineRoughScan(const CalProgressPacket& pkt) {
+    const int BAR_X = 40, BAR_W = 260, BAR_H = 16;
+
+    if (!g_roughScanStaticDrawn) {
+        tft.fillScreen(COLOR_BLACK);
+
+        tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
+        tft.setTextSize(2);
+        tft.setCursor(4, 2);
+        tft.print("BASELINE CAL");
+
+        tft.setTextSize(1);
+        tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+        tft.setCursor(4, 24);
+        tft.print("Tumble through all orientations");
+
+        const char* axisLabels[3] = { "X", "Y", "Z" };
+        const int barY[3] = { 42, 68, 94 };
+        tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+        for (int i = 0; i < 3; i++) {
+            tft.setCursor(4, barY[i] + BAR_H / 2 - 4);
+            tft.print(axisLabels[i]);
+            tft.drawRect(BAR_X, barY[i], BAR_W, BAR_H, COLOR_GRAY);
+        }
+
+        g_roughScanStaticDrawn = true;
+    }
+
+    // --- Axis bar fills (redrawn each call) ---
+    const int barY[3] = { 42, 68, 94 };
+    const uint8_t cov[3] = { pkt.cov_x, pkt.cov_y, pkt.cov_z };
+    for (int i = 0; i < 3; i++) {
+        int fillW = (BAR_W - 2) * (int)cov[i] / 100;
+        uint16_t color = (cov[i] >= 80) ? COLOR_GREEN : (cov[i] >= 40) ? COLOR_YELLOW : COLOR_RED;
+        tft.fillRect(BAR_X + 1, barY[i] + 1, BAR_W - 2, BAR_H - 2, COLOR_BLACK);
+        if (fillW > 0) tft.fillRect(BAR_X + 1, barY[i] + 1, fillW, BAR_H - 2, color);
+    }
+
+    // --- Sample count ---
+    tft.fillRect(0, 122, 320, 20, COLOR_BLACK);
+    tft.setTextSize(2);
+    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+    tft.setCursor(4, 124);
+    char sbuf[24];
+    snprintf(sbuf, sizeof(sbuf), "Samples: %u", (unsigned)pkt.sample_count);
+    tft.print(sbuf);
+
+    // --- Live fit quality (same reading as COLLECT's grid screen) ---
+    tft.fillRect(0, 148, 320, 20, COLOR_BLACK);
+    if (pkt.fit_valid) {
+        uint16_t fcol = (pkt.fit_hdg_err_deg < 3.0f) ? COLOR_GREEN
+                      : (pkt.fit_hdg_err_deg < 7.0f) ? COLOR_YELLOW
+                      : COLOR_RED;
+        char fbuf[20];
+        snprintf(fbuf, sizeof(fbuf), "Fit:\xB1%.1f\xB0", pkt.fit_hdg_err_deg);
+        tft.setTextSize(2);
+        tft.setTextColor(fcol, COLOR_BLACK);
+        tft.setCursor(4, 150);
+        tft.print(fbuf);
+        if (pkt.fit_delta < 0.5f) {
+            tft.setTextColor(COLOR_GREEN, COLOR_BLACK);
+            tft.print(" OK");
+        } else if (pkt.fit_delta < 2.0f) {
+            tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
+            tft.print("  ~");
+        }
+    }
+
+    // --- Prompt ---
+    tft.fillRect(0, 205, 320, 30, COLOR_BLACK);
+    tft.setTextSize(1);
+    if (pkt.complete) {
+        tft.setTextColor(COLOR_GREEN, COLOR_BLACK);
+        tft.setCursor(4, 210);
+        tft.print("Done -- uploading for grading...");
+    } else if (pkt.sample_count >= MAG_CAL_ROUGH_SCAN_MIN_SAMPLES) {
+        tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+        tft.setCursor(4, 210);
+        tft.print("BTN2: done, upload for grading");
+    } else {
+        tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+        tft.setCursor(4, 210);
+        char pbuf[40];
+        snprintf(pbuf, sizeof(pbuf), "Keep going... (%d more samples)",
+                 MAG_CAL_ROUGH_SCAN_MIN_SAMPLES - (int)pkt.sample_count);
+        tft.print(pbuf);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shown the instant BTN2 requests FINISH_BASELINE_COLLECTION, before nav has
+// confirmed. nav does a synchronous CSV dump (can take real time for a big
+// run) before it even sends the completion packet, so without this screen
+// the diver sees the exact same rough-scan bars/prompt they were already
+// looking at -- indistinguishable from the press not having registered.
+// ---------------------------------------------------------------------------
+void showBaselineFinishing() {
+    tft.fillScreen(COLOR_BLACK);
+    tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
+    tft.setTextSize(2);
+    tft.setCursor(4, 2);
+    tft.print("BASELINE CAL");
+
+    tft.setTextSize(2);
+    tft.setTextColor(COLOR_GREEN, COLOR_BLACK);
+    tft.setCursor(20, 110);
+    tft.print("Finishing up...");
+
+    tft.setTextSize(1);
+    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+    tft.setCursor(20, 140);
+    tft.print("Uploading and processing CSV");
 }
 
 }  // namespace display

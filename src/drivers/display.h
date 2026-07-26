@@ -68,6 +68,13 @@ void showCal(uint8_t remaining_s, uint8_t coverage_pct, bool isFull);
 //   pkt     — CalProgressPacket with bin counts and totals
 //   title   — short title string ("BASELINE CAL" or "MOUNTED CAL")
 void showCalGrid(const struct CalProgressPacket& pkt, const char* title);
+// Baseline pass 1 (ROUGH_SCAN): no grid, axis-range bars + live fit stats + "good enough" prompt.
+void showBaselineRoughScan(const struct CalProgressPacket& pkt);
+// Shown immediately when BTN2 requests FINISH_BASELINE_COLLECTION, before nav
+// has confirmed (which can take a while -- nav does a synchronous CSV dump
+// first). Distinguishes "request sent, waiting" from the rough-scan screen
+// diver would otherwise see redrawn unchanged.
+void showBaselineFinishing();
 
 // Speed calibration screens (all flush to display).
 // Distance selection — user chooses how far they will swim.
@@ -112,10 +119,13 @@ void showCloudCalOffline();
 void showCloudCalFailed(const char* message);
 
 // Fit succeeded — accept/reject the result.
-//   quality: 0=good, 1=warn, 2=bad (CalCloudQuality)
-//   choice:  0=ACCEPT, 1=REJECT (highlighted item)
+//   quality:      0=good, 1=warn, 2=bad (CalCloudQuality)
+//   coverageGaps: baseline only, empty coverage-grid cells; -1 = not applicable
+//                 (mounted fit, or a pre-9-axis-firmware baseline CSV) and shows
+//                 nothing extra. See baseline-cal-coverage-feedback-plan.md.
+//   choice:       0=ACCEPT, 1=REJECT (highlighted item)
 void showCloudCalResult(uint8_t quality, float rmsPct, const char* recommendation,
-                         uint8_t choice);
+                         int16_t coverageGaps, uint8_t choice);
 
 // Cloud account-link screens (device-code account link). Shown after the
 // diver selects "Link acct" from the Config menu. No URL is ever shown --

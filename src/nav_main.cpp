@@ -690,7 +690,7 @@ void loop() {
         if (gCalMode == 5 || gCalMode == 6) {
             // Bin-aware mag cal (baseline=5, mounted=6)
             // Feed current raw mag sample into the bin collector
-            imu::magBinCalTick(pitchDeg, headingDeg, magRaw_logical);
+            imu::magBinCalTick(pitchDeg, headingDeg, magRaw_logical, accel, gyro);
 
             // Emit CalProgressPacket at 2 Hz
             if (nowMs - gLastCalProgressMs >= CAL_PROGRESS_INTERVAL_MS) {
@@ -708,14 +708,14 @@ void loop() {
                 // don't wait for the 2 Hz timer, or the display may never see it.
                 {
                     CalProgressPacket cpkt{};
-                    imu::magBinCalGetProgress(cpkt);  // complete=true, all bins green
+                    imu::magBinCalGetProgress(cpkt);  // complete=true (mounted: all bins green; baseline: diver-declared)
                     char calBuf[512];
                     size_t cn = calProgressPacketToBytes(cpkt, calBuf, sizeof(calBuf));
                     if (cn > 0) Serial1.write(calBuf, cn);
                     Serial.println("[BIN_CAL] Sent completion packet");
                 }
 
-                Serial.println("[BIN_CAL] All bins green — dumping CSV");
+                Serial.println("[BIN_CAL] Complete — dumping CSV");
                 if (gBinCalCsvPath) {
                     File f = LittleFS.open(gBinCalCsvPath, FILE_WRITE);
                     if (f) {
@@ -757,6 +757,7 @@ void loop() {
                                              : (cr.qualityBand == "warn") ? (uint8_t)CalCloudQuality::WARN
                                                                           : (uint8_t)CalCloudQuality::BAD;
                                 rpkt.rms_pct = cr.rmsPct;
+                                rpkt.coverage_gaps = (int16_t)cr.coverageGaps;
                                 strncpy(rpkt.recommendation, cr.recommendation.c_str(),
                                         sizeof(rpkt.recommendation) - 1);
                                 strncpy(rpkt.calibration_id, cr.calibrationId.c_str(),
@@ -789,6 +790,7 @@ void loop() {
                     }
                 }
                 imu::magBinCalEnd();
+                loadCalibration();  // restore whatever's actually on flash
                 gInCal   = false;
                 sysState = SystemState::READY;
                 Serial.println("[BIN_CAL] Cal complete, returning to READY");
@@ -1270,6 +1272,12 @@ static void handleDisplayCmd() {
                         gBinCalCsvPath = "/mag_mounted_samples.csv";
                         gLastCalProgressMs = 0;
                         imu::magBinCalBegin(true);
+                        break;
+                    case DisplayCmd::FINISH_BASELINE_COLLECTION:
+                        Serial.println("CMD: FINISH_BASELINE_COLLECTION (diver declares done)");
+                        if (gInCal && gCalMode == 5) {
+                            imu::magBinCalFinishBaseline();
+                        }
                         break;
                     case DisplayCmd::START_SPEED_CAL: {
                         gSpeedCalDist_ft = parseSpeedCalDist(cmdBuf, cmdPos);

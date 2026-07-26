@@ -31,6 +31,17 @@ static constexpr uint32_t CAL_COMPLETE_HOLD_MS = 3000;  // show "DONE" for 3 s t
 static uint32_t calCompleteShownMs = 0;
 static bool calCompleteHolding = false;
 
+// Baseline BTN2 gives no visible change until nav's completion packet arrives
+// (which can take a while for a big run -- nav does a synchronous CSV dump
+// before it even sends that packet). Without this, the screen just redraws
+// the same bars/prompt, indistinguishable from "not pressed yet", so the
+// diver presses again. Set immediately on press; cleared once the real
+// completion packet lands (entering calCompleteHolding) or after a timeout
+// in case the command was dropped over serial.
+static bool gBaselineFinishPending = false;
+static uint32_t gBaselineFinishPendingMs = 0;
+static constexpr uint32_t BASELINE_FINISH_PENDING_TIMEOUT_MS = 8000;
+
 // ---- Link transmit buffer --------------------------------------------------
 // 96, not 64: ACCEPT_CLOUD_CAL/REJECT_CLOUD_CAL carry a 36-char UUID ("cid")
 // plus JSON overhead, which doesn't fit the old 64-byte size.
@@ -119,6 +130,7 @@ static constexpr uint32_t CLOUD_CAL_WAIT_TIMEOUT_MS = 40000;  // > nav's ~30s wo
 static uint8_t           gCloudCalChoice         = 0;  // 0=ACCEPT, 1=REJECT
 static uint8_t           gCloudCalQuality        = 0;
 static float             gCloudCalRmsPct         = 0.0f;
+static int16_t           gCloudCalCoverageGaps   = -1;  // baseline only; -1 = n/a
 static char              gCloudCalRecommendation[96] = "";
 static char              gCloudCalError[64]          = "";
 static char              gCloudCalId[40]             = "";
@@ -472,9 +484,21 @@ void loop() {
     // Cloud-cal UI overrides the link-timeout check: the nav device blocks on
     // its own upload+fit call while awaiting a result, so no packets arrive
     // for up to ~30s even though the link is fine. See CloudCalUiPhase above.
+    // calCompleteHolding needs the same override: nav sends the "complete"
+    // packet, then immediately does a (possibly multi-second, for a large
+    // baseline run) CSV dump + blocking upload attempt before it sends
+    // anything else — the CAL_COMPLETE_HOLD_MS window alone doesn't cover
+    // that, since dump+upload can easily outlast it, and gCloudCalPhase isn't
+    // set to WAITING until *after* the hold ends. Without this, a big enough
+    // run flashes "NO LINK" for a few seconds even though nothing is wrong.
     bool awaitingCloudCal  = (gCloudCalPhase != CloudCalUiPhase::NONE);
     bool awaitingCloudLink = (gCloudLinkPhase != CloudLinkUiPhase::NONE);
-    bool linkAlive = awaitingCloudCal || awaitingCloudLink ||
+    // gBaselineFinishPending covers the gap between BTN2 requesting
+    // FINISH_BASELINE_COLLECTION and nav's completion packet actually
+    // arriving -- nav may already be mid CSV-dump by the time it gets to
+    // sending that packet. Same reasoning as calCompleteHolding below.
+    bool linkAlive = calCompleteHolding || gBaselineFinishPending ||
+                     awaitingCloudCal || awaitingCloudLink ||
                      (navValid && (now - lastNavMs < NAV_TIMEOUT_MS));
 
     if (linkAlive) {
@@ -486,11 +510,29 @@ void loop() {
         if (now - lastDisplayMs >= DISPLAY_INTERVAL_MS) {
             lastDisplayMs = now;
 
-            // Bin cal complete: hold DONE screen for CAL_COMPLETE_HOLD_MS then return
+            // Baseline: BTN2 was pressed, waiting for nav to confirm completion.
+            // Times out (command likely dropped) back to the normal rough-scan
+            // screen so the diver can just press BTN2 again.
+            if (gBaselineFinishPending) {
+                if (now - gBaselineFinishPendingMs >= BASELINE_FINISH_PENDING_TIMEOUT_MS) {
+                    gBaselineFinishPending = false;
+                    Serial.println("[BIN_CAL] Finish-baseline request timed out, retry available");
+                } else {
+                    display::showBaselineFinishing();
+                    return;
+                }
+            }
+
+            // Bin cal complete: hold DONE screen for CAL_COMPLETE_HOLD_MS then return.
+            // Baseline never leaves ROUGH_SCAN (no grid to show); mounted uses the grid.
             if (calCompleteHolding) {
-                display::showCalGrid(lastCalProgress,
-                                     lastCalProgress.cal_type == (uint8_t)CalType::MOUNTED
-                                         ? "MOUNTED CAL" : "BASELINE CAL");
+                if (lastCalProgress.phase == (uint8_t)CalPhase::ROUGH_SCAN) {
+                    display::showBaselineRoughScan(lastCalProgress);
+                } else {
+                    display::showCalGrid(lastCalProgress,
+                                         lastCalProgress.cal_type == (uint8_t)CalType::MOUNTED
+                                             ? "MOUNTED CAL" : "BASELINE CAL");
+                }
                 if (now - calCompleteShownMs >= CAL_COMPLETE_HOLD_MS) {
                     calCompleteHolding = false;
                     calProgressValid   = false;
@@ -526,7 +568,8 @@ void loop() {
                         break;
                     case CloudCalUiPhase::RESULT:
                         display::showCloudCalResult(gCloudCalQuality, gCloudCalRmsPct,
-                                                    gCloudCalRecommendation, gCloudCalChoice);
+                                                    gCloudCalRecommendation, gCloudCalCoverageGaps,
+                                                    gCloudCalChoice);
                         break;
                     default:
                         break;
@@ -576,11 +619,17 @@ void loop() {
                 return;
             }
 
-            // Active bin cal progress grid — takes priority over all other rendering
+            // Active bin cal progress — takes priority over all other rendering.
+            // Baseline (always ROUGH_SCAN) gets its own screen, no grid;
+            // mounted (always COLLECT) uses the familiar grid.
             if (calProgressValid) {
-                display::showCalGrid(lastCalProgress,
-                                     lastCalProgress.cal_type == (uint8_t)CalType::MOUNTED
-                                         ? "MOUNTED CAL" : "BASELINE CAL");
+                if (lastCalProgress.phase == (uint8_t)CalPhase::ROUGH_SCAN) {
+                    display::showBaselineRoughScan(lastCalProgress);
+                } else {
+                    display::showCalGrid(lastCalProgress,
+                                         lastCalProgress.cal_type == (uint8_t)CalType::MOUNTED
+                                             ? "MOUNTED CAL" : "BASELINE CAL");
+                }
                 return;
             }
 
@@ -724,6 +773,7 @@ static void processNavLine() {
             if (lastCalProgress.complete && !calCompleteHolding) {
                 calCompleteHolding  = true;
                 calCompleteShownMs  = millis();
+                gBaselineFinishPending = false;
                 Serial.println("[CAL_GRID] Complete — holding DONE screen");
             }
         }
@@ -755,6 +805,7 @@ static void processNavLine() {
                 gCloudCalPhase   = CloudCalUiPhase::RESULT;
                 gCloudCalQuality = pkt.quality;
                 gCloudCalRmsPct  = pkt.rms_pct;
+                gCloudCalCoverageGaps = pkt.coverage_gaps;
                 gCloudCalChoice  = 0;
                 strncpy(gCloudCalRecommendation, pkt.recommendation, sizeof(gCloudCalRecommendation) - 1);
                 gCloudCalRecommendation[sizeof(gCloudCalRecommendation) - 1] = '\0';
@@ -936,6 +987,26 @@ static void handleButtons() {
             btn2.fired = true;
             return;
         }
+    }
+
+    // --- Baseline ROUGH_SCAN: BTN2 declares collection done, ends the session ---
+    if (calProgressValid && lastCalProgress.phase == (uint8_t)CalPhase::ROUGH_SCAN) {
+        if (gBaselineFinishPending) {
+            // Already requested -- ignore repeat presses until nav confirms
+            // (complete=true) or the pending screen times out.
+            return;
+        }
+        if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
+            btn2.fired = true;
+            sendCmd(DisplayCmd::FINISH_BASELINE_COLLECTION);
+            // nav may still ignore this (too few samples); the pending screen
+            // times out below if no completion packet ever arrives.
+            gBaselineFinishPending   = true;
+            gBaselineFinishPendingMs = millis();
+            display::clear();
+            Serial.println("[BIN_CAL] BTN2: requested finish baseline collection");
+        }
+        return;
     }
 
     // --- Fourier heading calibration -----------------------------------------

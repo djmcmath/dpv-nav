@@ -134,7 +134,15 @@ existing "DONE" screen and CSV save):
 - **This plan covers magnetometer calibration only.** Fourier heading cal
   (`tools/fourier_fit.py` → `hdg_fourier.json`) has an almost identical shape (CSV up,
   fitted JSON down) and is a natural follow-on once the shared cloud client exists — not
-  in scope here.
+  in scope here. Unlike the mag ellipsoid fit, it needs an adequacy check beyond a single
+  RMS number: today's fixed 12-point collection can still leave one sector thin (real
+  case, 2026-07-24: only 4 of the 12 points fell in a 330°-060° span with a large swing,
+  giving a mediocre fit there until 315/345/015/045 were added by hand). The
+  divemap-side plan (`device-calibration-plan.md`, Risks & Open Decisions) sketches the
+  server reporting *which* headings are under-covered rather than just pass/fail; on the
+  firmware side that would eventually mean the point-and-click collection UI can be
+  driven by a server-supplied list of headings, not just the fixed 12 — not scoped yet,
+  since it depends on the Fourier fit existing server-side at all.
 - **Dropping TLS (plain HTTP to divemap.diverdaniel.com) was considered and rejected
   for now — flagged as a possible future step, not a plan.** The payloads themselves
   (cal CSVs, eventually track logs) aren't sensitive, but the RFC 8628 bearer token
@@ -253,3 +261,21 @@ Step 2 (TLS root CA) is the one explicit gap — see below.
   `docs/architecture/device-uploads-plan.md` ("Revision 2") for the full rationale,
   including why this stayed device-initiated rather than flipping to
   website-initiated.
+- **Upload crash on large collections, found and fixed (2026-07-26).** Live testing
+  for divemap's `baseline-cal-coverage-feedback-plan.md` (which pushed baseline
+  collections to ~1000+ samples, well past what earlier testing had exercised) hit a
+  real crash: `runCalibrationUpload()`'s `readFileToBuffer()` read the whole samples
+  CSV into one heap allocation (`new uint8_t[len]`) before POSTing it. At ~1000+
+  samples (~85KB CSV) that single contiguous allocation reliably failed against the
+  WiFi/TLS-constrained heap, and the uncaught `bad_alloc` took the whole device down
+  (panic -> `rst:0xc SW_CPU_RESET`) mid-upload rather than failing gracefully. This is
+  almost certainly what earlier "no response" reports in that testing round actually
+  were — nav had died and was rebooting, not hung, so the display's 40s no-response
+  timeout fired. Root-caused via `xtensa-esp32-elf-addr2line` against the built
+  `firmware.elf` (backtrace led straight to `readFileToBuffer`/`operator new[]`
+  inside `runCalibrationUpload`). Fixed by streaming the CSV directly from LittleFS
+  via `HTTPClient::sendRequest("POST", &file, size)` instead of buffering it at all —
+  `readFileToBuffer()` is gone. Confirmed: reproduced the crash at 1030/1073 samples
+  pre-fix, then re-ran an identical 1073-sample collection post-fix cleanly (no
+  crash). No size ceiling on baseline collections now, by construction rather than by
+  a raised-but-still-finite buffer size.

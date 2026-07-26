@@ -576,7 +576,9 @@ static bool magFit2DSolve() {
 static constexpr int BIN_CAL_MAX_SAMPLES = 60 * MAG_CAL_BIN_GREEN_THRESHOLD * 2;  // 1800
 
 struct BinCalSample {
-    int16_t x, y, z;  // raw logical-frame counts (post-axis-map, from readMagRaw())
+    int16_t x, y, z;        // mag: raw logical-frame counts (post-axis-map, from readMagRaw())
+    float   ax, ay, az;     // accel: calibrated, g (logical frame, same axis-map as mag)
+    float   gx, gy, gz;     // gyro: calibrated, rad/s (logical frame, same axis-map as mag)
 };
 
 static bool          g_binCalActive    = false;
@@ -595,9 +597,37 @@ static float         g_lastHdgDeg      = 0.0f;       // actual heading at last t
 static BinCalSample g_binLastSample[60] = {};
 static bool         g_binHasSample[60]  = {};
 
+// ---------------------------------------------------------------------------
+// Baseline cal: ROUGH_SCAN-only, no live grid (retired two-pass design).
+//
+// Three prior spikes tried to make a *live* grid trustworthy pre-calibration:
+// (1) binning on the raw magnetometer vector against a Fibonacci lattice
+// (broke screen locality — see git history), (2) against a fixed body axis
+// (restored locality but was never gravity-referenced, and any
+// elevation/azimuth parameterization has an unavoidable pole singularity
+// regardless of which axis it's measured from), and (3) a two-pass handoff
+// (ROUGH_SCAN gathers raw spread, hands a rough hard-iron bias to the
+// existing Mahony/AHRS pipeline, then COLLECT resumes the original grid) —
+// see docs/baseline-cal-two-pass.md for the full diagnostic history. On
+// hardware, (3) still failed: no correlation between physical orientation
+// and the highlighted box, consistent with AHRS filter lag/hysteresis under
+// fast rotation, not a mapping bug.
+//
+// Current design (divemap/docs/architecture/baseline-cal-coverage-feedback-plan.md):
+// stop trying to predict/display completion live. Baseline stays in
+// ROUGH_SCAN for its entire session — honest per-axis range bars, sample
+// count, live fit stats, no spatial promise. The diver ends the session
+// themselves (magBinCalFinishBaseline) once it feels sufficient; the 9-axis
+// CSV (mag + accel + gyro) uploads for real grading and coverage-gap
+// feedback on the server, where a trustworthy heading can be computed
+// *after* a real fit exists instead of needing one to already exist.
+// ---------------------------------------------------------------------------
+
+enum class BinCalSubPhase : uint8_t { ROUGH_SCAN, COLLECT };
+static BinCalSubPhase g_binCalSubPhase = BinCalSubPhase::COLLECT;
+
 // Map a sample's orientation to a bin index, or -1 if out of range for mounted
 static int getBinIndex(float pitch_deg, float heading_deg, bool isMounted) {
-    // Heading sector: 0°..360° → 0..11
     if (heading_deg < 0.0f) heading_deg += 360.0f;
     if (heading_deg >= 360.0f) heading_deg -= 360.0f;
     int hdgSector = (int)(heading_deg / 30.0f);
@@ -624,15 +654,34 @@ static int getBinIndex(float pitch_deg, float heading_deg, bool isMounted) {
     return elevBand * sectors + hdgSector;
 }
 
+// Running min/max per axis — tracked during baseline ROUGH_SCAN, purely to
+// render the per-axis coverage bars (magBinCalGetProgress's cov_x/y/z). Not
+// soft-iron-aware and never applied as a calibration; the real bias/soft-iron
+// fit (calibration-processor) only ever sees the raw stored samples.
+static int16_t g_roughMin[3];
+static int16_t g_roughMax[3];
+static int     g_roughScanSampleCount = 0;
+
+// Baseline only: set by magBinCalFinishBaseline() when the diver declares the
+// session done. Baseline has no bin/grid completion concept anymore, so this
+// is the only source of truth for magBinCalIsComplete() in that mode.
+static bool g_baselineUserDone = false;
+
 void magBinCalBegin(bool isMounted) {
     magBinCalEnd();  // clean up any previous run
 
-    g_binCalMounted  = isMounted;
-    g_binCalBinCount = isMounted ? MAG_CAL_MOUNTED_BINS : MAG_CAL_BASELINE_BINS;
-    g_binSampleCount = 0;
+    g_binCalMounted   = isMounted;
+    g_binCalBinCount  = isMounted ? MAG_CAL_MOUNTED_BINS : MAG_CAL_BASELINE_BINS;
+    g_binCalSubPhase  = isMounted ? BinCalSubPhase::COLLECT : BinCalSubPhase::ROUGH_SCAN;
+    g_binSampleCount  = 0;
     memset(g_binCounts,     0, sizeof(g_binCounts));
     memset(g_binHasSample,  0, sizeof(g_binHasSample));
     memset(g_binLastSample, 0, sizeof(g_binLastSample));
+
+    g_roughMin[0] = g_roughMin[1] = g_roughMin[2] = INT16_MAX;
+    g_roughMax[0] = g_roughMax[1] = g_roughMax[2] = INT16_MIN;
+    g_roughScanSampleCount = 0;
+    g_baselineUserDone = false;
 
     g_binSamples = (BinCalSample*)malloc(BIN_CAL_MAX_SAMPLES * sizeof(BinCalSample));
     if (!g_binSamples) {
@@ -642,17 +691,54 @@ void magBinCalBegin(bool isMounted) {
 
     magFit2DReset();  // reset incremental fitter for fresh session
     g_binCalActive = true;
-    Serial.printf("[BIN_CAL] Started %s cal, %d bins, max %d samples\n",
-                  isMounted ? "mounted" : "baseline", g_binCalBinCount, BIN_CAL_MAX_SAMPLES);
+    Serial.printf("[BIN_CAL] Started %s cal (%s), %d bins, max %d samples\n",
+                  isMounted ? "mounted" : "baseline",
+                  g_binCalSubPhase == BinCalSubPhase::ROUGH_SCAN ? "rough scan" : "collect",
+                  g_binCalBinCount, BIN_CAL_MAX_SAMPLES);
 }
 
-bool magBinCalTick(float pitch_deg, float heading_deg, const Vec3i16& rawMagSensor) {
+bool magBinCalTick(float pitch_deg, float heading_deg, const Vec3i16& rawMagSensor,
+                    const Vec3f& accelCal, const Vec3f& gyroCal) {
     if (!g_binCalActive || !g_binSamples) return false;
 
+    g_lastPitchDeg = pitch_deg;
+    g_lastHdgDeg   = heading_deg;
+
+    if (g_binCalSubPhase == BinCalSubPhase::ROUGH_SCAN) {
+        g_lastComputedBin = -1;  // no grid in this phase
+
+        if (rawMagSensor.x < g_roughMin[0]) g_roughMin[0] = rawMagSensor.x;
+        if (rawMagSensor.y < g_roughMin[1]) g_roughMin[1] = rawMagSensor.y;
+        if (rawMagSensor.z < g_roughMin[2]) g_roughMin[2] = rawMagSensor.z;
+        if (rawMagSensor.x > g_roughMax[0]) g_roughMax[0] = rawMagSensor.x;
+        if (rawMagSensor.y > g_roughMax[1]) g_roughMax[1] = rawMagSensor.y;
+        if (rawMagSensor.z > g_roughMax[2]) g_roughMax[2] = rawMagSensor.z;
+
+        // Exact-duplicate rejection against the single most recent sample —
+        // there's no per-bin history in this phase, just one running "last".
+        static BinCalSample s_lastRough{};
+        static bool         s_hasLastRough = false;
+        if (s_hasLastRough && s_lastRough.x == rawMagSensor.x &&
+            s_lastRough.y == rawMagSensor.y && s_lastRough.z == rawMagSensor.z) {
+            return false;
+        }
+        if (g_binSampleCount >= BIN_CAL_MAX_SAMPLES) return false;
+
+        BinCalSample s = { rawMagSensor.x, rawMagSensor.y, rawMagSensor.z,
+                            accelCal.x, accelCal.y, accelCal.z,
+                            gyroCal.x, gyroCal.y, gyroCal.z };
+        g_binSamples[g_binSampleCount++] = s;
+        s_lastRough    = s;
+        s_hasLastRough = true;
+        g_roughScanSampleCount++;
+
+        magFit2DAdd(rawMagSensor);
+        return true;
+    }
+
+    // --- COLLECT: unchanged from the original AHRS-based grid ---
     int bin = getBinIndex(pitch_deg, heading_deg, g_binCalMounted);
     g_lastComputedBin = bin;  // always track current orientation, even if sample rejected
-    g_lastPitchDeg    = pitch_deg;
-    g_lastHdgDeg      = heading_deg;
     if (bin < 0 || bin >= g_binCalBinCount) return false;
 
     // Reject if bin is already green
@@ -670,7 +756,9 @@ bool magBinCalTick(float pitch_deg, float heading_deg, const Vec3i16& rawMagSens
     // Reject if sample buffer is full
     if (g_binSampleCount >= BIN_CAL_MAX_SAMPLES) return false;
 
-    BinCalSample s = { rawMagSensor.x, rawMagSensor.y, rawMagSensor.z };
+    BinCalSample s = { rawMagSensor.x, rawMagSensor.y, rawMagSensor.z,
+                        accelCal.x, accelCal.y, accelCal.z,
+                        gyroCal.x, gyroCal.y, gyroCal.z };
     g_binSamples[g_binSampleCount++] = s;
     g_binLastSample[bin]  = s;
     g_binHasSample[bin]   = true;
@@ -683,24 +771,36 @@ bool magBinCalTick(float pitch_deg, float heading_deg, const Vec3i16& rawMagSens
 
 bool magBinCalIsActive() { return g_binCalActive; }
 
+bool magBinCalFinishBaseline() {
+    if (!g_binCalActive || g_binCalMounted) return false;
+    if (g_roughScanSampleCount < MAG_CAL_ROUGH_SCAN_MIN_SAMPLES) {
+        Serial.printf("[BIN_CAL] Finish-baseline ignored: only %d samples (need %d)\n",
+                      g_roughScanSampleCount, MAG_CAL_ROUGH_SCAN_MIN_SAMPLES);
+        return false;
+    }
+
+    g_baselineUserDone = true;
+    Serial.printf("[BIN_CAL] Baseline collection finished by diver: %d samples, "
+                  "uploading for server-side grading\n", g_roughScanSampleCount);
+    return true;
+}
+
 bool magBinCalIsComplete() {
     if (!g_binCalActive) return false;
 
-    const int sectors = MAG_CAL_BASELINE_HDG_SECTORS;  // 12 (same for both cal types)
-    const int rows    = g_binCalMounted ? MAG_CAL_MOUNTED_ELEV_BANDS : MAG_CAL_BASELINE_ELEV_BANDS;
+    if (!g_binCalMounted) {
+        // Baseline has no bin/grid completion concept anymore -- it's a diver
+        // decision (magBinCalFinishBaseline), not auto-detected coverage.
+        return g_baselineUserDone;
+    }
+
+    // Mounted: row-weighted grid completion, unchanged.
+    const int sectors = MAG_CAL_BASELINE_HDG_SECTORS;  // 12
+    const int rows    = MAG_CAL_MOUNTED_ELEV_BANDS;
 
     for (int r = 0; r < rows; r++) {
-        // Per-row sector requirement (weighted by tilt difficulty):
-        //   Baseline 5-row: row 2 = level, rows 1/3 = ±30°, rows 0/4 = ±60°
-        //   Mounted  3-row: row 1 = level, rows 0/2 = ±30°
-        int required;
-        if (g_binCalMounted) {
-            required = (r == 1) ? MAG_CAL_SECTORS_LEVEL : MAG_CAL_SECTORS_MID;
-        } else {
-            if      (r == 2)            required = MAG_CAL_SECTORS_LEVEL;
-            else if (r == 1 || r == 3)  required = MAG_CAL_SECTORS_MID;
-            else                        required = MAG_CAL_SECTORS_EXTREME;
-        }
+        // row 1 = level, rows 0/2 = +/-30 deg
+        int required = (r == 1) ? MAG_CAL_SECTORS_LEVEL : MAG_CAL_SECTORS_MID;
 
         int greenInRow = 0;
         for (int c = 0; c < sectors; c++) {
@@ -713,9 +813,11 @@ bool magBinCalIsComplete() {
 
 void magBinCalGetProgress(CalProgressPacket& pkt) {
     pkt.cal_type   = g_binCalMounted ? (uint8_t)CalType::MOUNTED : (uint8_t)CalType::BASELINE;
-    pkt.phase      = (uint8_t)CalPhase::COLLECT;
+    pkt.phase      = (g_binCalSubPhase == BinCalSubPhase::ROUGH_SCAN)
+                   ? (uint8_t)CalPhase::ROUGH_SCAN : (uint8_t)CalPhase::COLLECT;
     pkt.bins_total = (uint8_t)g_binCalBinCount;
     pkt.complete   = magBinCalIsComplete();
+    pkt.sample_count = (uint16_t)g_binSampleCount;
 
     uint8_t green = 0;
     for (int i = 0; i < g_binCalBinCount; i++) {
@@ -733,6 +835,16 @@ void magBinCalGetProgress(CalProgressPacket& pkt) {
     pkt.cur_pitch_deg = g_lastPitchDeg;
     pkt.cur_hdg_deg   = g_lastHdgDeg;
 
+    if (g_binCalSubPhase == BinCalSubPhase::ROUGH_SCAN && g_roughScanSampleCount > 0) {
+        // fmaxf(0, ...) guards the pre-first-sample state where max<min (sentinel
+        // INT16_MAX/MIN) — negative-to-uint8_t conversion is UB, so clamp first.
+        pkt.cov_x = (uint8_t)fmaxf(0.0f, fminf(100.0f, ((float)(g_roughMax[0] - g_roughMin[0]) / MAG_CAL_ROUGH_SCAN_EXPECTED_RANGE) * 100.0f));
+        pkt.cov_y = (uint8_t)fmaxf(0.0f, fminf(100.0f, ((float)(g_roughMax[1] - g_roughMin[1]) / MAG_CAL_ROUGH_SCAN_EXPECTED_RANGE) * 100.0f));
+        pkt.cov_z = (uint8_t)fmaxf(0.0f, fminf(100.0f, ((float)(g_roughMax[2] - g_roughMin[2]) / MAG_CAL_ROUGH_SCAN_EXPECTED_RANGE) * 100.0f));
+    } else {
+        pkt.cov_x = pkt.cov_y = pkt.cov_z = 0;
+    }
+
     // Update incremental fit and populate quality fields.
     // magFit2DSolve() runs a 4×4 Gauss-Jordan solve on the accumulated sums —
     // cheap enough to call every time GetProgress is polled (~2 Hz).
@@ -749,9 +861,12 @@ void magBinCalGetProgress(CalProgressPacket& pkt) {
 void magBinCalDumpCSV(void* filePtr) {
     if (!g_binSamples || !filePtr) return;
     File& f = *reinterpret_cast<File*>(filePtr);
-    f.println("mx,my,mz");
+    f.println("mx,my,mz,ax,ay,az,gx,gy,gz");
     for (int i = 0; i < g_binSampleCount; i++) {
-        f.printf("%d,%d,%d\n", g_binSamples[i].x, g_binSamples[i].y, g_binSamples[i].z);
+        const BinCalSample& s = g_binSamples[i];
+        f.printf("%d,%d,%d,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f\n",
+                 s.x, s.y, s.z, (double)s.ax, (double)s.ay, (double)s.az,
+                 (double)s.gx, (double)s.gy, (double)s.gz);
     }
     Serial.printf("[BIN_CAL] Wrote %d samples to CSV\n", g_binSampleCount);
 }
@@ -763,8 +878,11 @@ void magBinCalEnd() {
     }
     magFit2DReset();
     g_binCalActive    = false;
+    g_binCalSubPhase  = BinCalSubPhase::COLLECT;
     g_binSampleCount  = 0;
     g_binCalBinCount  = 0;
+    g_roughScanSampleCount = 0;
+    g_baselineUserDone = false;
     g_lastComputedBin = -1;
     g_lastPitchDeg    = 0.0f;
     g_lastHdgDeg      = 0.0f;

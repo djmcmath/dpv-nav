@@ -283,10 +283,19 @@ static void executeAction(Action act) {
             break;
         case Action::CAL_BASELINE:
             if (gSendCmd) gSendCmd(DisplayCmd::START_BASELINE_CAL);
+            // Force a clean screen for the new session. showBaselineRoughScan/
+            // showCalGrid only wipe their background when their own "static
+            // drawn" flag is false, which is only reset by clear()/reinit() --
+            // if a prior cal session this power cycle ended any way other than
+            // reaching completion (aborted, display recovering from a link
+            // drop mid-session), that flag is stale, and the new session's
+            // bars get drawn right over whatever was on screen before.
+            display::clear();
             Serial.println("[MENU] CAL_BASELINE (START_BASELINE_CAL)");
             break;
         case Action::CAL_MOUNTED:
             if (gSendCmd) gSendCmd(DisplayCmd::START_MOUNTED_CAL);
+            display::clear();  // see CAL_BASELINE above
             Serial.println("[MENU] CAL_MOUNTED (START_MOUNTED_CAL)");
             break;
         case Action::CAL_SPEED:

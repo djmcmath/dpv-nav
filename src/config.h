@@ -122,6 +122,27 @@ constexpr int MAG_CAL_SECTORS_EXTREME =  3;  //  25% — ±60° rows (baseline o
 // ellipsoid fit without requiring sustained upside-down maneuvers.
 
 // ---------------------------------------------------------------------------
+// Baseline cal (2026-07-25) — no live grid; see
+// divemap/docs/architecture/baseline-cal-coverage-feedback-plan.md and the
+// SPIKE comment block in imu.cpp for the three earlier on-device attempts
+// (raw-vector Fibonacci lattice binning, fixed-body-axis elevation/azimuth
+// binning, two-pass ROUGH_SCAN->COLLECT handoff) that led here.
+// ---------------------------------------------------------------------------
+
+// ROUGH_SCAN (baseline's only phase, ungraded raw collection) must gather at
+// least this many samples before magBinCalFinishBaseline() will act on a
+// "done" request — a floor against an accidental/premature finish, not a real
+// quality bar (the real bar is calibration-processor's server-side grading).
+// Mirrors calibration-processor's MIN_BASELINE_SAMPLES (fit.py) loosely.
+constexpr int MAG_CAL_ROUGH_SCAN_MIN_SAMPLES = 40;
+
+// Expected raw-count spread per axis for a full-sphere sweep, used only to
+// turn ROUGH_SCAN's running min/max into a 0-100% coverage bar per axis.
+// Same constant and same purpose as the legacy single-stage NB_EXPECTED_RANGE
+// in imu.cpp — not re-deriving a new number, reusing the known-good one.
+constexpr float MAG_CAL_ROUGH_SCAN_EXPECTED_RANGE = 6800.0f;
+
+// ---------------------------------------------------------------------------
 // GPS signal quality scoring
 // ---------------------------------------------------------------------------
 // computeSignalBars() produces a 0–4 bar count from a GpsFix.

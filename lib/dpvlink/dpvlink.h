@@ -102,10 +102,15 @@ enum class CalType : uint8_t {
     MOUNTED  = 1,  // limited range, unit on scooter
 };
 
-// Named phases — only COLLECT is active now; foundation for guided mode
+// Named phases. Baseline cal stays in ROUGH_SCAN for its whole session — no
+// grid, just axis-range bars + fit stats; the diver ends it themselves
+// (FINISH_BASELINE_COLLECTION) and the CSV is graded server-side. Mounted cal
+// always runs in COLLECT (the guided grid) and auto-completes when bins are
+// green. A two-pass ROUGH_SCAN->COLLECT handoff was tried and retired for
+// baseline — see docs/baseline-cal-two-pass.md for why.
 enum class CalPhase : uint8_t {
-    COLLECT = 0,  // collect samples until bins are green
-    // future: INSTRUCT, VALIDATE, COMPLETE
+    COLLECT    = 0,  // mounted only: collect samples until bins are green
+    ROUGH_SCAN = 1,  // baseline only: no grid, just axis-range bars + fit stats
 };
 
 struct CalProgressPacket {
@@ -119,9 +124,15 @@ struct CalProgressPacket {
     float    cur_pitch_deg;     // actual AHRS pitch at packet-send time (for orientation readout)
     float    cur_hdg_deg;       // actual heading at packet-send time (for orientation readout)
 
+    // ROUGH_SCAN only: per-axis raw-range coverage (0-100%, vs an expected
+    // range), and total accepted sample count. No bin/grid meaning in this
+    // phase — bins_green/bins_total/bin_counts/current_bin/complete are unused.
+    uint8_t  cov_x, cov_y, cov_z;
+    uint16_t sample_count;
+
     // Incremental 2-D ellipse fit quality (updated each GetProgress call, ~2 Hz)
     // Reflects circularity of XY plane data in calibrated space — the quantity
-    // that directly determines heading accuracy.
+    // that directly determines heading accuracy. Populated in both phases.
     bool  fit_valid;        // true once ≥8 samples and a valid ellipse solution exists
     float fit_hdg_err_deg;  // estimated heading error from XY ellipticity (degrees);
                             // converges toward the expected error of the resulting cal
@@ -151,6 +162,9 @@ struct CalCloudResultPacket {
     char    recommendation[96];   // shown to the diver as-is; stage == DONE only
     char    error[64];            // shown to the diver as-is; stage == FAILED only
     char    calibration_id[40];   // UUID string; needed to accept/reject
+    int16_t coverage_gaps;        // stage == DONE only; baseline only. -1 = not
+                                   // applicable (mounted, or pre-9-axis-firmware CSV).
+                                   // See divemap's baseline-cal-coverage-feedback-plan.md.
 };
 
 // ---------------------------------------------------------------------------
@@ -233,6 +247,7 @@ enum class DisplayCmd : uint8_t {
     REJECT_CLOUD_CAL       = 32, // reject a cloud calibration result (carries "cid" calibration id)
     LINK_ACCOUNT           = 33, // begin device-auth cloud account link (RFC 8628)
     CANCEL_LINK            = 34, // cancel an in-progress account-link poll (BTN2 during wait)
+    FINISH_BASELINE_COLLECTION = 35, // diver declares baseline collection done -> dump CSV, upload for grading
 };
 
 // ---------------------------------------------------------------------------

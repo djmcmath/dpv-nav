@@ -78,6 +78,15 @@ Both calibrations collect raw samples using a **bin-aware** approach: the screen
 
 ### Running Baseline Calibration
 
+> **Superseded (2026-07-25):** the live bin-coverage grid described in steps 3-5 below
+> (including its two-pass revision from 2026-07-24, see
+> [baseline-cal-two-pass.md](./baseline-cal-two-pass.md)) failed on hardware and is
+> being retired for Baseline. The replacement collects with simple axis-range bars and
+> no live grid, then grades the result for real on the server and shows coverage gaps
+> on the Dive Map website instead of on the unit's screen — see
+> [divemap's baseline-cal-coverage-feedback-plan.md](../../divemap/docs/architecture/baseline-cal-coverage-feedback-plan.md).
+> Not yet implemented; this doc will get a fuller rewrite once it is.
+
 1. **Remove device from DPV** and take it somewhere with low magnetic interference.
 2. Open menu (BTN1) → **CAL > Baseline**.
 3. The display switches to a bin-coverage grid screen. Rotate the device through all orientations — roll, pitch, yaw, and diagonals.

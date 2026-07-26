@@ -6,8 +6,6 @@
 #include <Preferences.h>
 #include <WiFiClientSecure.h>
 
-#include <memory>
-
 #include "../config.h"
 
 namespace cloud {
@@ -96,14 +94,22 @@ static String apiUrl(const char* path) {
     return url;
 }
 
-// Extracts {"error": "..."} from a JSON error body, falling back to the raw
-// body (or a generic message) if it isn't in that shape -- matches the
-// backend's structured-error convention (see errors.rs / calibration-processor).
+// Extracts the backend's structured error body -- {"error": "<category>",
+// "status": ..., "details": "<specific reason>"} (see errors.rs). "details"
+// is what's actionable ("file not found: ...", "insufficient_samples", etc);
+// "error" alone is just the HTTP status category ("Internal Server Error")
+// and isn't worth showing on its own. Falls back to "error", then the raw
+// body, if "details" is absent (e.g. a response not routed through errors.rs).
 static String extractError(const String& body, int httpCode) {
     if (body.length() > 0) {
         JsonDocument doc;
-        if (deserializeJson(doc, body) == DeserializationError::Ok && doc["error"].is<const char*>()) {
-            return String((const char*)doc["error"]);
+        if (deserializeJson(doc, body) == DeserializationError::Ok) {
+            if (doc["details"].is<const char*>()) {
+                return String((const char*)doc["details"]);
+            }
+            if (doc["error"].is<const char*>()) {
+                return String((const char*)doc["error"]);
+            }
         }
         return body;
     }
@@ -268,16 +274,6 @@ void updateAuthorizePoll() {
 // Calibration upload + fit
 // ---------------------------------------------------------------------------
 
-static bool readFileToBuffer(const char* path, std::unique_ptr<uint8_t[]>& buf, size_t& len) {
-    File f = LittleFS.open(path, FILE_READ);
-    if (!f) return false;
-    len = f.size();
-    buf.reset(new uint8_t[len]);
-    size_t read = f.read(buf.get(), len);
-    f.close();
-    return read == len;
-}
-
 static const char* basenameOf(const char* path) {
     const char* slash = strrchr(path, '/');
     return slash ? slash + 1 : path;
@@ -297,23 +293,31 @@ CalibrationResult runCalibrationUpload(const char* mode, const char* csvPath, co
         return result;
     }
 
-    std::unique_ptr<uint8_t[]> csvBuf;
-    size_t csvLen = 0;
-    if (!readFileToBuffer(csvPath, csvBuf, csvLen) || csvLen == 0) {
-        result.errorMessage = "could not read samples file";
-        return result;
-    }
-
-    // Step 1: upload the raw CSV. A 409 (duplicate, same content already
-    // uploaded) is not a failure -- the backend hands back the existing
-    // upload's id, which works exactly as well for the calibrate call.
+    // Step 1: upload the raw CSV, streamed directly from LittleFS rather than
+    // read into a single heap buffer first. The buffer approach this replaced
+    // (`new uint8_t[len]`) crashed hard once a collection got large enough --
+    // ~1000 samples (~85KB CSV) reliably failed a single contiguous
+    // allocation against the WiFi-stack-constrained heap, and the resulting
+    // uncaught bad_alloc took the whole device down (panic -> reboot) instead
+    // of failing gracefully. Streaming avoids needing that allocation at all.
+    // A 409 (duplicate, same content already uploaded) is not a failure --
+    // the backend hands back the existing upload's id, which works exactly
+    // as well for the calibrate call.
     String uploadId;
     {
+        File csvFile = LittleFS.open(csvPath, FILE_READ);
+        if (!csvFile) {
+            result.errorMessage = "could not read samples file";
+            return result;
+        }
+        size_t csvLen = csvFile.size();
+
         WiFiClientSecure client;
         client.setCACert(CLOUD_ROOT_CA_PEM);
         HTTPClient https;
         https.setTimeout(CLOUD_HTTP_TIMEOUT_MS);
         if (!https.begin(client, apiUrl("/api/device/uploads"))) {
+            csvFile.close();
             result.errorMessage = "could not start connection";
             return result;
         }
@@ -322,7 +326,8 @@ CalibrationResult runCalibrationUpload(const char* mode, const char* csvPath, co
         https.addHeader("X-Upload-Filename", basenameOf(csvPath));
         https.addHeader("Content-Type", "application/octet-stream");
 
-        int code = https.POST(csvBuf.get(), csvLen);
+        int code = https.sendRequest("POST", &csvFile, csvLen);
+        csvFile.close();
         String body = https.getString();
         https.end();
 
@@ -383,6 +388,7 @@ CalibrationResult runCalibrationUpload(const char* mode, const char* csvPath, co
         result.qualityBand   = String((const char*)doc["quality_band"]);
         result.rmsPct        = doc["rms_pct"] | 0.0f;
         result.recommendation = String((const char*)doc["recommendation"]);
+        result.coverageGaps  = doc["coverage_gaps"] | -1;
         calJson.set(doc["cal_json"]);
     }
 

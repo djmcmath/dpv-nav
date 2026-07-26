@@ -71,6 +71,10 @@ struct CalibrationResult {
     String qualityBand;         // "good" | "warn" | "bad"
     float  rmsPct = 0.0f;
     String recommendation;      // shown to the diver as-is, e.g. "Bad cal; 47% RMS. ..."
+    int    coverageGaps = -1;   // baseline only; empty coverage-grid cells. -1 = not
+                                // applicable (mounted fit, or a baseline CSV collected
+                                // before the 9-axis firmware update). See divemap's
+                                // baseline-cal-coverage-feedback-plan.md, step 5.
 };
 
 // Upload a raw calibration CSV and run the fit, end to end:

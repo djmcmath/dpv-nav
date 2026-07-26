@@ -297,11 +297,19 @@ size_t calProgressPacketToBytes(const CalProgressPacket& pkt, char* buf, size_t 
     doc["cb"]  = pkt.current_bin;
     doc["pp"]  = pkt.cur_pitch_deg;
     doc["hh"]  = pkt.cur_hdg_deg;
+    doc["sc"]  = pkt.sample_count;
 
     // Encode bin counts as a JSON array
     JsonArray bins = doc["bc"].to<JsonArray>();
     for (int i = 0; i < pkt.bins_total; i++) {
         bins.add(pkt.bin_counts[i]);
+    }
+
+    // ROUGH_SCAN only — omit otherwise to save bandwidth, same convention as fv/fe/fd below
+    if (pkt.phase == (uint8_t)CalPhase::ROUGH_SCAN) {
+        doc["cx"] = pkt.cov_x;
+        doc["cy"] = pkt.cov_y;
+        doc["cz"] = pkt.cov_z;
     }
 
     // Fit quality — only include when valid to save bandwidth
@@ -331,6 +339,7 @@ bool bytesToCalProgressPacket(const char* buf, size_t len, CalProgressPacket& ou
     out.current_bin   = doc["cb"]  | (int8_t)-1;
     out.cur_pitch_deg = doc["pp"]  | 0.0f;
     out.cur_hdg_deg   = doc["hh"]  | 0.0f;
+    out.sample_count  = doc["sc"]  | (uint16_t)0;
 
     JsonArray bins = doc["bc"];
     int count = (int)out.bins_total;
@@ -338,6 +347,10 @@ bool bytesToCalProgressPacket(const char* buf, size_t len, CalProgressPacket& ou
     for (int i = 0; i < count; i++) {
         out.bin_counts[i] = bins[i] | (uint8_t)0;
     }
+
+    out.cov_x = doc["cx"] | (uint8_t)0;
+    out.cov_y = doc["cy"] | (uint8_t)0;
+    out.cov_z = doc["cz"] | (uint8_t)0;
 
     out.fit_valid       = doc["fv"]  | false;
     out.fit_hdg_err_deg = doc["fe"]  | 0.0f;
@@ -358,6 +371,7 @@ size_t calCloudResultPacketToBytes(const CalCloudResultPacket& pkt, char* buf, s
         doc["crp"] = pkt.rms_pct;
         doc["crc"] = pkt.recommendation;
         doc["cid"] = pkt.calibration_id;
+        doc["ccg"] = pkt.coverage_gaps;
     } else if (pkt.stage == (uint8_t)CalCloudStage::FAILED) {
         doc["cer"] = pkt.error;
     }
@@ -377,6 +391,7 @@ bool bytesToCalCloudResultPacket(const char* buf, size_t len, CalCloudResultPack
     out.stage    = doc["cs"]  | (uint8_t)0;
     out.quality  = doc["cq"]  | (uint8_t)0;
     out.rms_pct  = doc["crp"] | 0.0f;
+    out.coverage_gaps = doc["ccg"] | (int16_t)-1;
 
     const char* rec = doc["crc"] | "";
     strncpy(out.recommendation, rec, sizeof(out.recommendation) - 1);

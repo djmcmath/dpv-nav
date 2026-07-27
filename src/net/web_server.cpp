@@ -1,5 +1,6 @@
 #include "web_server.h"
 #include "wifi_manager.h"
+#include "cal_sync.h"
 #include "../util/waypoints.h"
 #include <ArduinoJson.h>
 #include <WebServer.h>
@@ -63,6 +64,13 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
   .waypoints .btn-del { background: #e63946; color: #fff; }
   .waypoints .btn-del:hover { background: #ff4d5a; }
   #wpstatus { margin-top: .5rem; font-size: .9rem; color: #72efdd; }
+  .calsync { margin-top: 1rem; padding: 1rem; background: #16213e; border-radius: 8px; }
+  .calsync button { background: #4cc9f0; color: #1a1a2e; border: none; padding: .3rem .7rem;
+    border-radius: 4px; cursor: pointer; font-weight: bold; margin: 0 .4rem .4rem 0; font-size: .85rem; }
+  .calsync button:hover { background: #72efdd; }
+  .calsync .label { font-size: .85rem; color: #aaa; margin-top: .6rem; }
+  #calsyncstatus { font-size: .9rem; color: #aaa; margin: .5rem 0; }
+  #calsyncaction { font-size: .9rem; color: #72efdd; margin-top: .3rem; min-height: 1.2em; }
   .wifisec { margin-top: 1.5rem; padding: 1rem; background: #16213e; border-radius: 8px; }
   .wifisec .row { margin: .4rem 0; }
   .wifisec label { display: inline-block; width: 3.5rem; }
@@ -97,6 +105,24 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
     <button onclick="reloadCal()">Reload Cal Files</button>
   </div>
   <div id="calstatus"></div>
+</div>
+<div class="calsync">
+  <b>Calibration Cloud Sync</b>
+  <div id="calsyncstatus">Not checked yet.</div>
+  <div>
+    <button onclick="checkCalUpdates()">Check for updates</button>
+    <button onclick="backupCalNow()">Back up calibration now</button>
+  </div>
+  <div id="calsyncaction"></div>
+  <div class="label">Restore from most recent cloud backup:</div>
+  <div>
+    <button onclick="restoreCal('baseline')">Baseline</button>
+    <button onclick="restoreCal('mounted')">Mounted</button>
+    <button onclick="restoreCal('hdg')">Heading</button>
+    <button onclick="restoreCal('accel')">Accel</button>
+    <button onclick="restoreCal('gyro')">Gyro</button>
+    <button onclick="restoreCal('speed')">Speed</button>
+  </div>
 </div>
 <div class="waypoints">
   <b>Waypoints</b>
@@ -277,9 +303,40 @@ async function reloadCal() {
   const r = await fetch('/api/reload-cal', { method: 'POST' });
   s.textContent = r.ok ? 'Calibration reloaded' : 'Reload failed';
 }
+async function loadCalSyncStatus() {
+  const el = document.getElementById('calsyncstatus');
+  try {
+    const s = await fetch('/api/cal-sync/status').then(r => r.json());
+    if (!s.checked) { el.textContent = 'Not checked yet.'; return; }
+    if (!s.modes.length) { el.textContent = 'In sync as of last check.'; return; }
+    el.textContent = s.modes.map(m => m.mode + ': ' + (m.in_sync ? 'installed' : 'not installed')).join('  ·  ');
+  } catch (e) { el.textContent = 'Not checked yet.'; }
+}
+async function checkCalUpdates() {
+  const el = document.getElementById('calsyncaction');
+  el.textContent = 'Checking...';
+  const r = await fetch('/api/cal-sync/check', { method: 'POST' });
+  el.textContent = await r.text();
+  loadCalSyncStatus();
+}
+async function backupCalNow() {
+  const el = document.getElementById('calsyncaction');
+  el.textContent = 'Backing up...';
+  const r = await fetch('/api/cal-sync/backup', { method: 'POST' });
+  el.textContent = await r.text();
+}
+async function restoreCal(kind) {
+  if (!confirm('Restore ' + kind + ' calibration from the most recent cloud backup?')) return;
+  const el = document.getElementById('calsyncaction');
+  el.textContent = 'Restoring...';
+  const r = await fetch('/api/cal-sync/restore?type=' + encodeURIComponent(kind), { method: 'POST' });
+  el.textContent = await r.text();
+  loadCalSyncStatus();
+}
 load();
 loadWaypoints();
 loadWifi();
+loadCalSyncStatus();
 </script>
 </body>
 </html>
@@ -417,6 +474,34 @@ static void handleUploadComplete() {
 static void handleReloadCal() {
     sReloadCalRequested = true;
     server.send(200, "text/plain", "OK");
+}
+
+// --------------- calibration install sync / backup ---------------
+// Handlers here call straight into net/cal_sync.h, which itself makes the
+// outbound HTTPS call(s) to the cloud and blocks until done -- same
+// tradeoff cloud_client.h's own docs accept for CAL-menu-triggered uploads
+// (diver-initiated, not mid-dive). See
+// docs/architecture/calibration-install-sync-plan.md.
+
+static void handleCalSyncStatus() {
+    server.send(200, "application/json", cal_sync::statusJson());
+}
+
+static void handleCalSyncCheck() {
+    server.send(200, "text/plain", cal_sync::checkForUpdates());
+}
+
+static void handleCalSyncBackup() {
+    server.send(200, "text/plain", cal_sync::backUpNow());
+}
+
+static void handleCalSyncRestore() {
+    if (!server.hasArg("type")) {
+        server.send(400, "text/plain", "Missing 'type' parameter");
+        return;
+    }
+    String result = cal_sync::restoreBackup(server.arg("type").c_str());
+    server.send(200, "text/plain", result);
 }
 
 static void handleGetWaypoints() {
@@ -579,6 +664,10 @@ void init() {
     server.on("/api/delete",  HTTP_GET,  handleDelete);
     server.on("/api/upload",     HTTP_POST, handleUploadComplete, handleUpload);
     server.on("/api/reload-cal", HTTP_POST, handleReloadCal);
+    server.on("/api/cal-sync/status",  HTTP_GET,  handleCalSyncStatus);
+    server.on("/api/cal-sync/check",   HTTP_POST, handleCalSyncCheck);
+    server.on("/api/cal-sync/backup",  HTTP_POST, handleCalSyncBackup);
+    server.on("/api/cal-sync/restore", HTTP_POST, handleCalSyncRestore);
     server.on("/api/waypoints",     HTTP_GET,    handleGetWaypoints);
     server.on("/api/waypoints",     HTTP_POST,   handleAddWaypoint);
     server.on("/api/waypoints",     HTTP_DELETE, handleDeleteWaypoint);

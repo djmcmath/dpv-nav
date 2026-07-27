@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <vector>
 
 // Shared outbound HTTPS client for divemap.diverdaniel.com: device-auth
 // bootstrap (RFC 8628) + generic upload/fit helpers for magnetometer
@@ -96,5 +97,45 @@ CalibrationResult runCalibrationUpload(const char* mode, const char* csvPath,
 // run. Returns false on any network/auth failure; the caller keeps showing
 // the result screen and can retry.
 bool respondToCalibration(const String& calibrationId, bool accepted);
+
+// ---------------------------------------------------------------------------
+// Install sync + archival backup (divemap's calibration-install-sync-plan.md)
+// ---------------------------------------------------------------------------
+
+// One out-of-sync mode from GET /api/device/calibrations/status.
+struct CalStatusEntry {
+    String mode;             // "baseline" | "mounted" | "hdg"
+    String calibrationId;
+    String resultUploadId;   // fetch via downloadUpload() below
+};
+
+// Server-computed diff: which accepted baseline/mounted/hdg calibrations
+// this device hasn't confirmed installing yet. `outEntries` is left empty
+// (not an error) when everything is in sync. Returns false only on a
+// network/auth/parse failure.
+bool fetchCalibrationStatus(std::vector<CalStatusEntry>& outEntries, String& errorOut);
+
+// Downloads a device_uploads row's raw bytes to outputPath on LittleFS.
+// Works for any kind readable by this device -- calibration_result (install
+// sync) and the accel/gyro/speed backup kinds (restore) alike, since it's
+// the same GET /api/device/uploads/{id}/raw endpoint either way.
+bool downloadUpload(const String& uploadId, const char* outputPath, String& errorOut);
+
+// The single source of truth for "installed" -- call only after the fetched
+// result has actually been written to its active path and the device has
+// successfully reloaded it. A pure upsert server-side, so retrying after a
+// lost response is always safe.
+bool confirmInstalled(const String& calibrationId, String& errorOut);
+
+// Uploads filePath's current bytes as an archival backup under `kind`
+// ("accel_cal_backup" | "gyro_cal_backup" | "speed_cal_backup"). A 409
+// (identical bytes already backed up) counts as success -- same dedupe
+// tradeoff runCalibrationUpload's raw-CSV step already accepts.
+bool uploadBackup(const char* kind, const char* filePath, String& errorOut);
+
+// Downloads the most recent backup of `kind` to outputPath. False (with
+// errorOut set, e.g. "no backup found") if the network fails or nothing has
+// been backed up under this kind yet.
+bool fetchLatestBackup(const char* kind, const char* outputPath, String& errorOut);
 
 }  // namespace cloud

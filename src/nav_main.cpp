@@ -24,6 +24,8 @@
 #include "net/wifi_manager.h"
 #include "net/web_server.h"
 #include "net/cloud_client.h"
+#include "net/cal_sync.h"
+#include "nav_main.h"
 #include "util/serial_commands.h"
 #include "util/mag_cal_collect.h"
 #include "util/nvs_state.h"
@@ -257,6 +259,7 @@ void setup() {
     // Placed after calibration so blocking cal doesn't starve the connection.
     wifi::init();
     web::init();
+    cal_sync::init();
 
     // Restore state from NVS (previous session)
     {
@@ -661,6 +664,10 @@ void loop() {
         loadCalibration();
     }
 
+    // --- Calibration install-sync pending-confirm retry (non-blocking; only
+    // does anything once every few minutes, see cal_sync.cpp) ---------------
+    cal_sync::update();
+
     // --- Cloud account-link poll (non-blocking, see LINK_ACCOUNT above) ------
     cloud::updateAuthorizePoll();
     {
@@ -946,6 +953,11 @@ static void loadCalibration() {
         delay(2500);  //give the user a second to realize what's happened
         imu::calibrateGyroscope(gyroCal, 10000);
         storage::saveCalib3("/gyro_cal.json", gyroCal);
+        // Best-effort cloud archival (calibration-install-sync-plan.md) --
+        // in practice this boot-time site always no-ops, since it runs
+        // before wifi::init()/web::init() further down in setup(); left in
+        // for consistency and in case that ordering ever changes.
+        cal_sync::backupIfConnected("gyro_cal_backup", "/gyro_cal.json");
     }
 
     // Accelerometer
@@ -959,6 +971,8 @@ static void loadCalibration() {
         delay(2500);  //give the user a second to realize what's happened
         imu::calibrateAccelerometer(accelCal, 2500);
         storage::saveCalib3("/accel_cal.json", accelCal);
+        // See the gyro branch above -- same boot-ordering caveat applies.
+        cal_sync::backupIfConnected("accel_cal_backup", "/accel_cal.json");
     }
 
     // Fourier heading calibration (optional — silently skip if absent)
@@ -976,7 +990,8 @@ static void loadCalibration() {
 
 // Reload calibration JSON files without blocking fallbacks.
 // Safe to call at runtime (e.g., after uploading a new cal file via web UI).
-static void reloadCalibrationFiles() {
+// Not static -- net/cal_sync.cpp calls this too, via nav_main.h.
+void reloadCalibrationFiles() {
     gBootFlags &= ~(BOOT_MAG_CAL_OK | BOOT_GYRO_CAL_OK | BOOT_ACCEL_CAL_OK | BOOT_HDG_CAL_OK);
     gHdgCalValid = false;
 
@@ -1205,6 +1220,7 @@ static void handleDisplayCmd() {
                         sysState = SystemState::CALIBRATION;
                         imu::calibrateGyroscope(gyroCal, 10000);
                         storage::saveCalib3("/gyro_cal.json", gyroCal);
+                        cal_sync::backupIfConnected("gyro_cal_backup", "/gyro_cal.json");
                         sysState = SystemState::READY;
                         break;
                     case DisplayCmd::RESET:
@@ -1302,6 +1318,7 @@ static void handleDisplayCmd() {
                         speed_cal::History hist{};
                         speed_cal::addMeasurement(hist, gSpeedCalKProposed);
                         speed_cal::save(hist);
+                        cal_sync::backupIfConnected("speed_cal_backup", "/speed_cal.json");
                         // Apply new k-factor immediately
                         flow::setConfig({ gSpeedCalKProposed,
                                           FLOW_CROSS_SECTION_M2,
@@ -1317,6 +1334,7 @@ static void handleDisplayCmd() {
                         speed_cal::History hist = speed_cal::load();
                         speed_cal::addMeasurement(hist, gSpeedCalKProposed);
                         speed_cal::save(hist);
+                        cal_sync::backupIfConnected("speed_cal_backup", "/speed_cal.json");
                         float newK = speed_cal::averageK(hist, FLOW_K_FACTOR);
                         flow::setConfig({ newK,
                                           FLOW_CROSS_SECTION_M2,

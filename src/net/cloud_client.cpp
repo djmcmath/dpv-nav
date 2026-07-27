@@ -432,4 +432,228 @@ bool respondToCalibration(const String& calibrationId, bool accepted) {
     return code == 200;
 }
 
+// ---------------------------------------------------------------------------
+// Install sync + archival backup (divemap's calibration-install-sync-plan.md)
+// ---------------------------------------------------------------------------
+
+bool fetchCalibrationStatus(std::vector<CalStatusEntry>& outEntries, String& errorOut) {
+    outEntries.clear();
+
+    if (!rootCaConfigured()) {
+        errorOut = "cloud TLS root CA not configured";
+        return false;
+    }
+    String token = loadToken();
+    if (token.length() == 0) {
+        errorOut = "device not authorized -- run cloud setup first";
+        return false;
+    }
+
+    WiFiClientSecure client;
+    client.setCACert(CLOUD_ROOT_CA_PEM);
+    HTTPClient https;
+    https.setTimeout(CLOUD_HTTP_TIMEOUT_MS);
+    if (!https.begin(client, apiUrl("/api/device/calibrations/status"))) {
+        errorOut = "could not start connection";
+        return false;
+    }
+    https.addHeader("Authorization", "Bearer " + token);
+
+    int code = https.GET();
+    String body = https.getString();
+    https.end();
+
+    if (code != 200) {
+        errorOut = extractError(body, code);
+        return false;
+    }
+
+    JsonDocument doc;
+    if (deserializeJson(doc, body) != DeserializationError::Ok || !doc.is<JsonArray>()) {
+        errorOut = "malformed status response";
+        return false;
+    }
+    for (JsonObject entry : doc.as<JsonArray>()) {
+        CalStatusEntry e;
+        e.mode           = String((const char*)(entry["mode"] | ""));
+        e.calibrationId  = String((const char*)(entry["calibration_id"] | ""));
+        e.resultUploadId = String((const char*)(entry["result_upload_id"] | ""));
+        if (e.mode.length() > 0 && e.calibrationId.length() > 0 && e.resultUploadId.length() > 0) {
+            outEntries.push_back(e);
+        }
+    }
+    return true;
+}
+
+bool downloadUpload(const String& uploadId, const char* outputPath, String& errorOut) {
+    if (!rootCaConfigured()) {
+        errorOut = "cloud TLS root CA not configured";
+        return false;
+    }
+    String token = loadToken();
+    if (token.length() == 0) {
+        errorOut = "device not authorized -- run cloud setup first";
+        return false;
+    }
+
+    WiFiClientSecure client;
+    client.setCACert(CLOUD_ROOT_CA_PEM);
+    HTTPClient https;
+    https.setTimeout(CLOUD_HTTP_TIMEOUT_MS);
+    String path = "/api/device/uploads/" + uploadId + "/raw";
+    if (!https.begin(client, apiUrl(path.c_str()))) {
+        errorOut = "could not start connection";
+        return false;
+    }
+    https.addHeader("Authorization", "Bearer " + token);
+
+    int code = https.GET();
+    if (code != 200) {
+        errorOut = extractError(https.getString(), code);
+        https.end();
+        return false;
+    }
+
+    // Streamed straight to LittleFS, same reasoning as runCalibrationUpload's
+    // CSV upload: avoid a single contiguous heap buffer for what could be a
+    // sizeable file.
+    File out = LittleFS.open(outputPath, FILE_WRITE);
+    if (!out) {
+        https.end();
+        errorOut = "could not open " + String(outputPath) + " for write";
+        return false;
+    }
+    https.writeToStream(&out);
+    out.close();
+    https.end();
+    return true;
+}
+
+bool confirmInstalled(const String& calibrationId, String& errorOut) {
+    if (!rootCaConfigured()) {
+        errorOut = "cloud TLS root CA not configured";
+        return false;
+    }
+    String token = loadToken();
+    if (token.length() == 0) {
+        errorOut = "device not authorized -- run cloud setup first";
+        return false;
+    }
+
+    WiFiClientSecure client;
+    client.setCACert(CLOUD_ROOT_CA_PEM);
+    HTTPClient https;
+    https.setTimeout(CLOUD_HTTP_TIMEOUT_MS);
+    String path = "/api/device/calibrations/" + calibrationId + "/confirm-installed";
+    if (!https.begin(client, apiUrl(path.c_str()))) {
+        errorOut = "could not start connection";
+        return false;
+    }
+    https.addHeader("Authorization", "Bearer " + token);
+    https.addHeader("Content-Type", "application/json");
+
+    int code = https.POST("");
+    String body = https.getString();
+    https.end();
+
+    if (code != 200) {
+        errorOut = extractError(body, code);
+        return false;
+    }
+    return true;
+}
+
+bool uploadBackup(const char* kind, const char* filePath, String& errorOut) {
+    if (!rootCaConfigured()) {
+        errorOut = "cloud TLS root CA not configured";
+        return false;
+    }
+    String token = loadToken();
+    if (token.length() == 0) {
+        errorOut = "device not authorized -- run cloud setup first";
+        return false;
+    }
+
+    File f = LittleFS.open(filePath, FILE_READ);
+    if (!f) {
+        errorOut = "could not read " + String(filePath);
+        return false;
+    }
+    size_t len = f.size();
+
+    WiFiClientSecure client;
+    client.setCACert(CLOUD_ROOT_CA_PEM);
+    HTTPClient https;
+    https.setTimeout(CLOUD_HTTP_TIMEOUT_MS);
+    if (!https.begin(client, apiUrl("/api/device/uploads"))) {
+        f.close();
+        errorOut = "could not start connection";
+        return false;
+    }
+    https.addHeader("Authorization", "Bearer " + token);
+    https.addHeader("X-Upload-Kind", kind);
+    https.addHeader("X-Upload-Filename", basenameOf(filePath));
+    https.addHeader("Content-Type", "application/octet-stream");
+
+    int code = https.sendRequest("POST", &f, len);
+    f.close();
+    String body = https.getString();
+    https.end();
+
+    if (code != 201 && code != 409) {
+        errorOut = extractError(body, code);
+        return false;
+    }
+    return true;
+}
+
+bool fetchLatestBackup(const char* kind, const char* outputPath, String& errorOut) {
+    if (!rootCaConfigured()) {
+        errorOut = "cloud TLS root CA not configured";
+        return false;
+    }
+    String token = loadToken();
+    if (token.length() == 0) {
+        errorOut = "device not authorized -- run cloud setup first";
+        return false;
+    }
+
+    WiFiClientSecure client;
+    client.setCACert(CLOUD_ROOT_CA_PEM);
+    HTTPClient https;
+    https.setTimeout(CLOUD_HTTP_TIMEOUT_MS);
+    String path = "/api/device/uploads?kind=" + String(kind) + "&latest=true";
+    if (!https.begin(client, apiUrl(path.c_str()))) {
+        errorOut = "could not start connection";
+        return false;
+    }
+    https.addHeader("Authorization", "Bearer " + token);
+
+    int code = https.GET();
+    String body = https.getString();
+    https.end();
+
+    if (code != 200) {
+        errorOut = extractError(body, code);
+        return false;
+    }
+
+    JsonDocument doc;
+    if (deserializeJson(doc, body) != DeserializationError::Ok || !doc.is<JsonArray>()) {
+        errorOut = "malformed uploads response";
+        return false;
+    }
+    JsonArray arr = doc.as<JsonArray>();
+    if (arr.size() == 0) {
+        errorOut = "no backup found";
+        return false;
+    }
+    String uploadId = String((const char*)(arr[0]["id"] | ""));
+    if (uploadId.length() == 0) {
+        errorOut = "malformed uploads response (no id)";
+        return false;
+    }
+    return downloadUpload(uploadId, outputPath, errorOut);
+}
+
 }  // namespace cloud

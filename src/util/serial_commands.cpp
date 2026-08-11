@@ -28,6 +28,7 @@ void printHelp() {
   Serial.println("  sensor_orientation   - Show RAW sensor frames (no axis mapping)");
   Serial.println("  debug_axes           - End-to-end axis analysis (trace data)");
   Serial.println("  axis_test            - Test sensor axes to find correct orientation");
+  Serial.println("  accel_orient         - Which accel-cal orientation matches as you rotate?");
   Serial.println("  help                 - Show this message");
   Serial.println("=====================\n");
 }
@@ -314,6 +315,32 @@ static void cmdAxisTest() {
   Serial.println("=====================================\n");
 }
 
+static void cmdAccelOrientTest() {
+  Serial.println("\n=== ACCEL ORIENTATION CHECK ===");
+  Serial.println("Slowly rotate the device. A new line prints each time the detected");
+  Serial.println("accelerometer calibration orientation changes. Press Enter to stop.\n");
+
+  int lastIdx = -2;  // sentinel distinct from -1 (no match), forces first print
+  while (!Serial.available()) {
+    imu::Vec3i16 raw;
+    if (imu::readAccelRaw(raw) == imu::ImuStatus::Ok) {
+      int idx = imu::classifyAccelOrientation(raw);
+      if (idx != lastIdx) {
+        lastIdx = idx;
+        Serial.print("Detected: ");
+        if (idx >= 0) {
+          Serial.println(imu::kAccelOrientationNames[idx]);
+        } else {
+          Serial.println("(tilted / not aligned to any orientation)");
+        }
+      }
+    }
+    delay(200);
+  }
+  Serial.readStringUntil('\n');
+  Serial.println("\n=== Test stopped ===\n");
+}
+
 static void cmdMagStability() {
   Serial.println("[CMD] Starting magnetometer stability test (100 samples at rest)...");
   mag_stability_active = true;
@@ -343,6 +370,7 @@ void processInput(MahonyState& ahrs) {
   else if (cmd == "sensor_orientation") cmdSensorOrientation();
   else if (cmd == "debug_axes")        cmdDebugAxes(ahrs);
   else if (cmd == "axis_test")         cmdAxisTest();
+  else if (cmd == "accel_orient")      cmdAccelOrientTest();
   else if (cmd == "mag_stability")     cmdMagStability();
   else if (cmd == "accel_stability")   cmdAccelStability();
   else if (cmd == "help")              printHelp();

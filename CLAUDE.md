@@ -375,7 +375,7 @@ Modify `ImuConfig` or `AxisMap` in [nav_main.cpp](src/nav_main.cpp) before `imu:
 
 ### Modifying Calibration Parameters
 Calibration timing is configured at the call sites in [nav_main.cpp](src/nav_main.cpp):
-- **Boot mag cal (first-run fallback)**: `imu::calibrateMagnetometer(magCal, 90000)` — 90 sec blocking sweep (only runs if both mag_base.json and mag_cal.json are absent)
+- **Boot mag cal (brand-new device)**: if none of mag_base.json/mag_mount.json/mag_cal.json exist, mag runs with an identity (no-op) calibration and `BOOT_MAG_CAL_OK` stays unset — no automatic sweep. The diver runs CAL > Baseline (+ Mounted) from the menu when ready. (`imu::calibrateMagnetometer()` still exists but is no longer called at boot.)
 - **Gyro cal (boot)**: `imu::calibrateGyroscope(gyroCal, 10000)` — 10 sec at rest
 - **Accel cal (boot)**: `imu::calibrateAccelerometer(accelCal, 2500)` — 2.5 sec per orientation (15 sec total)
 - **Baseline/Mounted bin-aware cal**: sample collection runs until required bins are green (no fixed time)

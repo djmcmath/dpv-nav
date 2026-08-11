@@ -67,6 +67,21 @@ void calibrateMagnetometer(MagCalib& out, uint32_t duration_ms = 30000);
 void calibrateGyroscope(Calib3& out, uint32_t duration_ms = 10000);
 void calibrateAccelerometer(Calib3& out, uint32_t sample_duration_ms = 1500);
 
+// --- Accelerometer orientation classification ---
+// Human-readable labels for the 6 accelerometer calibration orientations, in
+// logical (post-axis-map) NED frame. Index matches classifyAccelOrientation().
+extern const char* const kAccelOrientationNames[6];
+
+// Classifies which of the 6 axis-up orientations the device is currently
+// held in, from raw logical-frame accel counts (readAccelRaw() output — NOT
+// g-converted, since this must work before any accel calibration exists).
+// Returns -1 if no single axis reads clearly dominant (device tilted between
+// orientations, upside-down at an angle, or moving).
+// Used both by calibrateAccelerometer() (to live-verify each step) and by
+// the `accel_orient` serial command (to let a diver check orientation
+// labels against the physical device before running a real calibration).
+int classifyAccelOrientation(const Vec3i16& accelRawLogical);
+
 // --- Non-blocking magnetometer calibration (hard-iron sweep, legacy) ---
 // Use these from a main loop so other work (NavPacket sends, display) keeps running.
 // Call magCalNBBegin() once, then magCalNBTick() each loop iteration.

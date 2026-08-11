@@ -1237,43 +1237,6 @@ void showHdgFourierCalPrompt(int step, int total, float targetDeg, float indicat
 }
 
 // ---------------------------------------------------------------------------
-// Fourier heading calibration: done screen
-// ---------------------------------------------------------------------------
-void showHdgFourierCalDone(int nPoints) {
-    if (!tftReady) return;
-    invalidateNavCache();
-    tft.fillScreen(COLOR_BLACK);
-
-    tft.setTextSize(2);
-    tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
-    tft.setCursor(0, 0);
-    tft.print("HDG CAL");
-
-    tft.drawFastHLine(0, 24, SCREEN_WIDTH, COLOR_CYAN);
-
-    char buf[40];
-    snprintf(buf, sizeof(buf), "%d points saved", nPoints);
-    tft.setTextColor(COLOR_GREEN, COLOR_BLACK);
-    tft.setCursor(0, 34);
-    tft.print(buf);
-
-    tft.setTextSize(1);
-    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
-    tft.setCursor(0, 70);
-    tft.print("Export /hdg_samples.csv");
-    tft.setCursor(0, 86);
-    tft.print("Run fourier_fit.py");
-    tft.setCursor(0, 102);
-    tft.print("Upload hdg_fourier.json");
-
-    tft.drawFastHLine(0, 118, SCREEN_WIDTH, COLOR_CYAN);
-
-    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
-    tft.setCursor(0, 128);
-    tft.print("Press BTN2 to exit");
-}
-
-// ---------------------------------------------------------------------------
 // Cloud calibration (docs/cloud-calibration-plan.md)
 // ---------------------------------------------------------------------------
 
@@ -1400,7 +1363,7 @@ void showCloudCalFailed(const char* message) {
 }
 
 void showCloudCalResult(uint8_t quality, float rmsPct, const char* recommendation,
-                         int16_t coverageGaps, uint8_t choice) {
+                         int16_t coverageGaps, uint8_t choice, uint8_t calType) {
     if (!tftReady) return;
     invalidateNavCache();
     tft.fillScreen(COLOR_BLACK);
@@ -1415,8 +1378,16 @@ void showCloudCalResult(uint8_t quality, float rmsPct, const char* recommendatio
     if (quality == 1)      { bandColor = COLOR_YELLOW; bandLabel = "MARGINAL"; }
     else if (quality == 2) { bandColor = COLOR_RED;    bandLabel = "BAD"; }
 
+    // hdg reuses this same numeric field for degrees of max Fourier-fit
+    // residual, not percent of radius (heading-cal-cloud-plan.md) -- only the
+    // label changes here, not the wire format.
+    const bool isHdg = (calType == (uint8_t)CalType::HDG);
     char buf[28];
-    snprintf(buf, sizeof(buf), "%s  %.0f%% RMS", bandLabel, (double)rmsPct);
+    if (isHdg) {
+        snprintf(buf, sizeof(buf), "%s  %.1f" "\xF8" " max err", bandLabel, (double)rmsPct);
+    } else {
+        snprintf(buf, sizeof(buf), "%s  %.0f%% RMS", bandLabel, (double)rmsPct);
+    }
     tft.setTextColor(bandColor, COLOR_BLACK);
     tft.setCursor(4, 30);
     tft.print(buf);

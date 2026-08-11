@@ -131,18 +131,17 @@ existing "DONE" screen and CSV save):
   to not stall either device's main loop for multiple seconds. Needs a non-blocking
   request pattern (state machine, like `wifi_manager`'s reconnect logic or speed cal's
   phase machine) rather than a blocking `HTTPClient` call in the loop.
-- **This plan covers magnetometer calibration only.** Fourier heading cal
-  (`tools/fourier_fit.py` → `hdg_fourier.json`) has an almost identical shape (CSV up,
-  fitted JSON down) and is a natural follow-on once the shared cloud client exists — not
-  in scope here. Unlike the mag ellipsoid fit, it needs an adequacy check beyond a single
-  RMS number: today's fixed 12-point collection can still leave one sector thin (real
-  case, 2026-07-24: only 4 of the 12 points fell in a 330°-060° span with a large swing,
-  giving a mediocre fit there until 315/345/015/045 were added by hand). The
-  divemap-side plan (`device-calibration-plan.md`, Risks & Open Decisions) sketches the
-  server reporting *which* headings are under-covered rather than just pass/fail; on the
-  firmware side that would eventually mean the point-and-click collection UI can be
-  driven by a server-supplied list of headings, not just the fixed 12 — not scoped yet,
-  since it depends on the Fourier fit existing server-side at all.
+- **This plan covered magnetometer calibration only; the Fourier heading cal has
+  since gotten its own cloud round trip** — see divemap's
+  [heading-cal-cloud-plan.md](../../divemap/docs/architecture/heading-cal-cloud-plan.md),
+  which reuses this plan's shared cloud client and the same
+  `gCloudCalPhase` wait/result UI. **Still not solved:** a real fit-adequacy check
+  beyond a single RMS number. Today's fixed 12-point collection can still leave
+  one sector thin (real case, 2026-07-24: only 4 of the 12 points fell in a
+  330°-060° span with a large swing, giving a mediocre fit there until
+  315/345/015/045 were added by hand) — that plan deliberately ports the
+  whole-CSV fit as-is and defers server-side sector reporting + a
+  point-and-click targeted-resample UI to future work.
 - **Dropping TLS (plain HTTP to divemap.diverdaniel.com) was considered and rejected
   for now — flagged as a possible future step, not a plan.** The payloads themselves
   (cal CSVs, eventually track logs) aren't sensitive, but the RFC 8628 bearer token

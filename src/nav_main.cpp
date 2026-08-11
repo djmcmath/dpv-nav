@@ -928,18 +928,27 @@ void loop() {
 
 static void loadCalibration() {
     // Magnetometer — try two-stage chain (mag_base.json + mag_mount.json),
-    // falling back to legacy mag_cal.json, then blocking sweep as last resort.
+    // falling back to legacy mag_cal.json. A brand-new device has none of these
+    // files, and there's no sane automatic mag cal to run at that point: the
+    // diver hasn't necessarily unboxed the device somewhere magnetically clean,
+    // and a blind 90 s sweep with no feedback produces a low-quality fit anyway.
+    // So we just leave mag uncalibrated (identity — no bias/soft-iron
+    // correction) and leave BOOT_MAG_CAL_OK unset; the boot-status screen flags
+    // it, and the diver runs CAL > Baseline (+ Mounted) from the menu when
+    // they're ready.
     bool hasBase = false, hasMount = false;
     if (storage::loadMagCalibrationChain(magCal, hasBase, hasMount)) {
         imu::setMagCalibration(magCal);
         gBootFlags |= BOOT_MAG_CAL_OK;
         Serial.printf("Mag cal loaded: base=%d mount=%d\n", hasBase, hasMount);
     } else {
-        //TODO: this legacy fallback is no longer ideal, since it blocks for 90 seconds and doesn't provide any progress feedback. Better to implement a non-blocking sweep with progress reporting, like the mag_bin_cal does.
-        //TODO: make this better.  Fall back to a baseline mediocre calibration, set "calibration quality" to "poor", let the user cal when they can.
-        Serial.println("No mag calibration found — running min/max sweep (90 s)");
-        imu::calibrateMagnetometer(magCal, 90000);
-        storage::saveMagCalibration(storage::MAG_LEGACY_FILE, magCal);
+        magCal.bias = {0, 0, 0};
+        magCal.softIron[0][0] = 1; magCal.softIron[0][1] = 0; magCal.softIron[0][2] = 0;
+        magCal.softIron[1][0] = 0; magCal.softIron[1][1] = 1; magCal.softIron[1][2] = 0;
+        magCal.softIron[2][0] = 0; magCal.softIron[2][1] = 0; magCal.softIron[2][2] = 1;
+        imu::setMagCalibration(magCal);
+        Serial.println("No mag calibration found — heading will be inaccurate until "
+                        "CAL > Baseline (+ Mounted) is run from the menu");
     }
 
     // Gyroscope
@@ -1403,6 +1412,7 @@ static void handleDisplayCmd() {
                     }
                     case DisplayCmd::FINALIZE_HDG_CAL: {
                         File f = LittleFS.open(hdg_cal::SAMPLES_FILE_PATH, FILE_WRITE);
+                        bool saved = false;
                         if (f) {
                             f.println("actual,indicated");
                             for (int i = 0; i < gHdgSampleCount; i++) {
@@ -1411,6 +1421,7 @@ static void handleDisplayCmd() {
                                          gHdgSamplesIndicated[i]);
                             }
                             f.close();
+                            saved = true;
                             Serial.printf("[HDG_CAL] Saved %d samples to %s\n",
                                           gHdgSampleCount, hdg_cal::SAMPLES_FILE_PATH);
                         } else {
@@ -1418,6 +1429,59 @@ static void handleDisplayCmd() {
                                           hdg_cal::SAMPLES_FILE_PATH);
                         }
                         gHdgSampleCount = 0;
+
+                        // Cloud calibration (docs/cloud-calibration-plan.md /
+                        // heading-cal-cloud-plan.md): same upload+stage+accept
+                        // flow already used for baseline/mounted (see the
+                        // gCalMode == 5 || 6 block above), just triggered from
+                        // the 12-point collector's own completion point instead
+                        // of the bin-grid collector's.
+                        if (saved) {
+                            CalCloudResultPacket rpkt{};
+                            rpkt.cal_type = (uint8_t)CalType::HDG;
+
+                            if (wifi::isStaConnected()) {
+                                Serial.println("[CLOUD_CAL] Uploading heading cal...");
+                                cloud::CalibrationResult cr = cloud::runCalibrationUpload(
+                                    "hdg", hdg_cal::SAMPLES_FILE_PATH, "/hdg_fourier_pending.json");
+                                if (cr.ok) {
+                                    Serial.printf("[CLOUD_CAL] %s (band=%s max_err_deg=%.1f) staged\n",
+                                                  cr.recommendation.c_str(), cr.qualityBand.c_str(),
+                                                  (double)cr.rmsPct);
+                                    rpkt.stage   = (uint8_t)CalCloudStage::DONE;
+                                    rpkt.quality = (cr.qualityBand == "good") ? (uint8_t)CalCloudQuality::GOOD
+                                                 : (cr.qualityBand == "warn") ? (uint8_t)CalCloudQuality::WARN
+                                                                              : (uint8_t)CalCloudQuality::BAD;
+                                    rpkt.rms_pct = cr.rmsPct;  // degrees, not percent -- see display side
+                                    rpkt.coverage_gaps = (int16_t)cr.coverageGaps;  // always -1 for hdg
+                                    strncpy(rpkt.recommendation, cr.recommendation.c_str(),
+                                            sizeof(rpkt.recommendation) - 1);
+                                    strncpy(rpkt.calibration_id, cr.calibrationId.c_str(),
+                                            sizeof(rpkt.calibration_id) - 1);
+
+                                    strncpy(gCloudCalId, cr.calibrationId.c_str(), sizeof(gCloudCalId) - 1);
+                                    gCloudCalId[sizeof(gCloudCalId) - 1] = '\0';
+                                    strncpy(gCloudCalPendingPath, "/hdg_fourier_pending.json",
+                                            sizeof(gCloudCalPendingPath) - 1);
+                                    gCloudCalPendingPath[sizeof(gCloudCalPendingPath) - 1] = '\0';
+                                    strncpy(gCloudCalActivePath, hdg_cal::FILE_PATH,
+                                            sizeof(gCloudCalActivePath) - 1);
+                                    gCloudCalActivePath[sizeof(gCloudCalActivePath) - 1] = '\0';
+                                } else {
+                                    Serial.printf("[CLOUD_CAL] failed: %s\n", cr.errorMessage.c_str());
+                                    rpkt.stage = (uint8_t)CalCloudStage::FAILED;
+                                    strncpy(rpkt.error, cr.errorMessage.c_str(), sizeof(rpkt.error) - 1);
+                                }
+                            } else {
+                                Serial.println("[CLOUD_CAL] No WiFi connection -- skipping upload. "
+                                                "Connect to WiFi to finish heading calibration.");
+                                rpkt.stage = (uint8_t)CalCloudStage::OFFLINE;
+                            }
+
+                            char cloudBuf[512];
+                            size_t cbn = calCloudResultPacketToBytes(rpkt, cloudBuf, sizeof(cloudBuf));
+                            if (cbn > 0) Serial1.write(cloudBuf, cbn);
+                        }
                         break;
                     }
                     case DisplayCmd::SELECT_WAYPOINT: {

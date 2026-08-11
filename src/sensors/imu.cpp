@@ -959,6 +959,38 @@ void calibrateGyroscope(Calib3& out, uint32_t duration_ms) {
 }
 
 // ----------- Accelerometer Calibration -----------
+
+// Labels match the 6 sample points calibrateAccelerometer() below takes,
+// indexed the same way: 0/1 = ±X, 2/3 = ±Y, 4/5 = ±Z. Attitude phrase first
+// (what it feels/looks like to hold), then which physical edge/side ends up
+// pointing up (the actionable instruction), then the NED tag for reference.
+const char* const kAccelOrientationNames[6] = {
+  "Nose pointing straight up — Front edge UP (NED +X up)",
+  "Nose pointing straight down — Front edge DOWN (NED -X up)",
+  "Resting on its left side — RIGHT side UP (NED +Y up)",
+  "Resting on its right side — LEFT side UP (NED -Y up)",
+  "Upside down, level — BOTTOM side UP (NED +Z up)",
+  "Straight and level, normal — TOP side UP (NED -Z up)"
+};
+
+int classifyAccelOrientation(const Vec3i16& accelRawLogical) {
+  // A resting accelerometer reads ~+1g (g_accel_lsb_per_g counts) along
+  // whichever physical axis currently points straight up, and ~-1g along
+  // that axis when it points straight down. Require the dominant axis to
+  // clearly exceed the others so a tilted/in-between orientation reports
+  // "no match" instead of a misleading guess.
+  float ax = (float)accelRawLogical.x;
+  float ay = (float)accelRawLogical.y;
+  float az = (float)accelRawLogical.z;
+  float aax = fabsf(ax), aay = fabsf(ay), aaz = fabsf(az);
+  float thresh = g_accel_lsb_per_g * 0.7f;
+
+  if (aax > thresh && aax > aay && aax > aaz) return ax > 0 ? 0 : 1;
+  if (aay > thresh && aay > aax && aay > aaz) return ay > 0 ? 2 : 3;
+  if (aaz > thresh && aaz > aax && aaz > aay) return az > 0 ? 4 : 5;
+  return -1;
+}
+
 // Calibrates accelerometer by sampling at 6 orientations (±X, ±Y, ±Z)
 void calibrateAccelerometer(Calib3& out, uint32_t sample_duration_ms) {
   if (!accel_inited) {
@@ -972,24 +1004,16 @@ void calibrateAccelerometer(Calib3& out, uint32_t sample_duration_ms) {
   Serial.println("[CAL] ACCELEROMETER CALIBRATION");
   Serial.println("[CAL] ========================================");
   Serial.println("[CAL] You will be asked to orient the device in 6 directions.");
-  Serial.println("[CAL] For each direction: place device, wait for sampling, then proceed.");
-  delay(3000);
+  Serial.println("[CAL] For each one: point the device that way, then press Enter to sample.");
+  Serial.println("[CAL] (Not sure which way is which? Run the 'accel_orient' serial");
+  Serial.println("[CAL]  command first to see how rotating the device changes the reading.)");
+  delay(2000);
 
   // Arrays to store average readings for each orientation
   // Calibration measures LOGICAL (NED frame) axes after axis mapping
   // NED frame: +X=forward/north, +Y=right/east, +Z=down
   // Place device with each NED axis pointing UP (against gravity)
-  struct {
-    Vec3f avg;
-    const char* name;
-  } measurements[6] = {
-    { {0, 0, 0}, "Forward edge UP (NED +X up)" },
-    { {0, 0, 0}, "Back edge UP (NED -X up)" },
-    { {0, 0, 0}, "RIGHT edge UP (NED +Y up)" },
-    { {0, 0, 0}, "LEFT edge UP (NED -Y up)" },
-    { {0, 0, 0}, "BOTTOM side UP (NED +Z up - upside down)" },
-    { {0, 0, 0}, "TOP side UP (NED -Z up - normal)" }
-  };
+  Vec3f measurements[6] = {};
 
   // Calibrate each axis
   for (int i = 0; i < 6; i++) {
@@ -997,9 +1021,10 @@ void calibrateAccelerometer(Calib3& out, uint32_t sample_duration_ms) {
     Serial.print("[CAL] Orientation ");
     Serial.print(i + 1);
     Serial.print(" of 6: ");
-    Serial.println(measurements[i].name);
-    Serial.print("[CAL] Place device with this axis UP, then press any key or wait 2 second...");
-    delay(2500);
+    Serial.println(kAccelOrientationNames[i]);
+    Serial.print("[CAL] Press Enter when ready...");
+    while (!Serial.available()) { delay(10); }
+    Serial.readStringUntil('\n');
     Serial.println(" Sampling!");
 
     // Sample for specified duration
@@ -1020,19 +1045,19 @@ void calibrateAccelerometer(Calib3& out, uint32_t sample_duration_ms) {
 
     // Store average
     if (sampleCount > 0) {
-      measurements[i].avg.x = (float)(sumX / (double)sampleCount);
-      measurements[i].avg.y = (float)(sumY / (double)sampleCount);
-      measurements[i].avg.z = (float)(sumZ / (double)sampleCount);
+      measurements[i].x = (float)(sumX / (double)sampleCount);
+      measurements[i].y = (float)(sumY / (double)sampleCount);
+      measurements[i].z = (float)(sumZ / (double)sampleCount);
     }
 
     Serial.print("[CAL] Samples: ");
     Serial.print(sampleCount);
     Serial.print(" | Raw avg: X=");
-    Serial.print(measurements[i].avg.x, 0);
+    Serial.print(measurements[i].x, 0);
     Serial.print(" Y=");
-    Serial.print(measurements[i].avg.y, 0);
+    Serial.print(measurements[i].y, 0);
     Serial.print(" Z=");
-    Serial.println(measurements[i].avg.z, 0);
+    Serial.println(measurements[i].z, 0);
   }
 
   // Calculate bias and scale from the 6 measurements
@@ -1042,20 +1067,20 @@ void calibrateAccelerometer(Calib3& out, uint32_t sample_duration_ms) {
   // Expected range is ±1g = ±g_accel_lsb_per_g counts
 
   // X axis
-  float xMax = max(measurements[0].avg.x, measurements[1].avg.x);
-  float xMin = min(measurements[0].avg.x, measurements[1].avg.x);
+  float xMax = max(measurements[0].x, measurements[1].x);
+  float xMin = min(measurements[0].x, measurements[1].x);
   out.bias.x = (xMax + xMin) / 2.0f;
   out.scale.x = g_accel_lsb_per_g / ((xMax - xMin) / 2.0f);  // Dimensionless
 
   // Y axis
-  float yMax = max(measurements[2].avg.y, measurements[3].avg.y);
-  float yMin = min(measurements[2].avg.y, measurements[3].avg.y);
+  float yMax = max(measurements[2].y, measurements[3].y);
+  float yMin = min(measurements[2].y, measurements[3].y);
   out.bias.y = (yMax + yMin) / 2.0f;
   out.scale.y = g_accel_lsb_per_g / ((yMax - yMin) / 2.0f);  // Dimensionless
 
   // Z axis
-  float zMax = max(measurements[4].avg.z, measurements[5].avg.z);
-  float zMin = min(measurements[4].avg.z, measurements[5].avg.z);
+  float zMax = max(measurements[4].z, measurements[5].z);
+  float zMin = min(measurements[4].z, measurements[5].z);
   out.bias.z = (zMax + zMin) / 2.0f;
   out.scale.z = g_accel_lsb_per_g / ((zMax - zMin) / 2.0f);  // Dimensionless
 

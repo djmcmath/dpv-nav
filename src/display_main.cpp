@@ -86,7 +86,10 @@ static constexpr float kHdgCalTargets[kHdgCalNPoints] = {
 enum class HdgFourierCalPhase : uint8_t {
     NONE,        // not in hdg cal
     COLLECTING,  // showing prompt for current step
-    DONE,        // showing done screen; BTN2 to exit
+    // No DONE phase: the 12th point's capture hands off straight to the
+    // shared gCloudCalPhase state machine (WAITING/OFFLINE/FAILED/RESULT),
+    // same as baseline/mounted's bin-grid completion -- see
+    // docs/architecture/heading-cal-cloud-plan.md.
 };
 
 static HdgFourierCalPhase gHdgFourierCalPhase = HdgFourierCalPhase::NONE;
@@ -129,6 +132,7 @@ static uint32_t          gCloudCalWaitStartMs    = 0;
 static constexpr uint32_t CLOUD_CAL_WAIT_TIMEOUT_MS = 40000;  // > nav's ~30s worst case
 static uint8_t           gCloudCalChoice         = 0;  // 0=ACCEPT, 1=REJECT
 static uint8_t           gCloudCalQuality        = 0;
+static uint8_t           gCloudCalType           = 0;  // CalType enum -- selects % vs deg label
 static float             gCloudCalRmsPct         = 0.0f;
 static int16_t           gCloudCalCoverageGaps   = -1;  // baseline only; -1 = n/a
 static char              gCloudCalRecommendation[96] = "";
@@ -569,7 +573,7 @@ void loop() {
                     case CloudCalUiPhase::RESULT:
                         display::showCloudCalResult(gCloudCalQuality, gCloudCalRmsPct,
                                                     gCloudCalRecommendation, gCloudCalCoverageGaps,
-                                                    gCloudCalChoice);
+                                                    gCloudCalChoice, gCloudCalType);
                         break;
                     default:
                         break;
@@ -644,10 +648,6 @@ void loop() {
                 display::showHdgFourierCalPrompt(gHdgFourierCalStep, kHdgCalNPoints,
                                                  kHdgCalTargets[gHdgFourierCalStep],
                                                  navValid ? lastNav.heading_raw_deg : 0.0f);
-                return;
-            }
-            if (gHdgFourierCalPhase == HdgFourierCalPhase::DONE) {
-                display::showHdgFourierCalDone(kHdgCalNPoints);
                 return;
             }
 
@@ -804,6 +804,7 @@ static void processNavLine() {
             } else {
                 gCloudCalPhase   = CloudCalUiPhase::RESULT;
                 gCloudCalQuality = pkt.quality;
+                gCloudCalType    = pkt.cal_type;
                 gCloudCalRmsPct  = pkt.rms_pct;
                 gCloudCalCoverageGaps = pkt.coverage_gaps;
                 gCloudCalChoice  = 0;
@@ -1023,20 +1024,16 @@ static void handleButtons() {
             gHdgFourierCalStep++;
             if (gHdgFourierCalStep >= kHdgCalNPoints) {
                 sendCmd(DisplayCmd::FINALIZE_HDG_CAL);
-                gHdgFourierCalPhase = HdgFourierCalPhase::DONE;
+                gHdgFourierCalPhase = HdgFourierCalPhase::NONE;
+                // Nav is about to CSV-dump + (if online) blocking-upload the
+                // heading samples -- hand off to the same wait/result UI
+                // baseline/mounted's bin-grid completion already uses, rather
+                // than a separate local "done" screen. See
+                // docs/architecture/heading-cal-cloud-plan.md.
+                gCloudCalPhase       = CloudCalUiPhase::WAITING;
+                gCloudCalWaitStartMs = millis();
                 display::clear();
             }
-        }
-        return;
-    }
-
-    if (gHdgFourierCalPhase == HdgFourierCalPhase::DONE) {
-        // BTN2 short press: dismiss done screen and return to normal nav
-        if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
-            btn2.fired = true;
-            gHdgFourierCalPhase = HdgFourierCalPhase::NONE;
-            display::clear();
-            Serial.println("[HDG_CAL] Done screen dismissed");
         }
         return;
     }

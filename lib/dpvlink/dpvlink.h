@@ -100,6 +100,9 @@ struct DebugPacket {
 enum class CalType : uint8_t {
     BASELINE = 0,  // full sphere, unit off-scooter
     MOUNTED  = 1,  // limited range, unit on scooter
+    HDG      = 2,  // 12-point Fourier heading-correction fit -- only used for
+                    // CalCloudResultPacket.cal_type (never CalProgressPacket;
+                    // HDG has no bin grid).
 };
 
 // Named phases. Baseline cal stays in ROUGH_SCAN for its whole session — no

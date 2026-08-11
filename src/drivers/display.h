@@ -100,13 +100,10 @@ void showSpeedCalResult(uint16_t dist_ft, uint16_t elapsed_s,
 //   indicatedDeg — live AHRS heading from NavPacket (pre-correction)
 void showHdgFourierCalPrompt(int step, int total, float targetDeg, float indicatedDeg);
 
-// Done screen: shown after all points collected and CSV saved.
-//   nPoints — number of samples collected
-void showHdgFourierCalDone(int nPoints);
-
 // Cloud calibration screens (docs/cloud-calibration-plan.md). Shown after a
-// bin-coverage cal (Baseline/Mounted) completes and the nav device uploads
-// the CSV for fitting.
+// bin-coverage cal (Baseline/Mounted), or the 12-point Fourier heading cal
+// (heading-cal-cloud-plan.md), completes and the nav device uploads the CSV
+// for fitting.
 //
 // Waiting: shown immediately, before the (blocking, on the nav device)
 // upload+fit round trip has a result. secondsWaiting is cosmetic only.
@@ -120,12 +117,17 @@ void showCloudCalFailed(const char* message);
 
 // Fit succeeded — accept/reject the result.
 //   quality:      0=good, 1=warn, 2=bad (CalCloudQuality)
+//   rmsPct:       baseline/mounted: % of fitted radius. hdg: degrees of max
+//                 Fourier-fit residual, reusing the same wire field rather than
+//                 growing a parallel one -- see heading-cal-cloud-plan.md. The
+//                 unit shown is chosen from calType, not from the value itself.
 //   coverageGaps: baseline only, empty coverage-grid cells; -1 = not applicable
-//                 (mounted fit, or a pre-9-axis-firmware baseline CSV) and shows
-//                 nothing extra. See baseline-cal-coverage-feedback-plan.md.
+//                 (mounted/hdg fit, or a pre-9-axis-firmware baseline CSV) and
+//                 shows nothing extra. See baseline-cal-coverage-feedback-plan.md.
 //   choice:       0=ACCEPT, 1=REJECT (highlighted item)
+//   calType:      CalType enum (BASELINE/MOUNTED/HDG) -- selects the "%"/"deg" label.
 void showCloudCalResult(uint8_t quality, float rmsPct, const char* recommendation,
-                         int16_t coverageGaps, uint8_t choice);
+                         int16_t coverageGaps, uint8_t choice, uint8_t calType);
 
 // Cloud account-link screens (device-code account link). Shown after the
 // diver selects "Link acct" from the Config menu. No URL is ever shown --

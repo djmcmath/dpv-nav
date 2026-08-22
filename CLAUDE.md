@@ -185,6 +185,12 @@ The system supports automatic calibration with persistence to LittleFS (flash st
 
 To force recalibration, delete the corresponding JSON file from LittleFS. See [docs/calibration-guide.md](docs/calibration-guide.md) and [docs/mag-calibration-workflow.md](docs/mag-calibration-workflow.md).
 
+**Planned:** the magnetometer offline-fit step (export CSV → run `mag_calibration.py` on
+a laptop → upload result) is planned to move to a WiFi round-trip with Dive Map,
+reusing the device-auth/upload mechanism already built for dive-log sync. See
+[docs/cloud-calibration-plan.md](docs/cloud-calibration-plan.md). Nothing here has
+shipped yet — this section still describes the current, working behavior.
+
 ### NVS State Persistence
 
 Runtime toggle states and estimated position are persisted to ESP32 NVS (Non-Volatile Storage) using the Arduino `Preferences` library. This is separate from LittleFS calibration data.
@@ -370,7 +376,7 @@ Modify `ImuConfig` or `AxisMap` in [nav_main.cpp](src/nav_main.cpp) before `imu:
 
 ### Modifying Calibration Parameters
 Calibration timing is configured at the call sites in [nav_main.cpp](src/nav_main.cpp):
-- **Boot mag cal (first-run fallback)**: `imu::calibrateMagnetometer(magCal, 90000)` — 90 sec blocking sweep (only runs if both mag_base.json and mag_cal.json are absent)
+- **Boot mag cal (brand-new device)**: if none of mag_base.json/mag_mount.json/mag_cal.json exist, mag runs with an identity (no-op) calibration and `BOOT_MAG_CAL_OK` stays unset — no automatic sweep. The diver runs CAL > Baseline (+ Mounted) from the menu when ready. (`imu::calibrateMagnetometer()` still exists but is no longer called at boot.)
 - **Gyro cal (boot)**: `imu::calibrateGyroscope(gyroCal, 10000)` — 10 sec at rest
 - **Accel cal (boot)**: `imu::calibrateAccelerometer(accelCal, 2500)` — 2.5 sec per orientation (15 sec total)
 - **Baseline/Mounted bin-aware cal**: sample collection runs until required bins are green (no fixed time)

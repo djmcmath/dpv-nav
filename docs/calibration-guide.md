@@ -1,8 +1,14 @@
 # Sensor Calibration Guide
 
+> **Planned:** magnetometer calibration (Baseline/Mounted) is planned to move to an
+> over-WiFi round-trip with Dive Map instead of the manual laptop-script step described
+> below — see [cloud-calibration-plan.md](./cloud-calibration-plan.md). Nothing below has
+> changed yet; the manual workflow remains the current, working procedure and will stay
+> the fallback path once the cloud flow ships.
+
 ## Overview
 
-DPV-Nav calibrates four sensors/subsystems: magnetometer, gyroscope, accelerometer, and heading. Calibration data is persisted to LittleFS as JSON files on the nav device. On boot, saved calibration loads in under a second; if files are missing, blocking calibration runs automatically (except for heading, which is optional).
+DPV-Nav calibrates four sensors/subsystems: magnetometer, gyroscope, accelerometer, and heading. Calibration data is persisted to LittleFS as JSON files on the nav device. On boot, saved calibration loads in under a second. If gyro/accel files are missing, blocking calibration runs automatically. Mag is the exception: on a brand-new device (no mag_base.json/mag_mount.json/mag_cal.json at all) there's no sane automatic mag cal to run, so mag stays uncalibrated (identity — no correction) until the diver runs CAL > Baseline (+ Mounted) from the menu. Heading cal is always optional and silently skipped if absent.
 
 ## Calibration Files
 
@@ -51,7 +57,7 @@ DPV-Nav calibrates four sensors/subsystems: magnetometer, gyroscope, acceleromet
 ```
 For mag: try two-stage chain (mag_base.json + mag_mount.json)
           → fall back to legacy mag_cal.json
-          → fall back to blocking 90s min/max sweep (last resort)
+          → fall back to identity (no correction); diver runs CAL > Baseline (+ Mounted) later
 For gyro: load gyro_cal.json or run 10s stationary bias cal
 For accel: load accel_cal.json or run 6-point orientation cal
 For hdg: load hdg_fourier.json — silently skip if absent (optional)
@@ -71,6 +77,15 @@ The preferred calibration workflow uses two stages, each producing a JSON file t
 Both calibrations collect raw samples using a **bin-aware** approach: the screen shows a heading × elevation grid, and bins fill green as adequate samples are collected. When all required bins are green, the calibration is complete and the sample CSV is saved to LittleFS for offline processing.
 
 ### Running Baseline Calibration
+
+> **Superseded (2026-07-25):** the live bin-coverage grid described in steps 3-5 below
+> (including its two-pass revision from 2026-07-24, see
+> [baseline-cal-two-pass.md](./baseline-cal-two-pass.md)) failed on hardware and is
+> being retired for Baseline. The replacement collects with simple axis-range bars and
+> no live grid, then grades the result for real on the server and shows coverage gaps
+> on the Dive Map website instead of on the unit's screen — see
+> [divemap's baseline-cal-coverage-feedback-plan.md](../../divemap/docs/architecture/baseline-cal-coverage-feedback-plan.md).
+> Not yet implemented; this doc will get a fuller rewrite once it is.
 
 1. **Remove device from DPV** and take it somewhere with low magnetic interference.
 2. Open menu (BTN1) → **CAL > Baseline**.
@@ -101,6 +116,12 @@ Both calibrations collect raw samples using a **bin-aware** approach: the screen
 
 Delete the corresponding JSON file(s) from LittleFS and reboot, or run the menu cal workflow to generate new sample CSVs.
 
+**Planned cloud workflow:** see [cloud-calibration-plan.md](./cloud-calibration-plan.md) —
+the offline steps above (export CSV, run `mag_calibration.py` locally, upload the
+result) are planned to become "unit uploads the CSV over WiFi, gets a fitted result and
+a quality verdict back, accept or reject on the spot." The on-device steps (positioning,
+menu navigation, bin-coverage collection) are unchanged either way.
+
 ## Gyroscope Calibration
 
 **Method:** Stationary bias sampling (runs at boot if no file found)
@@ -123,14 +144,41 @@ To force recalibration: delete `/gyro_cal.json` from LittleFS and reboot.
 
 **Method:** 6-point orientation sequence (runs at boot if no file found)
 
+**Not sure which physical side is "forward," "right," etc.?** Before calibrating,
+run the `accel_orient` serial command (see [Serial Diagnostic Commands](#serial-diagnostic-commands)
+below). It prints which of the 6 orientation labels currently matches, updating
+a line at a time as you rotate the device in your hand, so you can learn the
+mapping without guessing.
+
 **Procedure:**
-1. System prompts for 6 orientations: X+, X-, Y+, Y-, Z+, Z- facing down
-2. Hold device steady in each orientation for 2.5 seconds while it samples
-3. System computes: `bias = (max + min) / 2`, `scale = 9.81 / (max - bias)` per axis
+1. System prompts for 6 orientations in turn, each phrased as attitude-first
+   plain language plus which edge/side ends up on top:
+   - Nose pointing straight up — Front edge UP
+   - Nose pointing straight down — Front edge DOWN
+   - Resting on its left side — RIGHT side UP
+   - Resting on its right side — LEFT side UP
+   - Upside down, level — BOTTOM side UP
+   - Straight and level, normal — TOP side UP
+2. For each one, point the device that way and press Enter to sample.
+3. Hold the device steady while it samples (2.5 s by default).
+4. System computes: `bias = (max + min) / 2`, `scale = 9.81 / (max - bias)` per axis
 
 **Typical values:**
 - Bias: ±50 raw counts (±0.004 m/s²)
 - Scale: 0.98 – 1.02 per axis
+
+## Serial Diagnostic Commands
+
+A few serial commands help confirm sensor orientation before or instead of
+running a full calibration (connect via `pio device monitor`, type the
+command, press Enter):
+
+| Command | Purpose |
+|---------|---------|
+| `accel_orient` | Prints a new line each time the detected accelerometer calibration orientation changes as you rotate the device. Use this to learn the physical mapping before running accelerometer calibration. |
+| `sensor_orientation` | One-shot: dumps raw native-frame accel/gyro/mag counts for a device held level, with axis-mapping guidance. |
+| `axis_test` | Prompts you to point the device North/East/South/West and compares magnetometer readings, to sanity-check heading axis mapping. |
+| `debug_axes` | One-shot snapshot tracing a sample through axis mapping, unit conversion, calibration, and the AHRS filter — useful when diagnosing heading errors. |
 
 ## Fourier Heading Calibration
 

@@ -28,8 +28,8 @@ enum class Action : uint8_t {
     CAL_BASELINE  = 5,   // bin-aware baseline (off-scooter) cal
     CAL_MOUNTED   = 6,   // bin-aware mounted (on-scooter) cal
     CAL_SPEED     = 7,
-    INPUT_GPS_POS = 8,
-    INPUT_GPS_SPD = 9,
+    INPUT_GPS     = 8,   // toggle GPS usage (position + speed together)
+    // 9 retired (was INPUT_GPS_SPD — split GPS pos/speed menu items merged into one)
     INPUT_WIFI    = 10,
     INPUT_LOG_CYCLE = 11,
     // Local display-device settings
@@ -42,6 +42,7 @@ enum class Action : uint8_t {
     CAL_HDG              = 18,  // 4-point heading calibration
     NAV_SELECT_WAYPOINT  = 19,  // open waypoint selection UI (navigate TO a waypoint)
     NAV_ARRIVE_WAYPOINT  = 20,  // open waypoint arrival UI (snap position TO a waypoint)
+    CLOUD_LINK           = 21,  // begin device-auth cloud account link (RFC 8628)
 };
 
 // ---------------------------------------------------------------------------
@@ -141,5 +142,11 @@ void clearWaypointSelectPending();
 // Cleared by clearWaypointArrivePending().
 bool isPendingWaypointArrive();
 void clearWaypointArrivePending();
+
+// Returns true if the user just selected "Link acct" — display should send
+// DisplayCmd::LINK_ACCOUNT and enter the cloud account-link UI.
+// Cleared by clearCloudLinkPending().
+bool isPendingCloudLink();
+void clearCloudLinkPending();
 
 }  // namespace menu

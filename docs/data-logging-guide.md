@@ -100,6 +100,24 @@ plt.ylabel('Heading (degrees)')
 plt.show()
 ```
 
+## Future Optimization: Skip Logging While Stationary
+
+Not implemented — flagged during 2026-07-23 flash/partition planning as a possible
+future step, not a current plan.
+
+Worst-case sizing for the LittleFS partition (see `partitions_nav.csv`) currently
+assumes a continuous ~2hr dive at 1 log row/sec (~500KB, per field data at 1 Hz
+logging — `LOG_LOW_INTERVAL_MS`/`LOG_HIGH_INTERVAL_MS` in `config.h`). In practice a
+meaningful chunk of that window is the diver stationary — kitting up on the beach
+before the dive starts, or holding position looking at a wreck — where DR position
+isn't advancing and a log row adds little value. Gating logging on the same
+flow-threshold signal already used elsewhere (`DR_MIN_FLOW_SPEED_MS` in `config.h`,
+or the `SPEED_CAL_START_THRESHOLD_HZ`/`SPEED_CAL_STOP_THRESHOLD_MS` pair used by speed
+cal's run detection) would shrink the realistic worst-case log size, giving more
+partition margin without changing the LittleFS allocation. Would need a decision on
+whether HIGH-level (diagnostic) logging should still log at rest, since that mode is
+sometimes used specifically to debug stationary sensor behavior.
+
 ## Troubleshooting
 
 | Problem | Fix |

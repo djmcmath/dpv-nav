@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 //Compile-time and runtime config defaults
 
 // WiFi configuration
@@ -120,6 +122,27 @@ constexpr int MAG_CAL_SECTORS_EXTREME =  3;  //  25% — ±60° rows (baseline o
 // ellipsoid fit without requiring sustained upside-down maneuvers.
 
 // ---------------------------------------------------------------------------
+// Baseline cal (2026-07-25) — no live grid; see
+// divemap/docs/architecture/baseline-cal-coverage-feedback-plan.md and the
+// SPIKE comment block in imu.cpp for the three earlier on-device attempts
+// (raw-vector Fibonacci lattice binning, fixed-body-axis elevation/azimuth
+// binning, two-pass ROUGH_SCAN->COLLECT handoff) that led here.
+// ---------------------------------------------------------------------------
+
+// ROUGH_SCAN (baseline's only phase, ungraded raw collection) must gather at
+// least this many samples before magBinCalFinishBaseline() will act on a
+// "done" request — a floor against an accidental/premature finish, not a real
+// quality bar (the real bar is calibration-processor's server-side grading).
+// Mirrors calibration-processor's MIN_BASELINE_SAMPLES (fit.py) loosely.
+constexpr int MAG_CAL_ROUGH_SCAN_MIN_SAMPLES = 40;
+
+// Expected raw-count spread per axis for a full-sphere sweep, used only to
+// turn ROUGH_SCAN's running min/max into a 0-100% coverage bar per axis.
+// Same constant and same purpose as the legacy single-stage NB_EXPECTED_RANGE
+// in imu.cpp — not re-deriving a new number, reusing the known-good one.
+constexpr float MAG_CAL_ROUGH_SCAN_EXPECTED_RANGE = 6800.0f;
+
+// ---------------------------------------------------------------------------
 // GPS signal quality scoring
 // ---------------------------------------------------------------------------
 // computeSignalBars() produces a 0–4 bar count from a GpsFix.
@@ -217,3 +240,19 @@ constexpr float SPEED_CAL_MIN_RUN_S           = 30.0f;
 // EMA alpha for heading tracking during the speed cal run.
 // Low alpha = slow-moving reference that represents the "stable" course.
 constexpr float SPEED_CAL_HDG_EMA_ALPHA       = 0.02f;
+
+// ---------------------------------------------------------------------------
+// Cloud calibration (docs/cloud-calibration-plan.md)
+// ---------------------------------------------------------------------------
+
+// divemap backend host. No scheme -- cloud_client builds the full HTTPS URL.
+constexpr const char* CLOUD_API_HOST     = "divemap.diverdaniel.com";
+constexpr uint16_t    CLOUD_API_PORT     = 443;
+constexpr uint32_t    CLOUD_HTTP_TIMEOUT_MS = 15000;  // per-request timeout
+
+// Device-auth polling (RFC 8628), per docs/architecture/device-uploads-plan.md.
+constexpr uint32_t CLOUD_AUTH_POLL_INTERVAL_MS = 5000;
+// Must stay <= the backend's DEVICE_CODE_TTL_MINUTES (backend/src/handlers/device.rs) --
+// otherwise the device keeps polling a user_code the server already considers
+// expired_token, well past the point where the diver was told linking succeeded.
+constexpr uint32_t CLOUD_AUTH_POLL_TIMEOUT_MS  = 5 * 60 * 1000;  // 5 min, matches server-side code TTL

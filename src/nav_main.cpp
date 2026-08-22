@@ -23,6 +23,9 @@
 #include "nav/nav_model.h"
 #include "net/wifi_manager.h"
 #include "net/web_server.h"
+#include "net/cloud_client.h"
+#include "net/cal_sync.h"
+#include "nav_main.h"
 #include "util/serial_commands.h"
 #include "util/mag_cal_collect.h"
 #include "util/nvs_state.h"
@@ -31,6 +34,14 @@
 #include "util/waypoints.h"
 #include "util/motor_cal.h"
 #include <dpvlink.h>
+
+// Default loopTask stack (~8 KB) isn't enough once cloud::updateAuthorizePoll()
+// is in the call chain: WiFiClientSecure's TLS handshake is stack-hungry, and
+// unlike beginAuthorize() (called from a shallow command-handler stack frame),
+// updateAuthorizePoll() runs from deep inside loop() itself, on top of all its
+// other locals -- that combination tripped the stack canary and rebooted the
+// board mid-poll (see docs/architecture/device-uploads-plan.md).
+SET_LOOP_TASK_STACK_SIZE(16 * 1024);
 
 // ---- AHRS state -----------------------------------------------------------
 static MahonyState ahrs;
@@ -91,6 +102,13 @@ static uint32_t gLastCalProgressMs = 0;
 // CSV output file path for active bin cal (set when cal starts)
 static const char* gBinCalCsvPath = nullptr;
 
+// Cloud calibration (docs/cloud-calibration-plan.md): the most recent
+// upload's result, pending the diver's accept/reject via the display device.
+// Cleared once a response is sent. gCloudCalId empty means "nothing pending".
+static char gCloudCalId[40]          = "";
+static char gCloudCalPendingPath[40] = "";
+static char gCloudCalActivePath[24]  = "";
+
 // ---- Speed calibration state ------------------------------------------------
 static uint16_t gSpeedCalDist_ft     = 300;    // target distance selected by user
 static uint32_t gSpeedCalStartMs     = 0;      // millis() when run started
@@ -107,9 +125,8 @@ static uint16_t gSpeedCalElapsedS    = 0;
 static uint8_t gBootFlags = 0;
 
 // ---- Toggle states (shared between command handler and sendNavPacket) ------
-static bool gGpsPosEnabled = DEFAULT_USE_GPS_POSITION;
-static bool gGpsSpdEnabled = true;   // GPS speed source enabled (stub — always true for now)
-static bool gWifiEnabled   = true;   // WiFi radio enabled (surface mode default)
+static bool gGpsEnabled  = DEFAULT_USE_GPS_POSITION;  // GPS usage (position + speed)
+static bool gWifiEnabled = true;   // WiFi radio enabled (surface mode default)
 static bool gDiveMode      = false;  // Dive mode active (persisted to NVS)
 
 // ---- Serial link buffer ----------------------------------------------------
@@ -121,8 +138,7 @@ static char wpBuf[3200];  // waypoint list packet — up to 50 waypoints in JSON
 static nvs_nav::State currentNavNvsState() {
     nav::Position pos = nav::getPosition();
     nvs_nav::State s;
-    s.gps_pos   = gGpsPosEnabled;
-    s.gps_spd   = gGpsSpdEnabled;
+    s.gps       = gGpsEnabled;
     s.wifi      = gWifiEnabled;
     s.dive_mode = gDiveMode;
     s.log_level = static_cast<uint8_t>(logging::getLevel());
@@ -243,14 +259,14 @@ void setup() {
     // Placed after calibration so blocking cal doesn't starve the connection.
     wifi::init();
     web::init();
+    cal_sync::init();
 
     // Restore state from NVS (previous session)
     {
         nvs_nav::State nvsState = nvs_nav::load();
-        gGpsPosEnabled = nvsState.gps_pos;
-        gGpsSpdEnabled = nvsState.gps_spd;
-        gDiveMode      = nvsState.dive_mode;
-        nav::setUseGps(gGpsPosEnabled);
+        gGpsEnabled = nvsState.gps;
+        gDiveMode   = nvsState.dive_mode;
+        nav::setUseGps(gGpsEnabled);
         nav::setPosition(nvsState.pos_x, nvsState.pos_y);
         if (nvsState.log_level > 0) {
             logging::setLevel(static_cast<logging::LogLevel>(nvsState.log_level));
@@ -263,8 +279,8 @@ void setup() {
             gWifiEnabled = nvsState.wifi;
             if (!gWifiEnabled) wifi::stop();
         }
-        Serial.printf("[NVS] Restored: gps_pos=%d gps_spd=%d wifi=%d dive=%d log=%d pos=(%.1f,%.1f)\n",
-                      gGpsPosEnabled, gGpsSpdEnabled, gWifiEnabled, gDiveMode,
+        Serial.printf("[NVS] Restored: gps=%d wifi=%d dive=%d log=%d pos=(%.1f,%.1f)\n",
+                      gGpsEnabled, gWifiEnabled, gDiveMode,
                       nvsState.log_level, nvsState.pos_x, nvsState.pos_y);
     }
 
@@ -648,12 +664,40 @@ void loop() {
         loadCalibration();
     }
 
+    // --- Calibration install-sync pending-confirm retry (non-blocking; only
+    // does anything once every few minutes, see cal_sync.cpp) ---------------
+    cal_sync::update();
+
+    // --- Cloud account-link poll (non-blocking, see LINK_ACCOUNT above) ------
+    cloud::updateAuthorizePoll();
+    {
+        cloud::AuthPollStatus linkSt = cloud::getAuthorizePollStatus();
+        if (linkSt != cloud::AuthPollStatus::IDLE && linkSt != cloud::AuthPollStatus::POLLING) {
+            CloudLinkResultPacket lpkt{};
+            if (linkSt == cloud::AuthPollStatus::APPROVED) {
+                Serial.println("[CLOUD_LINK] Approved -- token saved");
+                lpkt.stage = (uint8_t)CloudLinkStage::DONE;
+            } else {
+                String err = (linkSt == cloud::AuthPollStatus::DENIED)    ? "access_denied"
+                             : (linkSt == cloud::AuthPollStatus::EXPIRED) ? "expired_token"
+                                                                           : cloud::lastAuthorizeError();
+                Serial.printf("[CLOUD_LINK] failed: %s\n", err.c_str());
+                lpkt.stage = (uint8_t)CloudLinkStage::FAILED;
+                strncpy(lpkt.error, err.c_str(), sizeof(lpkt.error) - 1);
+            }
+            char cloudLinkBuf[256];
+            size_t clbn = cloudLinkResultPacketToBytes(lpkt, cloudLinkBuf, sizeof(cloudLinkBuf));
+            if (clbn > 0) Serial1.write(cloudLinkBuf, clbn);
+            cloud::cancelAuthorizePoll();  // consume the terminal result -> back to IDLE
+        }
+    }
+
     // --- Calibration tick and completion detection ---------------------------
     if (gInCal) {
         if (gCalMode == 5 || gCalMode == 6) {
             // Bin-aware mag cal (baseline=5, mounted=6)
             // Feed current raw mag sample into the bin collector
-            imu::magBinCalTick(pitchDeg, headingDeg, magRaw_logical);
+            imu::magBinCalTick(pitchDeg, headingDeg, magRaw_logical, accel, gyro);
 
             // Emit CalProgressPacket at 2 Hz
             if (nowMs - gLastCalProgressMs >= CAL_PROGRESS_INTERVAL_MS) {
@@ -671,25 +715,89 @@ void loop() {
                 // don't wait for the 2 Hz timer, or the display may never see it.
                 {
                     CalProgressPacket cpkt{};
-                    imu::magBinCalGetProgress(cpkt);  // complete=true, all bins green
+                    imu::magBinCalGetProgress(cpkt);  // complete=true (mounted: all bins green; baseline: diver-declared)
                     char calBuf[512];
                     size_t cn = calProgressPacketToBytes(cpkt, calBuf, sizeof(calBuf));
                     if (cn > 0) Serial1.write(calBuf, cn);
                     Serial.println("[BIN_CAL] Sent completion packet");
                 }
 
-                Serial.println("[BIN_CAL] All bins green — dumping CSV");
+                Serial.println("[BIN_CAL] Complete — dumping CSV");
                 if (gBinCalCsvPath) {
                     File f = LittleFS.open(gBinCalCsvPath, FILE_WRITE);
                     if (f) {
                         imu::magBinCalDumpCSV(&f);
                         f.close();
                         Serial.printf("[BIN_CAL] CSV saved to %s\n", gBinCalCsvPath);
+
+                        // Cloud calibration (docs/cloud-calibration-plan.md): upload the
+                        // CSV and run the fit if we have a network. This is a *blocking*
+                        // call (see net/cloud_client.h) that can stall this loop for up to
+                        // several seconds per HTTP round trip -- accepted for now because
+                        // the diver just finished a deliberate cal action and isn't mid-dive,
+                        // the same tradeoff wifi::init()'s blocking connectByScan() already
+                        // makes. If this proves disruptive, it needs the non-blocking
+                        // treatment flagged in the plan doc.
+                        //
+                        // The fitted result is staged to a "_pending" file, never written
+                        // over the active mag_base.json / mag_mount.json, until the diver
+                        // accepts it on the display (ACCEPT_CLOUD_CAL / REJECT_CLOUD_CAL,
+                        // handled below). Either way we tell the display what happened via
+                        // a CalCloudResultPacket -- it can't infer this from NavPacket alone.
+                        CalCloudResultPacket rpkt{};
+                        rpkt.cal_type = (gCalMode == 5) ? (uint8_t)CalType::BASELINE
+                                                         : (uint8_t)CalType::MOUNTED;
+
+                        if (wifi::isStaConnected()) {
+                            const char* calMode = (gCalMode == 5) ? "baseline" : "mounted";
+                            const char* pendingPath = (gCalMode == 5)
+                                ? "/mag_base_pending.json" : "/mag_mount_pending.json";
+                            Serial.println("[CLOUD_CAL] Uploading calibration...");
+                            cloud::CalibrationResult cr =
+                                cloud::runCalibrationUpload(calMode, gBinCalCsvPath, pendingPath);
+                            if (cr.ok) {
+                                Serial.printf("[CLOUD_CAL] %s (band=%s rms_pct=%.1f) staged to %s\n",
+                                              cr.recommendation.c_str(), cr.qualityBand.c_str(),
+                                              (double)cr.rmsPct, pendingPath);
+                                rpkt.stage   = (uint8_t)CalCloudStage::DONE;
+                                rpkt.quality = (cr.qualityBand == "good") ? (uint8_t)CalCloudQuality::GOOD
+                                             : (cr.qualityBand == "warn") ? (uint8_t)CalCloudQuality::WARN
+                                                                          : (uint8_t)CalCloudQuality::BAD;
+                                rpkt.rms_pct = cr.rmsPct;
+                                rpkt.coverage_gaps = (int16_t)cr.coverageGaps;
+                                strncpy(rpkt.recommendation, cr.recommendation.c_str(),
+                                        sizeof(rpkt.recommendation) - 1);
+                                strncpy(rpkt.calibration_id, cr.calibrationId.c_str(),
+                                        sizeof(rpkt.calibration_id) - 1);
+
+                                strncpy(gCloudCalId, cr.calibrationId.c_str(), sizeof(gCloudCalId) - 1);
+                                gCloudCalId[sizeof(gCloudCalId) - 1] = '\0';
+                                strncpy(gCloudCalPendingPath, pendingPath, sizeof(gCloudCalPendingPath) - 1);
+                                gCloudCalPendingPath[sizeof(gCloudCalPendingPath) - 1] = '\0';
+                                strncpy(gCloudCalActivePath,
+                                        (gCalMode == 5) ? storage::MAG_BASE_FILE : storage::MAG_MOUNT_FILE,
+                                        sizeof(gCloudCalActivePath) - 1);
+                                gCloudCalActivePath[sizeof(gCloudCalActivePath) - 1] = '\0';
+                            } else {
+                                Serial.printf("[CLOUD_CAL] failed: %s\n", cr.errorMessage.c_str());
+                                rpkt.stage = (uint8_t)CalCloudStage::FAILED;
+                                strncpy(rpkt.error, cr.errorMessage.c_str(), sizeof(rpkt.error) - 1);
+                            }
+                        } else {
+                            Serial.println("[CLOUD_CAL] No WiFi connection -- skipping upload. "
+                                            "Connect to WiFi to finish calibration in the cloud.");
+                            rpkt.stage = (uint8_t)CalCloudStage::OFFLINE;
+                        }
+
+                        char cloudBuf[512];
+                        size_t cbn = calCloudResultPacketToBytes(rpkt, cloudBuf, sizeof(cloudBuf));
+                        if (cbn > 0) Serial1.write(cloudBuf, cbn);
                     } else {
                         Serial.printf("[BIN_CAL] ERROR: could not open %s\n", gBinCalCsvPath);
                     }
                 }
                 imu::magBinCalEnd();
+                loadCalibration();  // restore whatever's actually on flash
                 gInCal   = false;
                 sysState = SystemState::READY;
                 Serial.println("[BIN_CAL] Cal complete, returning to READY");
@@ -820,18 +928,27 @@ void loop() {
 
 static void loadCalibration() {
     // Magnetometer — try two-stage chain (mag_base.json + mag_mount.json),
-    // falling back to legacy mag_cal.json, then blocking sweep as last resort.
+    // falling back to legacy mag_cal.json. A brand-new device has none of these
+    // files, and there's no sane automatic mag cal to run at that point: the
+    // diver hasn't necessarily unboxed the device somewhere magnetically clean,
+    // and a blind 90 s sweep with no feedback produces a low-quality fit anyway.
+    // So we just leave mag uncalibrated (identity — no bias/soft-iron
+    // correction) and leave BOOT_MAG_CAL_OK unset; the boot-status screen flags
+    // it, and the diver runs CAL > Baseline (+ Mounted) from the menu when
+    // they're ready.
     bool hasBase = false, hasMount = false;
     if (storage::loadMagCalibrationChain(magCal, hasBase, hasMount)) {
         imu::setMagCalibration(magCal);
         gBootFlags |= BOOT_MAG_CAL_OK;
         Serial.printf("Mag cal loaded: base=%d mount=%d\n", hasBase, hasMount);
     } else {
-        //TODO: this legacy fallback is no longer ideal, since it blocks for 90 seconds and doesn't provide any progress feedback. Better to implement a non-blocking sweep with progress reporting, like the mag_bin_cal does.
-        //TODO: make this better.  Fall back to a baseline mediocre calibration, set "calibration quality" to "poor", let the user cal when they can.
-        Serial.println("No mag calibration found — running min/max sweep (90 s)");
-        imu::calibrateMagnetometer(magCal, 90000);
-        storage::saveMagCalibration(storage::MAG_LEGACY_FILE, magCal);
+        magCal.bias = {0, 0, 0};
+        magCal.softIron[0][0] = 1; magCal.softIron[0][1] = 0; magCal.softIron[0][2] = 0;
+        magCal.softIron[1][0] = 0; magCal.softIron[1][1] = 1; magCal.softIron[1][2] = 0;
+        magCal.softIron[2][0] = 0; magCal.softIron[2][1] = 0; magCal.softIron[2][2] = 1;
+        imu::setMagCalibration(magCal);
+        Serial.println("No mag calibration found — heading will be inaccurate until "
+                        "CAL > Baseline (+ Mounted) is run from the menu");
     }
 
     // Gyroscope
@@ -845,6 +962,11 @@ static void loadCalibration() {
         delay(2500);  //give the user a second to realize what's happened
         imu::calibrateGyroscope(gyroCal, 10000);
         storage::saveCalib3("/gyro_cal.json", gyroCal);
+        // Best-effort cloud archival (calibration-install-sync-plan.md) --
+        // in practice this boot-time site always no-ops, since it runs
+        // before wifi::init()/web::init() further down in setup(); left in
+        // for consistency and in case that ordering ever changes.
+        cal_sync::backupIfConnected("gyro_cal_backup", "/gyro_cal.json");
     }
 
     // Accelerometer
@@ -858,6 +980,8 @@ static void loadCalibration() {
         delay(2500);  //give the user a second to realize what's happened
         imu::calibrateAccelerometer(accelCal, 2500);
         storage::saveCalib3("/accel_cal.json", accelCal);
+        // See the gyro branch above -- same boot-ordering caveat applies.
+        cal_sync::backupIfConnected("accel_cal_backup", "/accel_cal.json");
     }
 
     // Fourier heading calibration (optional — silently skip if absent)
@@ -875,7 +999,8 @@ static void loadCalibration() {
 
 // Reload calibration JSON files without blocking fallbacks.
 // Safe to call at runtime (e.g., after uploading a new cal file via web UI).
-static void reloadCalibrationFiles() {
+// Not static -- net/cal_sync.cpp calls this too, via nav_main.h.
+void reloadCalibrationFiles() {
     gBootFlags &= ~(BOOT_MAG_CAL_OK | BOOT_GYRO_CAL_OK | BOOT_ACCEL_CAL_OK | BOOT_HDG_CAL_OK);
     gHdgCalValid = false;
 
@@ -961,9 +1086,8 @@ static void sendNavPacket(float heading, float headingRaw, float pitch, float ro
     if (gpsSpeed) flags |= FLAG_GPS_SPEED;
     if (nav::hasHome()) flags |= FLAG_HAS_HOME;
     flags |= FLAG_TRUE_HEADING;  // declination applied in heading calculation
-    if (gGpsPosEnabled) flags |= FLAG_GPS_POS_ENABLED;
+    if (gGpsEnabled)    flags |= FLAG_GPS_ENABLED;
     if (gWifiEnabled)   flags |= FLAG_WIFI_ENABLED;
-    if (gGpsSpdEnabled) flags |= FLAG_GPS_SPD_ENABLED;
     flags |= (static_cast<uint8_t>(logging::getLevel()) << FLAG_LOG_LEVEL_SHIFT) & FLAG_LOG_LEVEL_MASK;
     pkt.flags      = flags;
     pkt.boot_flags = gBootFlags;
@@ -1071,7 +1195,9 @@ static void sendWaypointListPacket() {
 }
 
 static void handleDisplayCmd() {
-    static char cmdBuf[64];
+    // 96, not 64: ACCEPT_CLOUD_CAL/REJECT_CLOUD_CAL carry a 36-char UUID
+    // ("cid") plus JSON overhead, which doesn't fit the old 64-byte size.
+    static char cmdBuf[96];
     static size_t cmdPos = 0;
 
     while (Serial1.available()) {
@@ -1103,6 +1229,7 @@ static void handleDisplayCmd() {
                         sysState = SystemState::CALIBRATION;
                         imu::calibrateGyroscope(gyroCal, 10000);
                         storage::saveCalib3("/gyro_cal.json", gyroCal);
+                        cal_sync::backupIfConnected("gyro_cal_backup", "/gyro_cal.json");
                         sysState = SystemState::READY;
                         break;
                     case DisplayCmd::RESET:
@@ -1171,6 +1298,12 @@ static void handleDisplayCmd() {
                         gLastCalProgressMs = 0;
                         imu::magBinCalBegin(true);
                         break;
+                    case DisplayCmd::FINISH_BASELINE_COLLECTION:
+                        Serial.println("CMD: FINISH_BASELINE_COLLECTION (diver declares done)");
+                        if (gInCal && gCalMode == 5) {
+                            imu::magBinCalFinishBaseline();
+                        }
+                        break;
                     case DisplayCmd::START_SPEED_CAL: {
                         gSpeedCalDist_ft = parseSpeedCalDist(cmdBuf, cmdPos);
                         Serial.printf("CMD: START_SPEED_CAL dist=%uft\n",
@@ -1194,6 +1327,7 @@ static void handleDisplayCmd() {
                         speed_cal::History hist{};
                         speed_cal::addMeasurement(hist, gSpeedCalKProposed);
                         speed_cal::save(hist);
+                        cal_sync::backupIfConnected("speed_cal_backup", "/speed_cal.json");
                         // Apply new k-factor immediately
                         flow::setConfig({ gSpeedCalKProposed,
                                           FLOW_CROSS_SECTION_M2,
@@ -1209,6 +1343,7 @@ static void handleDisplayCmd() {
                         speed_cal::History hist = speed_cal::load();
                         speed_cal::addMeasurement(hist, gSpeedCalKProposed);
                         speed_cal::save(hist);
+                        cal_sync::backupIfConnected("speed_cal_backup", "/speed_cal.json");
                         float newK = speed_cal::averageK(hist, FLOW_K_FACTOR);
                         flow::setConfig({ newK,
                                           FLOW_CROSS_SECTION_M2,
@@ -1224,18 +1359,11 @@ static void handleDisplayCmd() {
                         gInCal   = false;
                         sysState = SystemState::READY;
                         break;
-                    case DisplayCmd::TOGGLE_GPS_POS:
-                        gGpsPosEnabled = !gGpsPosEnabled;
-                        nav::setUseGps(gGpsPosEnabled);
-                        Serial.print("CMD: TOGGLE_GPS_POS -> ");
-                        Serial.println(gGpsPosEnabled ? "ON" : "OFF");
-                        nvs_nav::save(currentNavNvsState());
-                        break;
-                    case DisplayCmd::TOGGLE_GPS_SPD:
-                        gGpsSpdEnabled = !gGpsSpdEnabled;
-                        Serial.print("CMD: TOGGLE_GPS_SPD -> ");
-                        Serial.println(gGpsSpdEnabled ? "ON" : "OFF");
-                        // TODO: gate GPS speed selection on gGpsSpdEnabled
+                    case DisplayCmd::TOGGLE_GPS:
+                        gGpsEnabled = !gGpsEnabled;
+                        nav::setUseGps(gGpsEnabled);
+                        Serial.print("CMD: TOGGLE_GPS -> ");
+                        Serial.println(gGpsEnabled ? "ON" : "OFF");
                         nvs_nav::save(currentNavNvsState());
                         break;
                     case DisplayCmd::TOGGLE_WIFI:
@@ -1284,6 +1412,7 @@ static void handleDisplayCmd() {
                     }
                     case DisplayCmd::FINALIZE_HDG_CAL: {
                         File f = LittleFS.open(hdg_cal::SAMPLES_FILE_PATH, FILE_WRITE);
+                        bool saved = false;
                         if (f) {
                             f.println("actual,indicated");
                             for (int i = 0; i < gHdgSampleCount; i++) {
@@ -1292,6 +1421,7 @@ static void handleDisplayCmd() {
                                          gHdgSamplesIndicated[i]);
                             }
                             f.close();
+                            saved = true;
                             Serial.printf("[HDG_CAL] Saved %d samples to %s\n",
                                           gHdgSampleCount, hdg_cal::SAMPLES_FILE_PATH);
                         } else {
@@ -1299,6 +1429,59 @@ static void handleDisplayCmd() {
                                           hdg_cal::SAMPLES_FILE_PATH);
                         }
                         gHdgSampleCount = 0;
+
+                        // Cloud calibration (docs/cloud-calibration-plan.md /
+                        // heading-cal-cloud-plan.md): same upload+stage+accept
+                        // flow already used for baseline/mounted (see the
+                        // gCalMode == 5 || 6 block above), just triggered from
+                        // the 12-point collector's own completion point instead
+                        // of the bin-grid collector's.
+                        if (saved) {
+                            CalCloudResultPacket rpkt{};
+                            rpkt.cal_type = (uint8_t)CalType::HDG;
+
+                            if (wifi::isStaConnected()) {
+                                Serial.println("[CLOUD_CAL] Uploading heading cal...");
+                                cloud::CalibrationResult cr = cloud::runCalibrationUpload(
+                                    "hdg", hdg_cal::SAMPLES_FILE_PATH, "/hdg_fourier_pending.json");
+                                if (cr.ok) {
+                                    Serial.printf("[CLOUD_CAL] %s (band=%s max_err_deg=%.1f) staged\n",
+                                                  cr.recommendation.c_str(), cr.qualityBand.c_str(),
+                                                  (double)cr.rmsPct);
+                                    rpkt.stage   = (uint8_t)CalCloudStage::DONE;
+                                    rpkt.quality = (cr.qualityBand == "good") ? (uint8_t)CalCloudQuality::GOOD
+                                                 : (cr.qualityBand == "warn") ? (uint8_t)CalCloudQuality::WARN
+                                                                              : (uint8_t)CalCloudQuality::BAD;
+                                    rpkt.rms_pct = cr.rmsPct;  // degrees, not percent -- see display side
+                                    rpkt.coverage_gaps = (int16_t)cr.coverageGaps;  // always -1 for hdg
+                                    strncpy(rpkt.recommendation, cr.recommendation.c_str(),
+                                            sizeof(rpkt.recommendation) - 1);
+                                    strncpy(rpkt.calibration_id, cr.calibrationId.c_str(),
+                                            sizeof(rpkt.calibration_id) - 1);
+
+                                    strncpy(gCloudCalId, cr.calibrationId.c_str(), sizeof(gCloudCalId) - 1);
+                                    gCloudCalId[sizeof(gCloudCalId) - 1] = '\0';
+                                    strncpy(gCloudCalPendingPath, "/hdg_fourier_pending.json",
+                                            sizeof(gCloudCalPendingPath) - 1);
+                                    gCloudCalPendingPath[sizeof(gCloudCalPendingPath) - 1] = '\0';
+                                    strncpy(gCloudCalActivePath, hdg_cal::FILE_PATH,
+                                            sizeof(gCloudCalActivePath) - 1);
+                                    gCloudCalActivePath[sizeof(gCloudCalActivePath) - 1] = '\0';
+                                } else {
+                                    Serial.printf("[CLOUD_CAL] failed: %s\n", cr.errorMessage.c_str());
+                                    rpkt.stage = (uint8_t)CalCloudStage::FAILED;
+                                    strncpy(rpkt.error, cr.errorMessage.c_str(), sizeof(rpkt.error) - 1);
+                                }
+                            } else {
+                                Serial.println("[CLOUD_CAL] No WiFi connection -- skipping upload. "
+                                                "Connect to WiFi to finish heading calibration.");
+                                rpkt.stage = (uint8_t)CalCloudStage::OFFLINE;
+                            }
+
+                            char cloudBuf[512];
+                            size_t cbn = calCloudResultPacketToBytes(rpkt, cloudBuf, sizeof(cloudBuf));
+                            if (cbn > 0) Serial1.write(cloudBuf, cbn);
+                        }
                         break;
                     }
                     case DisplayCmd::SELECT_WAYPOINT: {
@@ -1313,6 +1496,103 @@ static void handleDisplayCmd() {
                             Serial.printf("CMD: SELECT_WAYPOINT idx=%u — out of range (count=%d)\n",
                                           idx, waypoints::count());
                         }
+                        break;
+                    }
+                    case DisplayCmd::ACCEPT_CLOUD_CAL: {
+                        char cid[40];
+                        parseCloudCalId(cmdBuf, cmdPos, cid, sizeof(cid));
+                        if (strlen(gCloudCalId) > 0 && strcmp(cid, gCloudCalId) == 0 &&
+                            strlen(gCloudCalPendingPath) > 0) {
+                            // Copy the staged result over the active cal file, then
+                            // reload -- same effect as the web file-manager's existing
+                            // "Reload Cal Files" action, just triggered from here.
+                            File src = LittleFS.open(gCloudCalPendingPath, FILE_READ);
+                            if (src) {
+                                File dst = LittleFS.open(gCloudCalActivePath, FILE_WRITE);
+                                if (dst) {
+                                    uint8_t copyBuf[256];
+                                    size_t n;
+                                    while ((n = src.read(copyBuf, sizeof(copyBuf))) > 0) {
+                                        dst.write(copyBuf, n);
+                                    }
+                                    dst.close();
+                                    Serial.printf("[CLOUD_CAL] Accepted -- %s -> %s\n",
+                                                  gCloudCalPendingPath, gCloudCalActivePath);
+                                    loadCalibration();
+                                } else {
+                                    Serial.printf("[CLOUD_CAL] ERROR: could not open %s for write\n",
+                                                  gCloudCalActivePath);
+                                }
+                                src.close();
+                            } else {
+                                Serial.printf("[CLOUD_CAL] ERROR: could not open %s\n",
+                                              gCloudCalPendingPath);
+                            }
+                            cloud::respondToCalibration(String(gCloudCalId), true);
+                        } else {
+                            Serial.println("[CLOUD_CAL] ACCEPT with no matching pending result -- ignored");
+                        }
+                        gCloudCalId[0]          = '\0';
+                        gCloudCalPendingPath[0] = '\0';
+                        break;
+                    }
+                    case DisplayCmd::REJECT_CLOUD_CAL: {
+                        char cid[40];
+                        parseCloudCalId(cmdBuf, cmdPos, cid, sizeof(cid));
+                        if (strlen(gCloudCalId) > 0 && strcmp(cid, gCloudCalId) == 0) {
+                            if (strlen(gCloudCalPendingPath) > 0) LittleFS.remove(gCloudCalPendingPath);
+                            cloud::respondToCalibration(String(gCloudCalId), false);
+                            Serial.println("[CLOUD_CAL] Rejected -- discarding pending result");
+                        } else {
+                            Serial.println("[CLOUD_CAL] REJECT with no matching pending result -- ignored");
+                        }
+                        gCloudCalId[0]          = '\0';
+                        gCloudCalPendingPath[0] = '\0';
+                        break;
+                    }
+                    case DisplayCmd::LINK_ACCOUNT: {
+                        // Device-code account link (see net/cloud_client.h and
+                        // docs/cloud-calibration-plan.md) for the divemap.diverdaniel.com
+                        // cloud link -- no URL is ever shown; the diver enters the same
+                        // code under "My Devices" in their account settings.
+                        // beginAuthorize() is a single quick blocking call; the
+                        // up-to-10-minute wait for approval is handled by the
+                        // non-blocking cloud::updateAuthorizePoll() state machine ticked
+                        // in the housekeeping section below, so this command handler
+                        // returns immediately and BTN2 can cancel it
+                        // (DisplayCmd::CANCEL_LINK, below) instead of the diver being
+                        // stuck waiting with no way out.
+                        CloudLinkResultPacket lpkt{};
+                        if (!wifi::isStaConnected()) {
+                            Serial.println("[CLOUD_LINK] No WiFi connection -- skipping.");
+                            lpkt.stage = (uint8_t)CloudLinkStage::OFFLINE;
+                        } else {
+                            String deviceCode, userCode, err;
+                            if (!cloud::beginAuthorize(deviceCode, userCode, err)) {
+                                Serial.printf("[CLOUD_LINK] beginAuthorize failed: %s\n", err.c_str());
+                                lpkt.stage = (uint8_t)CloudLinkStage::FAILED;
+                                strncpy(lpkt.error, err.c_str(), sizeof(lpkt.error) - 1);
+                            } else {
+                                lpkt.stage = (uint8_t)CloudLinkStage::CODE_READY;
+                                strncpy(lpkt.user_code, userCode.c_str(), sizeof(lpkt.user_code) - 1);
+                                char codeBuf[256];
+                                size_t codeN = cloudLinkResultPacketToBytes(lpkt, codeBuf, sizeof(codeBuf));
+                                if (codeN > 0) Serial1.write(codeBuf, codeN);
+                                Serial.printf("[CLOUD_LINK] code=%s -- polling for approval\n",
+                                              userCode.c_str());
+
+                                cloud::startAuthorizePoll(deviceCode);
+                                break;  // result packet follows asynchronously, see below
+                            }
+                        }
+                        char cloudLinkBuf[256];
+                        size_t clbn = cloudLinkResultPacketToBytes(lpkt, cloudLinkBuf, sizeof(cloudLinkBuf));
+                        if (clbn > 0) Serial1.write(cloudLinkBuf, clbn);
+                        break;
+                    }
+                    case DisplayCmd::CANCEL_LINK: {
+                        Serial.println("[CLOUD_LINK] cancelled by diver");
+                        cloud::cancelAuthorizePoll();
                         break;
                     }
                     case DisplayCmd::ARRIVE_WAYPOINT: {

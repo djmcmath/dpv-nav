@@ -29,11 +29,11 @@ static bool gHdgCalPending          = false;
 static bool gPowerOffPending        = false;
 static bool gWaypointSelectPending  = false;
 static bool gWaypointArrivePending  = false;
+static bool gCloudLinkPending       = false;
 
 // Nav-device toggle states (updated from NavPacket flags)
-static bool gGpsPosEnabled = true;
-static bool gGpsSpdEnabled = true;
-static bool gWifiEnabled   = true;
+static bool gGpsEnabled  = true;
+static bool gWifiEnabled = true;
 
 static DisplaySettings gSettings = {
     .debugMode   = false,
@@ -84,7 +84,7 @@ static void loadDefaults() {
     root.items[1].action = Action::SUBMENU; root.items[1].submenuIdx = 1;
     strncpy(root.items[2].label, "Cal", MENU_LABEL_LEN);
     root.items[2].action = Action::SUBMENU; root.items[2].submenuIdx = 2;
-    strncpy(root.items[3].label, "Input", MENU_LABEL_LEN);
+    strncpy(root.items[3].label, "Config", MENU_LABEL_LEN);
     root.items[3].action = Action::SUBMENU; root.items[3].submenuIdx = 3;
     strncpy(root.items[4].label, "Display", MENU_LABEL_LEN);
     root.items[4].action = Action::SUBMENU; root.items[4].submenuIdx = 4;
@@ -119,18 +119,18 @@ static void loadDefaults() {
     strncpy(cal.items[4].label, "..", MENU_LABEL_LEN);
     cal.items[4].action = Action::NONE; cal.items[4].submenuIdx = -1;
 
-    // INPUT submenu (index 3)
+    // CONFIG submenu (index 3)
     auto& inp = submenus[3];
-    strncpy(inp.title, "Input", MENU_LABEL_LEN);
+    strncpy(inp.title, "Config", MENU_LABEL_LEN);
     inp.count = 5;
-    strncpy(inp.items[0].label, "GPS Pos", MENU_LABEL_LEN);
-    inp.items[0].action = Action::INPUT_GPS_POS; inp.items[0].submenuIdx = -1;
-    strncpy(inp.items[1].label, "GPS Spd", MENU_LABEL_LEN);
-    inp.items[1].action = Action::INPUT_GPS_SPD; inp.items[1].submenuIdx = -1;
-    strncpy(inp.items[2].label, "WiFi", MENU_LABEL_LEN);
-    inp.items[2].action = Action::INPUT_WIFI; inp.items[2].submenuIdx = -1;
-    strncpy(inp.items[3].label, "Log", MENU_LABEL_LEN);
-    inp.items[3].action = Action::INPUT_LOG_CYCLE; inp.items[3].submenuIdx = -1;
+    strncpy(inp.items[0].label, "GPS", MENU_LABEL_LEN);
+    inp.items[0].action = Action::INPUT_GPS; inp.items[0].submenuIdx = -1;
+    strncpy(inp.items[1].label, "WiFi", MENU_LABEL_LEN);
+    inp.items[1].action = Action::INPUT_WIFI; inp.items[1].submenuIdx = -1;
+    strncpy(inp.items[2].label, "Log", MENU_LABEL_LEN);
+    inp.items[2].action = Action::INPUT_LOG_CYCLE; inp.items[2].submenuIdx = -1;
+    strncpy(inp.items[3].label, "Link acct", MENU_LABEL_LEN);
+    inp.items[3].action = Action::CLOUD_LINK; inp.items[3].submenuIdx = -1;
     strncpy(inp.items[4].label, "..", MENU_LABEL_LEN);
     inp.items[4].action = Action::NONE; inp.items[4].submenuIdx = -1;
 
@@ -231,11 +231,8 @@ static SubMenu& currentMenu() {
 static void getDisplayLabel(const MenuItem& item, char* buf, size_t bufLen) {
     const char* suffix = "";
     switch (item.action) {
-        case Action::INPUT_GPS_POS:
-            suffix = gGpsPosEnabled ? "ON" : "OFF";
-            break;
-        case Action::INPUT_GPS_SPD:
-            suffix = gGpsSpdEnabled ? "ON" : "OFF";
+        case Action::INPUT_GPS:
+            suffix = gGpsEnabled ? "ON" : "OFF";
             break;
         case Action::INPUT_WIFI:
             suffix = gWifiEnabled ? "ON" : "OFF";
@@ -286,10 +283,19 @@ static void executeAction(Action act) {
             break;
         case Action::CAL_BASELINE:
             if (gSendCmd) gSendCmd(DisplayCmd::START_BASELINE_CAL);
+            // Force a clean screen for the new session. showBaselineRoughScan/
+            // showCalGrid only wipe their background when their own "static
+            // drawn" flag is false, which is only reset by clear()/reinit() --
+            // if a prior cal session this power cycle ended any way other than
+            // reaching completion (aborted, display recovering from a link
+            // drop mid-session), that flag is stale, and the new session's
+            // bars get drawn right over whatever was on screen before.
+            display::clear();
             Serial.println("[MENU] CAL_BASELINE (START_BASELINE_CAL)");
             break;
         case Action::CAL_MOUNTED:
             if (gSendCmd) gSendCmd(DisplayCmd::START_MOUNTED_CAL);
+            display::clear();  // see CAL_BASELINE above
             Serial.println("[MENU] CAL_MOUNTED (START_MOUNTED_CAL)");
             break;
         case Action::CAL_SPEED:
@@ -300,13 +306,9 @@ static void executeAction(Action act) {
             gHdgCalPending = true;
             Serial.println("[MENU] CAL_HDG: entering 4-point heading cal");
             break;
-        case Action::INPUT_GPS_POS:
-            if (gSendCmd) gSendCmd(DisplayCmd::TOGGLE_GPS_POS);
-            Serial.println("[MENU] TOGGLE_GPS_POS");
-            break;
-        case Action::INPUT_GPS_SPD:
-            if (gSendCmd) gSendCmd(DisplayCmd::TOGGLE_GPS_SPD);
-            Serial.println("[MENU] TOGGLE_GPS_SPD");
+        case Action::INPUT_GPS:
+            if (gSendCmd) gSendCmd(DisplayCmd::TOGGLE_GPS);
+            Serial.println("[MENU] TOGGLE_GPS");
             break;
         case Action::INPUT_WIFI:
             if (gSendCmd) gSendCmd(DisplayCmd::TOGGLE_WIFI);
@@ -348,6 +350,10 @@ static void executeAction(Action act) {
         case Action::POWER_OFF:
             gPowerOffPending = true;
             Serial.println("[MENU] POWER_OFF: entering power-off sequence");
+            break;
+        case Action::CLOUD_LINK:
+            gCloudLinkPending = true;
+            Serial.println("[MENU] CLOUD_LINK: entering account-link UI");
             break;
         default:
             break;
@@ -441,8 +447,7 @@ bool select() {
     bool isToggle = (item.action == Action::DISP_SPD_ETA ||
                      item.action == Action::DISP_UNITS ||
                      item.action == Action::DISP_HDG_TYPE ||
-                     item.action == Action::INPUT_GPS_POS ||
-                     item.action == Action::INPUT_GPS_SPD ||
+                     item.action == Action::INPUT_GPS ||
                      item.action == Action::INPUT_WIFI ||
                      item.action == Action::INPUT_LOG_CYCLE ||
                      item.action == Action::NAV_OP_MODE);
@@ -513,8 +518,7 @@ const DisplaySettings& settings() {
 }
 
 void updateNavState(uint8_t flags) {
-    gGpsPosEnabled = (flags & FLAG_GPS_POS_ENABLED) != 0;
-    gGpsSpdEnabled = (flags & FLAG_GPS_SPD_ENABLED) != 0;
+    gGpsEnabled    = (flags & FLAG_GPS_ENABLED)     != 0;
     gWifiEnabled   = (flags & FLAG_WIFI_ENABLED)    != 0;
     gLogLevel      = (flags & FLAG_LOG_LEVEL_MASK) >> FLAG_LOG_LEVEL_SHIFT;
 }
@@ -557,6 +561,14 @@ bool isPendingWaypointArrive() {
 
 void clearWaypointArrivePending() {
     gWaypointArrivePending = false;
+}
+
+bool isPendingCloudLink() {
+    return gCloudLinkPending;
+}
+
+void clearCloudLinkPending() {
+    gCloudLinkPending = false;
 }
 
 }  // namespace menu

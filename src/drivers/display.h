@@ -68,6 +68,13 @@ void showCal(uint8_t remaining_s, uint8_t coverage_pct, bool isFull);
 //   pkt     — CalProgressPacket with bin counts and totals
 //   title   — short title string ("BASELINE CAL" or "MOUNTED CAL")
 void showCalGrid(const struct CalProgressPacket& pkt, const char* title);
+// Baseline pass 1 (ROUGH_SCAN): no grid, axis-range bars + live fit stats + "good enough" prompt.
+void showBaselineRoughScan(const struct CalProgressPacket& pkt);
+// Shown immediately when BTN2 requests FINISH_BASELINE_COLLECTION, before nav
+// has confirmed (which can take a while -- nav does a synchronous CSV dump
+// first). Distinguishes "request sent, waiting" from the rough-scan screen
+// diver would otherwise see redrawn unchanged.
+void showBaselineFinishing();
 
 // Speed calibration screens (all flush to display).
 // Distance selection — user chooses how far they will swim.
@@ -93,9 +100,53 @@ void showSpeedCalResult(uint16_t dist_ft, uint16_t elapsed_s,
 //   indicatedDeg — live AHRS heading from NavPacket (pre-correction)
 void showHdgFourierCalPrompt(int step, int total, float targetDeg, float indicatedDeg);
 
-// Done screen: shown after all points collected and CSV saved.
-//   nPoints — number of samples collected
-void showHdgFourierCalDone(int nPoints);
+// Cloud calibration screens (docs/cloud-calibration-plan.md). Shown after a
+// bin-coverage cal (Baseline/Mounted), or the 12-point Fourier heading cal
+// (heading-cal-cloud-plan.md), completes and the nav device uploads the CSV
+// for fitting.
+//
+// Waiting: shown immediately, before the (blocking, on the nav device)
+// upload+fit round trip has a result. secondsWaiting is cosmetic only.
+void showCloudCalWaiting(uint32_t secondsWaiting);
+
+// No WiFi connection — upload was skipped. BTN2 dismisses.
+void showCloudCalOffline();
+
+// Upload/fit failed, or the nav device never responded. BTN2 dismisses.
+void showCloudCalFailed(const char* message);
+
+// Fit succeeded — accept/reject the result.
+//   quality:      0=good, 1=warn, 2=bad (CalCloudQuality)
+//   rmsPct:       baseline/mounted: % of fitted radius. hdg: degrees of max
+//                 Fourier-fit residual, reusing the same wire field rather than
+//                 growing a parallel one -- see heading-cal-cloud-plan.md. The
+//                 unit shown is chosen from calType, not from the value itself.
+//   coverageGaps: baseline only, empty coverage-grid cells; -1 = not applicable
+//                 (mounted/hdg fit, or a pre-9-axis-firmware baseline CSV) and
+//                 shows nothing extra. See baseline-cal-coverage-feedback-plan.md.
+//   choice:       0=ACCEPT, 1=REJECT (highlighted item)
+//   calType:      CalType enum (BASELINE/MOUNTED/HDG) -- selects the "%"/"deg" label.
+void showCloudCalResult(uint8_t quality, float rmsPct, const char* recommendation,
+                         int16_t coverageGaps, uint8_t choice, uint8_t calType);
+
+// Cloud account-link screens (device-code account link). Shown after the
+// diver selects "Link acct" from the Config menu. No URL is ever shown --
+// the diver enters this same code under "My Devices" in account settings.
+//
+// Waiting: shown immediately, before the nav device's first response (empty
+// userCode), and again once the code arrives (nav then polls for approval
+// in the background, up to ~10 min -- BTN2 cancels). secondsWaiting is
+// cosmetic.
+void showCloudLinkWaiting(const char* userCode, uint32_t secondsWaiting);
+
+// No WiFi connection — flow was not attempted. BTN2 dismisses.
+void showCloudLinkOffline();
+
+// Begin/poll failed, or the nav device never responded. BTN2 dismisses.
+void showCloudLinkFailed(const char* message);
+
+// Approved — token saved on the nav device. BTN2 dismisses.
+void showCloudLinkDone();
 
 // --- Random-rect self-test --------------------------------------------------
 // Draws a random-color rectangle at a random position once per second.

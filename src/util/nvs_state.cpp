@@ -16,8 +16,7 @@ State load() {
     // readOnly=true: returns false if the namespace has never been written
     if (!prefs.begin(NAV_NS, /*readOnly=*/true)) {
         // First boot — namespace doesn't exist yet; return factory defaults
-        s.gps_pos   = true;
-        s.gps_spd   = true;
+        s.gps       = true;
         s.wifi      = true;
         s.dive_mode = false;
         s.log_level = 0;
@@ -25,8 +24,7 @@ State load() {
         s.pos_y     = 0.0f;
         return s;
     }
-    s.gps_pos   = prefs.getBool ("gps_pos",   true);
-    s.gps_spd   = prefs.getBool ("gps_spd",   true);
+    s.gps       = prefs.getBool ("gps",        true);
     s.wifi      = prefs.getBool ("wifi",       true);
     s.dive_mode = prefs.getBool ("dive_mode",  false);
     s.log_level = prefs.getUChar("log_level",  0);
@@ -39,8 +37,7 @@ State load() {
 void save(const State& s) {
     Preferences prefs;
     if (!prefs.begin(NAV_NS, /*readOnly=*/false)) return;
-    prefs.putBool ("gps_pos",   s.gps_pos);
-    prefs.putBool ("gps_spd",   s.gps_spd);
+    prefs.putBool ("gps",       s.gps);
     prefs.putBool ("wifi",      s.wifi);
     prefs.putBool ("dive_mode", s.dive_mode);
     prefs.putUChar("log_level", s.log_level);

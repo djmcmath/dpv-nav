@@ -835,6 +835,11 @@ static void processNavLine() {
             }
             Serial.printf("[CLOUD_LINK] result stage=%u\n", pkt.stage);
         }
+    } else if (ptype == PacketType::BOOT_PING) {
+        // Nav's boot self-test round-trip check (see setup() in nav_main.cpp)
+        // -- echo back immediately so nav can confirm display->nav is alive.
+        lastNavMs = millis();
+        sendCmd(DisplayCmd::LINK_HELLO);
     }
 }
 

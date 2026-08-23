@@ -31,10 +31,11 @@
     {
       "title": "INPUT",
       "items": [
-        {"label": "GPS Pos", "act": 8},
-        {"label": "GPS Spd", "act": 9},
+        {"label": "GPS", "act": 8},
         {"label": "WiFi", "act": 10},
-        {"label": "Logging", "act": 11}
+        {"label": "Logging", "act": 11},
+        {"label": "Water", "act": 22},
+        {"label": "Link acct", "act": 21}
       ]
     },
     {

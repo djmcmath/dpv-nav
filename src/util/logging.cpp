@@ -86,11 +86,11 @@ static void writeHeader() {
     if (gLevel == LogLevel::LEVEL_LOW) {
         gLogFile.print("timestamp_ms,local_time,heading_deg,speed_ms,speed_src,"
                        "pos_x_m,pos_y_m,lat,lon,pos_src,"
-                       "gps_satellites,gps_hdop\n");
+                       "gps_satellites,gps_hdop,depth_m,water_temp_c\n");
     } else if (gLevel == LogLevel::LEVEL_HIGH) {
         gLogFile.print("timestamp_ms,local_time,heading_deg,speed_ms,speed_src,"
                        "pos_x_m,pos_y_m,lat,lon,pos_src,"
-                       "gps_satellites,gps_hdop,"
+                       "gps_satellites,gps_hdop,depth_m,water_temp_c,"
                        "mag_x_raw,mag_y_raw,mag_z_raw,"
                        "accel_x_raw,accel_y_raw,accel_z_raw,"
                        "gyro_x_raw,gyro_y_raw,gyro_z_raw,"
@@ -249,6 +249,8 @@ void log(const LogData& d) {
         gLogFile.print(",,");
     }
 
+    gLogFile.printf(",%.2f,%.2f", d.depth_m, d.water_temp_c);
+
     if (gLevel == LogLevel::LEVEL_HIGH) {
         gLogFile.printf(",%.3f,%.3f,%.3f"
                         ",%.3f,%.3f,%.3f"
@@ -305,6 +307,8 @@ void logImmediate(const LogData& d) {
     } else {
         gLogFile.print(",,");
     }
+
+    gLogFile.printf(",%.2f,%.2f", d.depth_m, d.water_temp_c);
 
     if (gLevel == LogLevel::LEVEL_HIGH) {
         gLogFile.printf(",%.3f,%.3f,%.3f"

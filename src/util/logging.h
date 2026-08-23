@@ -20,6 +20,8 @@ struct LogData {
     char  pos_src;        // 'G' = GPS, 'W' = waypoint snap, 'E' = DR estimate
     uint8_t gps_satellites; // satellites tracked (0 if no GPS fix)
     float   gps_hdop;       // HDOP (0.0 if no GPS fix)
+    float   depth_m;        // depth below surface, meters (0 if sensor absent)
+    float   water_temp_c;   // water temperature, degrees C (0 if sensor absent)
     // HIGH-level fields
     imu::Vec3f mag_raw, accel_raw, gyro_raw;
     imu::Vec3f mag_cal, accel_cal, gyro_cal;

@@ -80,6 +80,9 @@ struct NavCache {
     bool    gpsSpeed      = false;
     // Log level indicator
     uint8_t logLevel      = 0xFF;
+    // Depth readout (compared as integer centimetres; -1 = not present/blank)
+    int     depthCm       = -999;
+    bool    imperialUnits = false;  // last-seen units setting, to force redraw on toggle
 };
 static NavCache navCache;
 
@@ -89,6 +92,13 @@ static void invalidateNavCache() {}  // no-op under full-redraw mode
 #endif // DISPLAY_FULL_REDRAW
 
 static bool tftReady = false;
+
+// Runtime units setting (ft/m), pushed in from display_main.cpp whenever the
+// Units menu setting changes. Replaces the old DISPLAY_UNITS_IMPERIAL macro,
+// which was fixed at compile time and never actually reachable from the menu.
+static bool gImperialUnits = false;
+
+void display::setImperialUnits(bool imperial) { gImperialUnits = imperial; }
 
 // Boot status line Y cursor
 static int bootLineY = 0;
@@ -414,20 +424,20 @@ static void drawRange(const NavPacket& pkt) {
     char buf[10];
     if (pkt.flags & FLAG_HAS_HOME) {
         float dist = pkt.distance_home_m;
-#if DISPLAY_UNITS_IMPERIAL
-        dist *= 3.28084f;
-        if (dist < 1000.0f) {
-            snprintf(buf, sizeof(buf), "%4dft", (int)(dist + 0.5f));   // e.g. " 300ft" (6)
+        if (gImperialUnits) {
+            dist *= 3.28084f;
+            if (dist < 1000.0f) {
+                snprintf(buf, sizeof(buf), "%4dft", (int)(dist + 0.5f));   // e.g. " 300ft" (6)
+            } else {
+                snprintf(buf, sizeof(buf), "%5.1fk", (double)(dist / 1000.0f)); // e.g. " 1.0k " → " 1.0k" (6)
+            }
         } else {
-            snprintf(buf, sizeof(buf), "%5.1fk", (double)(dist / 1000.0f)); // e.g. " 1.0k " → " 1.0k" (6)
+            if (dist < 1000.0f) {
+                snprintf(buf, sizeof(buf), "%4dm ", (int)(dist + 0.5f));   // e.g. " 300m " (6)
+            } else {
+                snprintf(buf, sizeof(buf), "%5.1fk", (double)(dist / 1000.0f)); // e.g. " 1.0k" (6)
+            }
         }
-#else
-        if (dist < 1000.0f) {
-            snprintf(buf, sizeof(buf), "%4dm ", (int)(dist + 0.5f));   // e.g. " 300m " (6)
-        } else {
-            snprintf(buf, sizeof(buf), "%5.1fk", (double)(dist / 1000.0f)); // e.g. " 1.0k" (6)
-        }
-#endif
     } else {
         snprintf(buf, sizeof(buf), " ---  ");  // 6 chars, matches number-case width
     }
@@ -458,13 +468,10 @@ static void drawHeading(const NavPacket& pkt) {
 
 static void drawSpeed(const NavPacket& pkt) {
     char buf[8];
-#if DISPLAY_UNITS_IMPERIAL
-    int spd_display = (int)(pkt.speed_ms * 60.0f * 3.28084f + 0.5f);
+    int spd_display = gImperialUnits
+        ? (int)(pkt.speed_ms * 60.0f * 3.28084f + 0.5f)
+        : (int)(pkt.speed_ms * 60.0f + 0.5f);
     snprintf(buf, sizeof(buf), "%4d", spd_display);
-#else
-    int spd_display = (int)(pkt.speed_ms * 60.0f + 0.5f);
-    snprintf(buf, sizeof(buf), "%4d", spd_display);
-#endif
     tft.setTextSize(3);
     tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
     tft.setCursor(162, 158);
@@ -472,17 +479,33 @@ static void drawSpeed(const NavPacket& pkt) {
 
     // Meta line: "m/m GPS" or "ft/m FLW"
     const char* src = (pkt.flags & FLAG_GPS_SPEED) ? "GPS" : "FLW";
-#if DISPLAY_UNITS_IMPERIAL
     char meta[10];
-    snprintf(meta, sizeof(meta), "ft/m %s", src);
-#else
-    char meta[10];
-    snprintf(meta, sizeof(meta), "m/m  %s", src);
-#endif
+    snprintf(meta, sizeof(meta), gImperialUnits ? "ft/m %s" : "m/m  %s", src);
     tft.setTextSize(2);
     tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
     tft.setCursor(162, 212);
     tft.print(meta);
+}
+
+// Bottom-row depth readout, in the gap between the log-level indicator
+// (x=2) and the speed-source meta text (x=162). Blank on boards without a
+// depth sensor. Fixed 7-char width in both unit modes for safe in-place
+// overwrite (matches drawRange()'s fixed-width convention).
+static void drawDepth(const NavPacket& pkt) {
+    char buf[9];
+    if (pkt.flags2 & FLAG2_DEPTH_PRESENT) {
+        if (gImperialUnits) {
+            snprintf(buf, sizeof(buf), "%5.1fft", (double)(pkt.depth_m * 3.28084f));
+        } else {
+            snprintf(buf, sizeof(buf), "%5.1fm ", (double)pkt.depth_m);
+        }
+    } else {
+        snprintf(buf, sizeof(buf), "       ");  // 7 spaces — nothing to show
+    }
+    tft.setTextSize(2);
+    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+    tft.setCursor(60, 212);
+    tft.print(buf);
 }
 
 static void drawLogIndicator(const NavPacket& pkt) {
@@ -513,6 +536,7 @@ void showNav(const NavPacket& pkt) {
     drawHeading(pkt);
     drawSpeed(pkt);
     drawLogIndicator(pkt);
+    drawDepth(pkt);
 
 #else // INCREMENTAL UPDATE
     // First call (or after invalidate): clear screen and draw everything
@@ -531,6 +555,7 @@ void showNav(const NavPacket& pkt) {
         navCache.headingInt   = -999;
         navCache.speedDisplay = -999;
         navCache.logLevel     = 0xFF;
+        navCache.depthCm      = -999;
         navCache.bottomDirty  = false;
     }
 
@@ -547,11 +572,16 @@ void showNav(const NavPacket& pkt) {
                       : (pkt.batt_mv >= BATT_MV_GREEN)  ? 3
                       : (pkt.batt_mv >= BATT_MV_YELLOW) ? 2
                       : 1;
-#if DISPLAY_UNITS_IMPERIAL
-    int speedDisp = (int)(pkt.speed_ms * 60.0f * 3.28084f + 0.5f);
-#else
-    int speedDisp = (int)(pkt.speed_ms * 60.0f + 0.5f);
-#endif
+    int speedDisp = gImperialUnits
+        ? (int)(pkt.speed_ms * 60.0f * 3.28084f + 0.5f)
+        : (int)(pkt.speed_ms * 60.0f + 0.5f);
+    bool depthPresent = (pkt.flags2 & FLAG2_DEPTH_PRESENT) != 0;
+    int  depthCm       = depthPresent ? (int)(pkt.depth_m * 100.0f) : -999;
+
+    // Unit toggling doesn't change distCm/speedDisp/depthCm (stored in SI),
+    // so it wouldn't otherwise trigger a redraw of the cells whose *text*
+    // needs to flip ft<->m — force it explicitly.
+    bool unitsChanged = (gImperialUnits != navCache.imperialUnits);
 
     // Determine which elements changed — evaluate all before updating cache
     bool statusChanged  = (wifiDispFlags          != navCache.wifiDispFlags
@@ -561,10 +591,11 @@ void showNav(const NavPacket& pkt) {
                         || pkt.gps_antenna       != navCache.gpsAntenna
                         || battLevel             != navCache.battLevel);
     bool brgChanged     = (bearingInt != navCache.bearingInt || hasHome != navCache.hasHome || trueHdg != navCache.trueHeading);
-    bool rngChanged     = (distCm != navCache.distCm        || hasHome != navCache.hasHome);
+    bool rngChanged     = (distCm != navCache.distCm        || hasHome != navCache.hasHome || unitsChanged);
     bool hdgChanged     = (headingInt != navCache.headingInt || trueHdg != navCache.trueHeading);
-    bool spdChanged     = (speedDisp != navCache.speedDisplay || gpsSpd != navCache.gpsSpeed);
+    bool spdChanged     = (speedDisp != navCache.speedDisplay || gpsSpd != navCache.gpsSpeed || unitsChanged);
     bool logChanged     = (logLevel != navCache.logLevel);
+    bool depthChanged   = (depthCm != navCache.depthCm || unitsChanged);
 
     // Redraw only what changed (opaque text background overwrites old content)
     if (statusChanged)  drawStatusBar(pkt);
@@ -573,6 +604,7 @@ void showNav(const NavPacket& pkt) {
     if (hdgChanged)     drawHeading(pkt);
     if (spdChanged)     drawSpeed(pkt);
     if (logChanged)     drawLogIndicator(pkt);
+    if (depthChanged)   drawDepth(pkt);
 
     // Update cache
     navCache.wifiDispFlags  = wifiDispFlags;
@@ -589,6 +621,8 @@ void showNav(const NavPacket& pkt) {
     navCache.speedDisplay  = speedDisp;
     navCache.gpsSpeed      = gpsSpd;
     navCache.logLevel      = logLevel;
+    navCache.depthCm       = depthCm;
+    navCache.imperialUnits = gImperialUnits;
 #endif // DISPLAY_FULL_REDRAW
 }
 
@@ -855,7 +889,7 @@ void tickRandomTextTest() {
 // Layout (320×240):
 //   y= 0  "NAV DEVICE"          cyan, size 2
 //   y=22  horizontal separator  cyan
-//   y=28..118  5 status rows    label + dots + ok/FAIL, size 2
+//   y=28..136  6 status rows    label + dots + ok/FAIL, size 2
 // ===========================================================================
 void showBootStatus(uint8_t boot_flags) {
     if (!tftReady) return;
@@ -874,6 +908,7 @@ void showBootStatus(uint8_t boot_flags) {
         { "Mag cal",   (bool)(boot_flags & 0x04) },
         { "Gyro cal",  (bool)(boot_flags & 0x08) },
         { "Accel cal", (bool)(boot_flags & 0x10) },
+        { "Depth",     (bool)(boot_flags & BOOT_DEPTH_OK) },
     };
 
     int y = 28;

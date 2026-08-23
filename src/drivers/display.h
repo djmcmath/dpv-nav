@@ -40,6 +40,12 @@ void fillRect(int x, int y, int w, int h, uint16_t color);
 // Draw a horizontal line.
 void drawHLine(int x, int y, int w, uint16_t color);
 
+// Select ft/imperial vs m/metric formatting for distance, speed, and depth
+// readouts on the nav screen. Call whenever the runtime Units setting
+// changes (and once at startup) — replaces the old compile-time
+// DISPLAY_UNITS_IMPERIAL macro, which never actually reached these draws.
+void setImperialUnits(bool imperial);
+
 // Draw the full navigation screen to canvas and flush to display.
 // Status bar + 2x2 grid: bearing, range, heading, speed.
 void showNav(const NavPacket& pkt);

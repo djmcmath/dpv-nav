@@ -66,15 +66,16 @@ MENU
 │   ├── Mounted    — bin-aware magnetometer calibration, device on DPV (corrects DPV mag signature)
 │   ├── Hdg cal    — Fourier heading calibration: guided 12-point collection, then offline fit + upload
 │   └── Speed cal  — interactive flow-meter k-factor calibration (swim a known distance)
-├── INPUT
-│   ├── GPS Pos    — toggle GPS position on/off (shows current state)
-│   ├── GPS Spd    — toggle GPS speed on/off
+├── CONFIG (aka INPUT)
+│   ├── GPS        — toggle GPS position + speed on/off (shows current state)
 │   ├── WiFi       — toggle WiFi on/off
-│   └── Logging    — cycle log level: off / low / high
+│   ├── Log        — cycle log level: off / low / high
+│   ├── Water      — toggle salt/fresh water density for depth calc (see Depth Sensor below)
+│   └── Link acct  — begin device-auth cloud account link
 └── DISPLAY
     ├── Mode       — toggle debug vs navigate display
     ├── Spd/ETA    — toggle speed vs ETA readout
-    ├── Units      — toggle meters vs feet
+    ├── Units      — toggle meters vs feet (applies to distance, speed, and depth)
     └── Heading    — toggle magnetic vs true heading
 ```
 
@@ -103,7 +104,7 @@ BTN1: next   BTN2: confirm
 
 Waypoints are managed via the web interface (see **Setting Waypoints** below).
 
-All toggle states (GPS Pos, GPS Spd, WiFi, Op Mode, Log level, and all Display settings) are saved to NVS immediately on change and restored on next boot.
+All toggle states (GPS, WiFi, Water, Op Mode, Log level, and all Display settings) are saved to NVS immediately on change and restored on next boot.
 
 ### Fourier Heading Calibration (CAL > Hdg cal)
 
@@ -229,6 +230,19 @@ The display returns to normal navigation automatically when all required bins tu
 
 **Op Mode (Dive/Surface):** The device boots in the **last saved mode** (surface mode on first boot). Before entering the water, toggle to **dive mode** via NAV > Op Mode — this disables GPS processing and turns off the WiFi radio, and the selection is saved to NVS immediately. On surfacing, toggle back to surface mode to re-enable both.
 
+**Automatic depth trigger:** if a depth sensor is installed (see **Depth Sensor** below), Op Mode also switches itself — no button press needed. Crossing ~1 ft (0.3 m) depth engages dive mode immediately (radios off fast). Returning to the surface reverts to surface mode automatically, but only after staying shallower than ~0.5 ft for 30 seconds straight, so wave chop at the surface doesn't flap GPS/WiFi on and off. The manual menu toggle still works, but on a board with a depth sensor the automatic trigger can override it on the next check (e.g. forcing DIVE on the bench with no water reverts to SURFACE after ~30 s).
+
+## Depth Sensor
+
+An optional BlueRobotics Bar30 (MS5837-30BA) connects to the nav board's J3 header for live depth + water temperature. It's fully optional — boards without one work exactly as before.
+
+- **Detection:** probed at boot; the nav device boot status screen shows a `Depth .. ok` or `.. FAIL` row like the other subsystems.
+- **Zeroing:** the surface pressure is captured automatically a moment after boot — power the unit on in air, not already submerged.
+- **Water density:** CONFIG > Water toggles salt (default) vs fresh water, which affects the pressure→depth conversion.
+- **Display:** when present, depth is shown in small text on the bottom row of the nav screen, in the units selected by DISPLAY > Units.
+- **Logging:** depth (m) and water temperature (°C) are recorded in every log level's CSV output.
+- **Dive trigger:** see **Automatic depth trigger** above.
+
 ## Display Modes
 
 The display mode can be toggled at runtime via the **DISPLAY > Mode** menu item (or set at compile time via `DISPLAY_MODE` in [src/config.h](../src/config.h)).
@@ -331,9 +345,15 @@ Key settings in [src/config.h](../src/config.h):
 | `FLOW_K_FACTOR` | 1.0 | Flow sensor pulses per L/min — updated automatically by Speed cal |
 | `FLOW_CROSS_SECTION_M2` | 0.002 | Intake cross-section area in m² — set once to match DPV geometry |
 | `DISPLAY_MODE` | 0 | Display mode: 0 = Navigation, 1 = Debug |
-| `DISPLAY_UNITS_IMPERIAL` | 0 | Units: 0 = metric (m, m/min), 1 = imperial (ft, ft/min) |
 | `ENABLE_DEBUG_PACKET` | 0 | Nav device sends DebugPacket: 0 = off, 1 = on |
 | `NVS_POS_SAVE_INTERVAL_MS` | 30000 | How often estimated position is written to NVS (ms) |
+| `WATER_DENSITY_FRESH_KG_M3` / `WATER_DENSITY_SALT_KG_M3` | 997 / 1025 | Water density for depth calc — selected at runtime via DISPLAY > Water |
+| `DEPTH_DIVE_TRIGGER_M` | 0.3 | Depth (m) that auto-triggers dive mode (GPS+WiFi off) |
+| `DEPTH_SURFACE_REVERT_M` / `DEPTH_SURFACE_REVERT_DWELL_S` | 0.15 / 30 | Depth + dwell time to auto-revert to surface mode |
+
+Units (metric m/m·min⁻¹ vs imperial ft/ft·min⁻¹) are a runtime toggle —
+DISPLAY > Units — not a compile-time setting; it governs distance, speed,
+and depth together.
 
 ## Troubleshooting
 

@@ -22,7 +22,7 @@ static uint32_t lastActivityMs = 0;          // for idle timeout
 
 static SendCmdFn gSendCmd = nullptr;
 
-static bool gDiveMode = false;  // Op mode toggle state (display-side tracking)
+static bool gDiveMode = false;  // Dive/surface mode, synced from NavPacket flags2 (updateNavState)
 static uint8_t gLogLevel = 0;  // Log level tracking (0=OFF, 1=LOW, 2=HIGH)
 static bool gSpeedCalPending        = false;
 static bool gHdgCalPending          = false;
@@ -34,6 +34,7 @@ static bool gCloudLinkPending       = false;
 // Nav-device toggle states (updated from NavPacket flags)
 static bool gGpsEnabled  = true;
 static bool gWifiEnabled = true;
+static bool gSaltWater   = true;
 
 static DisplaySettings gSettings = {
     .debugMode   = false,
@@ -122,17 +123,19 @@ static void loadDefaults() {
     // CONFIG submenu (index 3)
     auto& inp = submenus[3];
     strncpy(inp.title, "Config", MENU_LABEL_LEN);
-    inp.count = 5;
+    inp.count = 6;
     strncpy(inp.items[0].label, "GPS", MENU_LABEL_LEN);
     inp.items[0].action = Action::INPUT_GPS; inp.items[0].submenuIdx = -1;
     strncpy(inp.items[1].label, "WiFi", MENU_LABEL_LEN);
     inp.items[1].action = Action::INPUT_WIFI; inp.items[1].submenuIdx = -1;
     strncpy(inp.items[2].label, "Log", MENU_LABEL_LEN);
     inp.items[2].action = Action::INPUT_LOG_CYCLE; inp.items[2].submenuIdx = -1;
-    strncpy(inp.items[3].label, "Link acct", MENU_LABEL_LEN);
-    inp.items[3].action = Action::CLOUD_LINK; inp.items[3].submenuIdx = -1;
-    strncpy(inp.items[4].label, "..", MENU_LABEL_LEN);
-    inp.items[4].action = Action::NONE; inp.items[4].submenuIdx = -1;
+    strncpy(inp.items[3].label, "Water", MENU_LABEL_LEN);
+    inp.items[3].action = Action::INPUT_WATER; inp.items[3].submenuIdx = -1;
+    strncpy(inp.items[4].label, "Link acct", MENU_LABEL_LEN);
+    inp.items[4].action = Action::CLOUD_LINK; inp.items[4].submenuIdx = -1;
+    strncpy(inp.items[5].label, "..", MENU_LABEL_LEN);
+    inp.items[5].action = Action::NONE; inp.items[5].submenuIdx = -1;
 
     // DISPLAY submenu (index 4)
     auto& dsp = submenus[4];
@@ -240,6 +243,9 @@ static void getDisplayLabel(const MenuItem& item, char* buf, size_t bufLen) {
         case Action::INPUT_LOG_CYCLE:
             suffix = gLogLevel == 0 ? "OFF" : (gLogLevel == 1 ? "LOW" : "HI");
             break;
+        case Action::INPUT_WATER:
+            suffix = gSaltWater ? "SALT" : "FRESH";
+            break;
         case Action::DISP_MODE:
             suffix = gSettings.debugMode ? "DBG" : "NAV";
             break;
@@ -321,6 +327,10 @@ static void executeAction(Action act) {
             if (gSendCmd) gSendCmd(DisplayCmd::CYCLE_LOG_LEVEL);
             Serial.println("[MENU] CYCLE_LOG_LEVEL sent");
             break;
+        case Action::INPUT_WATER:
+            if (gSendCmd) gSendCmd(DisplayCmd::TOGGLE_WATER_DENSITY);
+            Serial.println("[MENU] TOGGLE_WATER_DENSITY");
+            break;
         // Local display settings
         case Action::DISP_MODE:
             gSettings.debugMode = !gSettings.debugMode;
@@ -343,9 +353,11 @@ static void executeAction(Action act) {
             nvs_disp::save({gSettings.debugMode, gSettings.showETA, gSettings.imperial, gSettings.trueHeading});
             break;
         case Action::NAV_OP_MODE:
-            gDiveMode = !gDiveMode;
+            // Not optimistically toggled locally — dive mode can now also be
+            // triggered automatically by depth, so gDiveMode is only ever
+            // updated from the nav device's NavPacket (see updateNavState()).
             if (gSendCmd) gSendCmd(DisplayCmd::TOGGLE_OP_MODE);
-            Serial.print("[MENU] Op Mode: "); Serial.println(gDiveMode ? "DIVE" : "SURFACE");
+            Serial.println("[MENU] TOGGLE_OP_MODE sent");
             break;
         case Action::POWER_OFF:
             gPowerOffPending = true;
@@ -450,6 +462,7 @@ bool select() {
                      item.action == Action::INPUT_GPS ||
                      item.action == Action::INPUT_WIFI ||
                      item.action == Action::INPUT_LOG_CYCLE ||
+                     item.action == Action::INPUT_WATER ||
                      item.action == Action::NAV_OP_MODE);
 
     executeAction(item.action);
@@ -517,10 +530,12 @@ const DisplaySettings& settings() {
     return gSettings;
 }
 
-void updateNavState(uint8_t flags) {
+void updateNavState(uint8_t flags, uint8_t flags2) {
     gGpsEnabled    = (flags & FLAG_GPS_ENABLED)     != 0;
     gWifiEnabled   = (flags & FLAG_WIFI_ENABLED)    != 0;
     gLogLevel      = (flags & FLAG_LOG_LEVEL_MASK) >> FLAG_LOG_LEVEL_SHIFT;
+    gSaltWater     = (flags2 & FLAG2_SALT_WATER)    != 0;
+    gDiveMode      = (flags2 & FLAG2_DIVE_MODE)     != 0;
 }
 
 bool isPendingSpeedCal() {

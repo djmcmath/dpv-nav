@@ -16,6 +16,7 @@ struct State {
     uint8_t log_level;  // Logging level (0=OFF, 1=LOW, 2=HIGH)
     float   pos_x;      // Last estimated X position (meters east of baseline)
     float   pos_y;      // Last estimated Y position (meters north of baseline)
+    bool    salt_water; // Water density for depth calc (true=salt, false=fresh)
 };
 
 // Load from NVS. Returns factory defaults if namespace is uninitialized.

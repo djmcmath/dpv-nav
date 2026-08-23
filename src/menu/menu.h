@@ -43,6 +43,7 @@ enum class Action : uint8_t {
     NAV_SELECT_WAYPOINT  = 19,  // open waypoint selection UI (navigate TO a waypoint)
     NAV_ARRIVE_WAYPOINT  = 20,  // open waypoint arrival UI (snap position TO a waypoint)
     CLOUD_LINK           = 21,  // begin device-auth cloud account link (RFC 8628)
+    INPUT_WATER          = 22,  // toggle salt/fresh water density (depth calc)
 };
 
 // ---------------------------------------------------------------------------
@@ -113,9 +114,9 @@ void forceRedraw();
 // Access current display settings (for use by display_main rendering logic).
 const DisplaySettings& settings();
 
-// Update nav-device toggle states from NavPacket flags.
+// Update nav-device toggle states from NavPacket flags/flags2.
 // Call whenever a NavPacket is received so menu labels stay in sync.
-void updateNavState(uint8_t flags);
+void updateNavState(uint8_t flags, uint8_t flags2);
 
 // Returns true if the user just selected "Speed cal" and the display device
 // should enter distance-selection mode.  Cleared by clearSpeedCalPending().

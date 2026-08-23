@@ -69,6 +69,7 @@ constexpr uint8_t BOOT_GYRO_CAL_OK  = 0x08;  // gyro calibration loaded from fla
 constexpr uint8_t BOOT_ACCEL_CAL_OK = 0x10;  // accel calibration loaded from flash
 constexpr uint8_t BOOT_HDG_CAL_OK   = 0x20;  // Fourier heading calibration loaded from flash
 constexpr uint8_t BOOT_DEPTH_OK     = 0x40;  // depth sensor (MS5837) detected and probed OK
+constexpr uint8_t BOOT_DISPLAY_LINK_OK = 0x80;  // display echoed a boot ping back — Serial1 confirmed both ways
 
 // NavPacket.flags bit definitions
 constexpr uint8_t FLAG_TRUE_HEADING    = 0x01;  // 1 = true heading, 0 = magnetic
@@ -219,7 +220,7 @@ struct WaypointListPacket {
 // ---------------------------------------------------------------------------
 // Packet type discriminator (JSON "t" field)
 // ---------------------------------------------------------------------------
-enum class PacketType : uint8_t { UNKNOWN = 0, NAV, DEBUG, CAL_PROGRESS, WAYPOINT_LIST, CAL_CLOUD_RESULT, CLOUD_LINK_RESULT };
+enum class PacketType : uint8_t { UNKNOWN = 0, NAV, DEBUG, CAL_PROGRESS, WAYPOINT_LIST, CAL_CLOUD_RESULT, CLOUD_LINK_RESULT, BOOT_PING };
 
 PacketType identifyPacket(const char* buf, size_t len);
 
@@ -261,6 +262,7 @@ enum class DisplayCmd : uint8_t {
     CANCEL_LINK            = 34, // cancel an in-progress account-link poll (BTN2 during wait)
     FINISH_BASELINE_COLLECTION = 35, // diver declares baseline collection done -> dump CSV, upload for grading
     TOGGLE_WATER_DENSITY   = 36, // toggle salt/fresh water density used for depth calculation
+    LINK_HELLO             = 37, // reply to a BOOT_PING — proves the display->nav direction is alive
 };
 
 // ---------------------------------------------------------------------------
@@ -276,6 +278,12 @@ enum class DisplayCmd : uint8_t {
 
 size_t navPacketToBytes(const NavPacket& pkt, char* buf, size_t bufLen);
 bool   bytesToNavPacket(const char* buf, size_t len, NavPacket& out);
+
+// Boot-time display-link round-trip check: nav sends this repeatedly for a
+// few seconds during self-test; display replies with DisplayCmd::LINK_HELLO
+// the instant it sees one. No payload — identifyPacket() on the "t" tag is
+// all a receiver needs.
+size_t bootPingToBytes(char* buf, size_t bufLen);
 
 size_t calProgressPacketToBytes(const CalProgressPacket& pkt, char* buf, size_t bufLen);
 bool   bytesToCalProgressPacket(const char* buf, size_t len, CalProgressPacket& out);

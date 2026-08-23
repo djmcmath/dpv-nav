@@ -44,9 +44,33 @@ bool init() {
   // After this the module emits $PGTOP,11,x where x: 1=error, 2=internal, 3=active external.
   adaGps.sendCommand(PGCMD_ANTENNA);
 
-  initialized = true;
-  Serial.println("GPS: initialized on Serial2 (9600 baud)");
-  return true;
+  // Connectivity check: a live module emits checksummed NMEA sentences at
+  // 1 Hz even with no satellite fix (GPGSA/GPGSV keep arriving fix-less).
+  // Wait for at least one to actually parse before declaring success --
+  // previously this returned true unconditionally, so a disconnected or
+  // dead GPS module looked identical to a working one until someone
+  // noticed a stale/missing fix mid-dive-planning.
+  constexpr uint32_t CONNECT_TIMEOUT_MS = 2500;
+  uint32_t start = millis();
+  bool sawValidSentence = false;
+  while (millis() - start < CONNECT_TIMEOUT_MS) {
+    while (Serial2.available()) {
+      adaGps.read();
+      if (adaGps.newNMEAreceived() && adaGps.parse(adaGps.lastNMEA())) {
+        sawValidSentence = true;
+      }
+    }
+    if (sawValidSentence) break;
+    delay(5);
+  }
+
+  initialized = sawValidSentence;
+  if (sawValidSentence) {
+    Serial.println("GPS: initialized on Serial2 (9600 baud)");
+  } else {
+    Serial.println("GPS: no valid NMEA sentence received in 2.5s -- module not responding");
+  }
+  return sawValidSentence;
 }
 
 void setEnabled(bool enable) {

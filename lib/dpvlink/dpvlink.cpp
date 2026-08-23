@@ -21,6 +21,7 @@ PacketType identifyPacket(const char* buf, size_t len) {
     if (t[0] == 'W') return PacketType::WAYPOINT_LIST;
     if (t[0] == 'R') return PacketType::CAL_CLOUD_RESULT;
     if (t[0] == 'L') return PacketType::CLOUD_LINK_RESULT;
+    if (t[0] == 'P') return PacketType::BOOT_PING;
     // Backward compat: packets without "t" are assumed NavPacket
     if (doc["hdg"].is<float>()) return PacketType::NAV;
     return PacketType::UNKNOWN;
@@ -118,6 +119,19 @@ bool bytesToNavPacket(const char* buf, size_t len, NavPacket& out) {
     out.depth_m              = doc["dp"]  | 0.0f;
     out.water_temp_c         = doc["wt"]  | 0.0f;
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Boot-time display-link round-trip check
+// ---------------------------------------------------------------------------
+size_t bootPingToBytes(char* buf, size_t bufLen) {
+    JsonDocument doc;
+    doc["t"] = "P";
+    size_t n = serializeJson(doc, buf, bufLen - 1);
+    if (n == 0 || n >= bufLen - 1) return 0;
+    buf[n]     = '\n';
+    buf[n + 1] = '\0';
+    return n + 1;
 }
 
 // ---------------------------------------------------------------------------

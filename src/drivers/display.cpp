@@ -903,11 +903,12 @@ void showBootStatus(uint8_t boot_flags) {
     tft.drawFastHLine(0, 22, SCREEN_WIDTH, COLOR_CYAN);
 
     struct { const char* label; bool ok; } items[] = {
-        { "IMU",       (bool)(boot_flags & 0x01) },
-        { "GPS",       (bool)(boot_flags & 0x02) },
-        { "Mag cal",   (bool)(boot_flags & 0x04) },
-        { "Gyro cal",  (bool)(boot_flags & 0x08) },
-        { "Accel cal", (bool)(boot_flags & 0x10) },
+        { "IMU",       (bool)(boot_flags & BOOT_IMU_OK) },
+        { "GPS",       (bool)(boot_flags & BOOT_GPS_OK) },
+        { "Link ack",  (bool)(boot_flags & BOOT_DISPLAY_LINK_OK) },
+        { "Mag cal",   (bool)(boot_flags & BOOT_MAG_CAL_OK) },
+        { "Gyro cal",  (bool)(boot_flags & BOOT_GYRO_CAL_OK) },
+        { "Accel cal", (bool)(boot_flags & BOOT_ACCEL_CAL_OK) },
         { "Depth",     (bool)(boot_flags & BOOT_DEPTH_OK) },
     };
 

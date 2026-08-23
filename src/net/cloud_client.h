@@ -127,9 +127,12 @@ bool downloadUpload(const String& uploadId, const char* outputPath, String& erro
 // lost response is always safe.
 bool confirmInstalled(const String& calibrationId, String& errorOut);
 
-// Uploads filePath's current bytes as an archival backup under `kind`
-// ("accel_cal_backup" | "gyro_cal_backup" | "speed_cal_backup"). A 409
-// (identical bytes already backed up) counts as success -- same dedupe
+// Uploads filePath's current bytes under `kind`. Originally written for the
+// archival cal-backup kinds ("accel_cal_backup" | "gyro_cal_backup" |
+// "speed_cal_backup"), but the endpoint underneath is generic -- the local
+// web UI's dive-log upload panel (web_server.cpp) reuses this same function
+// with kind="dive_log" rather than duplicating the HTTP plumbing. A 409
+// (identical bytes already uploaded) counts as success -- same dedupe
 // tradeoff runCalibrationUpload's raw-CSV step already accepts.
 bool uploadBackup(const char* kind, const char* filePath, String& errorOut);
 

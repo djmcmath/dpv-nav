@@ -1,6 +1,7 @@
 #include "web_server.h"
 #include "wifi_manager.h"
 #include "cal_sync.h"
+#include "cloud_client.h"
 #include "../util/waypoints.h"
 #include <ArduinoJson.h>
 #include <WebServer.h>
@@ -71,6 +72,17 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
   .calsync .label { font-size: .85rem; color: #aaa; margin-top: .6rem; }
   #calsyncstatus { font-size: .9rem; color: #aaa; margin: .5rem 0; }
   #calsyncaction { font-size: .9rem; color: #72efdd; margin-top: .3rem; min-height: 1.2em; }
+  .divelog { margin-top: 1rem; padding: 1rem; background: #16213e; border-radius: 8px; }
+  .divelog button { background: #4cc9f0; color: #1a1a2e; border: none; padding: .3rem .7rem;
+    border-radius: 4px; cursor: pointer; font-weight: bold; margin: 0 .4rem .4rem 0; font-size: .85rem; }
+  .divelog button:hover { background: #72efdd; }
+  .divelog button:disabled { background: #333; color: #777; cursor: not-allowed; }
+  #cloudstatus { font-size: .9rem; color: #aaa; margin-bottom: .6rem; }
+  .divelog table { width: 100%; border-collapse: collapse; margin: .5rem 0; }
+  .divelog th, .divelog td { text-align: left; padding: .4rem .5rem; border-bottom: 1px solid #333; font-size: .9rem; }
+  .divelog th { color: #4cc9f0; }
+  .divelog .sel { display: none; width: 1.5rem; }
+  .divelog.selecting .sel { display: table-cell; }
   .wifisec { margin-top: 1.5rem; padding: 1rem; background: #16213e; border-radius: 8px; }
   .wifisec .row { margin: .4rem 0; }
   .wifisec label { display: inline-block; width: 3.5rem; }
@@ -124,6 +136,19 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
     <button onclick="restoreCal('speed')">Speed</button>
   </div>
 </div>
+<div class="divelog" id="divelogpanel">
+  <b>Dive Log Upload</b>
+  <div id="cloudstatus">Checking...</div>
+  <table>
+    <thead><tr><th class="sel"><input type="checkbox" id="dlselall" onchange="toggleSelectAll()"></th><th>File</th><th>Size</th><th></th><th></th></tr></thead>
+    <tbody id="dlbody"><tr><td colspan="5">No dive logs</td></tr></tbody>
+  </table>
+  <div>
+    <button id="dlstart" onclick="toggleDiveLogSelect()">Upload Dive Logs</button>
+    <button id="dlupload" onclick="uploadSelectedLogs()" style="display:none">Upload Selected</button>
+    <button id="dlcancel" onclick="toggleDiveLogSelect()" style="display:none">Cancel</button>
+  </div>
+</div>
 <div class="waypoints">
   <b>Waypoints</b>
   <table>
@@ -160,6 +185,7 @@ async function load() {
   ]);
   document.getElementById('fsinfo').textContent =
     `Storage: ${fmt(info.used)} / ${fmt(info.total)} used (${fmt(info.free)} free)`;
+  renderDiveLogs(files.filter(f => f.name.startsWith('/logs/') && f.name.endsWith('.csv')));
   const tb = document.getElementById('files');
   if (!files.length) { tb.innerHTML = '<tr><td colspan="4">No files</td></tr>'; return; }
   tb.innerHTML = files.map(f =>
@@ -333,10 +359,68 @@ async function restoreCal(kind) {
   el.textContent = await r.text();
   loadCalSyncStatus();
 }
+async function loadCloudStatus() {
+  const el = document.getElementById('cloudstatus');
+  try {
+    const s = await fetch('/api/cloud-status').then(r => r.json());
+    el.textContent = s.authorized
+      ? 'Linked to Dive Map account.'
+      : 'Not linked — link this device from the CAL menu on the unit first.';
+    document.getElementById('dlstart').disabled = !s.authorized;
+  } catch (e) { el.textContent = 'Could not check link status.'; }
+}
+function renderDiveLogs(files) {
+  const tb = document.getElementById('dlbody');
+  if (!files.length) { tb.innerHTML = '<tr><td colspan="5">No dive logs</td></tr>'; return; }
+  tb.innerHTML = files.map(f =>
+    `<tr data-name="${f.name}">
+      <td class="sel"><input type="checkbox" class="dlsel"></td>
+      <td>${f.name}</td>
+      <td>${fmt(f.size)}</td>
+      <td><a class="btn btn-dl" href="/api/download?file=${encodeURIComponent(f.name)}">Download</a></td>
+      <td class="dlstatus"></td>
+    </tr>`
+  ).join('');
+}
+function toggleSelectAll() {
+  const on = document.getElementById('dlselall').checked;
+  document.querySelectorAll('#dlbody .dlsel').forEach(cb => cb.checked = on);
+}
+function toggleDiveLogSelect() {
+  const panel = document.getElementById('divelogpanel');
+  const selecting = !panel.classList.contains('selecting');
+  panel.classList.toggle('selecting', selecting);
+  document.getElementById('dlstart').style.display  = selecting ? 'none' : '';
+  document.getElementById('dlupload').style.display = selecting ? '' : 'none';
+  document.getElementById('dlcancel').style.display = selecting ? '' : 'none';
+  document.getElementById('dlselall').checked = false;
+  document.querySelectorAll('#dlbody .dlsel').forEach(cb => cb.checked = false);
+  document.querySelectorAll('#dlbody .dlstatus').forEach(td => td.textContent = '');
+}
+async function uploadSelectedLogs() {
+  const rows = Array.from(document.querySelectorAll('#dlbody tr'))
+    .filter(tr => tr.querySelector('.dlsel') && tr.querySelector('.dlsel').checked);
+  if (!rows.length) { alert('Select at least one dive log to upload.'); return; }
+  document.getElementById('dlupload').disabled = true;
+  for (const tr of rows) {
+    const name = tr.dataset.name;
+    const status = tr.querySelector('.dlstatus');
+    status.textContent = 'Uploading...';
+    try {
+      const r = await fetch('/api/dive-logs/upload?file=' + encodeURIComponent(name), { method: 'POST' });
+      const text = await r.text();
+      status.textContent = r.ok ? 'Uploaded' : 'Failed: ' + text;
+    } catch (e) {
+      status.textContent = 'Failed: network error';
+    }
+  }
+  document.getElementById('dlupload').disabled = false;
+}
 load();
 loadWaypoints();
 loadWifi();
 loadCalSyncStatus();
+loadCloudStatus();
 </script>
 </body>
 </html>
@@ -629,6 +713,40 @@ static void handleWifiStatus() {
     server.send(200, "application/json", json);
 }
 
+// --------------- dive-log upload ---------------
+// Diver-initiated from the "Upload Dive Logs" panel: one blocking call per
+// selected file, same tradeoff already accepted for the other cloud_client
+// calls in this file (calibration sync).
+
+static void handleCloudStatus() {
+    String json = "{\"authorized\":";
+    json += cloud::isAuthorized() ? "true" : "false";
+    json += "}";
+    server.send(200, "application/json", json);
+}
+
+static void handleDiveLogUpload() {
+    if (!server.hasArg("file")) {
+        server.send(400, "text/plain", "Missing 'file' parameter");
+        return;
+    }
+    String path = server.arg("file");
+    if (!path.startsWith("/logs/") || path.indexOf("..") >= 0) {
+        server.send(400, "text/plain", "Invalid file path");
+        return;
+    }
+    if (!LittleFS.exists(path)) {
+        server.send(404, "text/plain", "File not found");
+        return;
+    }
+    String err;
+    if (!cloud::uploadBackup("dive_log", path.c_str(), err)) {
+        server.send(502, "text/plain", err);
+        return;
+    }
+    server.send(200, "text/plain", "Uploaded");
+}
+
 // --------------- public API ---------------
 
 void init() {
@@ -675,6 +793,8 @@ void init() {
     server.on("/api/wifi-networks", HTTP_POST,   handleAddWifiNetwork);
     server.on("/api/wifi-networks", HTTP_DELETE, handleRemoveWifiNetwork);
     server.on("/api/wifi-status",   HTTP_GET,    handleWifiStatus);
+    server.on("/api/cloud-status",     HTTP_GET,  handleCloudStatus);
+    server.on("/api/dive-logs/upload", HTTP_POST, handleDiveLogUpload);
     server.onNotFound([]() {
         Serial.printf("[Web] 404: %s %s\n", server.method() == HTTP_GET ? "GET" : "POST",
                       server.uri().c_str());

@@ -126,6 +126,10 @@ static uint16_t gSpeedCalElapsedS    = 0;
 // ---- Boot status flags (set during setup, sent in every NavPacket) ---------
 static uint8_t gBootFlags = 0;
 
+// Set true the instant a DisplayCmd::LINK_HELLO arrives, proving the
+// display->nav direction of Serial1 is alive (see boot self-test in setup()).
+static bool gDisplayLinkAckReceived = false;
+
 // ---- Toggle states (shared between command handler and sendNavPacket) ------
 static bool gGpsEnabled  = DEFAULT_USE_GPS_POSITION;  // GPS usage (position + speed)
 static bool gWifiEnabled = true;   // WiFi radio enabled (surface mode default)
@@ -206,33 +210,88 @@ void setup() {
 
     sysState = SystemState::SELF_TEST;
 
-    if (!imu::init(imuConfig, accelGyroMap, magMap)) {
-        Serial.println("ERROR: IMU init failed");
-        sysState = SystemState::ERROR;
-    } else {
-        Serial.println("IMU init OK");
-        gBootFlags |= BOOT_IMU_OK;
+    // --- Boot self-test -----------------------------------------------------
+    // Every required peripheral is probed unconditionally, regardless of
+    // whether an earlier one failed, so one boot surfaces every hardware
+    // fault at once. Previously GPS/depth checks lived inside the IMU-success
+    // branch, so a board with both a bad IMU wire and a bad GPS wire would
+    // report only the IMU failure -- you'd fix that, reboot, and *then*
+    // discover GPS was broken too. IMU, GPS, and the display link are
+    // required (any failure halts, same as IMU always has); depth is
+    // optional and never blocks boot.
+    struct BootCheck { const char* name; bool ok; };
+    BootCheck checks[3];
+    int checkCount = 0;
 
+    bool imuOk = imu::init(imuConfig, accelGyroMap, magMap);
+    checks[checkCount++] = { "IMU", imuOk };
+    if (imuOk) {
+        gBootFlags |= BOOT_IMU_OK;
         // Load or run calibration (sets BOOT_*_CAL_OK flags)
         loadCalibration();
+    }
 
-        // GPS
-        if (gps::init()) {
-            Serial.println("GPS init OK");
-            gBootFlags |= BOOT_GPS_OK;
-        } else {
-            Serial.println("WARNING: GPS init failed");
+    bool gpsOk = gps::init();
+    checks[checkCount++] = { "GPS", gpsOk };
+    if (gpsOk) gBootFlags |= BOOT_GPS_OK;
+    gps::setRawNmeaDebug(GPS_RAW_NMEA_ENABLE);
+
+    // Depth sensor (BlueRobotics Bar30 / MS5837-30BA) — optional, J3 connector.
+    // Not in `checks`: absence isn't a failure, units without one run fine
+    // without depth-triggered auto dive-mode.
+    bool depthOk = depth::init();
+    if (depthOk) {
+        Serial.println("Depth sensor init OK");
+        gBootFlags |= BOOT_DEPTH_OK;
+    } else {
+        Serial.println("Depth sensor not detected (J3 unpopulated?) — skipping");
+    }
+
+    // Display-link round-trip check: ping repeatedly for a few seconds and
+    // wait for DisplayCmd::LINK_HELLO to come back (set by handleDisplayCmd()
+    // below). This proves BOTH directions of Serial1 in one shot -- it's
+    // exactly the display->nav direction that went silently dead on a real
+    // unit once already (bad solder joint), with nav->display looking
+    // completely normal the whole time.
+    {
+        constexpr uint32_t DISPLAY_LINK_TIMEOUT_MS  = 3000;
+        constexpr uint32_t DISPLAY_PING_INTERVAL_MS = 200;
+        uint32_t start = millis();
+        uint32_t lastPingMs = 0;
+        while (millis() - start < DISPLAY_LINK_TIMEOUT_MS && !gDisplayLinkAckReceived) {
+            uint32_t now = millis();
+            if (now - lastPingMs >= DISPLAY_PING_INTERVAL_MS) {
+                lastPingMs = now;
+                char pingBuf[32];
+                size_t n = bootPingToBytes(pingBuf, sizeof(pingBuf));
+                if (n > 0) Serial1.write(pingBuf, n);
+            }
+            handleDisplayCmd();
         }
-        gps::setRawNmeaDebug(GPS_RAW_NMEA_ENABLE);
+    }
+    checks[checkCount++] = { "Display link", gDisplayLinkAckReceived };
+    if (gDisplayLinkAckReceived) gBootFlags |= BOOT_DISPLAY_LINK_OK;
 
-        // Depth sensor (BlueRobotics Bar30 / MS5837-30BA) — optional, J3 connector
-        if (depth::init()) {
-            Serial.println("Depth sensor init OK");
-            gBootFlags |= BOOT_DEPTH_OK;
-        } else {
-            Serial.println("Depth sensor not detected (J3 unpopulated?) — skipping");
-        }
+    // --- Boot summary: every result, not just the first failure -------------
+    Serial.println("=== Boot self-test ===");
+    bool anyRequiredFailed = false;
+    for (int i = 0; i < checkCount; i++) {
+        Serial.printf("  %-14s %s\n", checks[i].name, checks[i].ok ? "OK" : "FAIL");
+        if (!checks[i].ok) anyRequiredFailed = true;
+    }
+    Serial.printf("  %-14s %s\n", "Depth", depthOk ? "OK" : "absent (optional)");
+    Serial.println("=======================");
 
+    // Broadcast the result immediately, before any halt decision, so the
+    // display shows the full ok/FAIL summary even when we're about to halt --
+    // previously a halt meant total silence to the display, indistinguishable
+    // from the link itself being dead.
+    sendNavPacket(0, 0, 0, 0, 0, false, 0, 0, 0, 0, GpsFix{});
+
+    if (anyRequiredFailed) {
+        Serial.println("ERROR: one or more required systems failed self-test -- halting");
+        sysState = SystemState::ERROR;
+    } else {
         // Flow sensor
         {
             speed_cal::History hist = speed_cal::load();
@@ -314,6 +373,18 @@ void loop() {
     web::update();
 
     if (sysState == SystemState::ERROR) {
+        // Keep reporting the boot self-test summary instead of going fully
+        // silent -- a halted nav device used to be indistinguishable from a
+        // dead link or a crashed board. This keeps the display's ok/FAIL
+        // screen alive and refreshing so it's obvious nav is up and simply
+        // refusing to proceed, not that something else has also died.
+        static uint32_t lastErrorSendMs = 0;
+        uint32_t nowMs = millis();
+        if (nowMs - lastErrorSendMs >= 1000) {
+            lastErrorSendMs = nowMs;
+            sendNavPacket(0, 0, 0, 0, 0, false, 0, 0, 0, 0, GpsFix{});
+        }
+        handleDisplayCmd();
         delay(1);
         return;
     }
@@ -1687,6 +1758,14 @@ static void handleDisplayCmd() {
                     case DisplayCmd::CANCEL_LINK: {
                         Serial.println("[CLOUD_LINK] cancelled by diver");
                         cloud::cancelAuthorizePoll();
+                        break;
+                    }
+                    case DisplayCmd::LINK_HELLO: {
+                        // Reply to our own boot ping (see setup()) -- proves
+                        // display->nav is alive. Harmless if it arrives outside
+                        // the boot self-test window (e.g. a retried/duplicate
+                        // reply); just re-affirms the flag.
+                        gDisplayLinkAckReceived = true;
                         break;
                     }
                     case DisplayCmd::ARRIVE_WAYPOINT: {

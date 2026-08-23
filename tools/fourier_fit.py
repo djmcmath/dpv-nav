@@ -23,6 +23,15 @@ import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 
+# Minimum spare data points beyond the fitted parameters (2N+1). With a 12-point
+# check this caps the fit at 2 harmonics (5 params, 6 spare) rather than letting
+# it chase max-error down to 4 harmonics (9 params) and over-fit. Two harmonics is
+# also the classic compass-deviation model (A + B·sinθ + C·cosθ + D·sin2θ + E·cos2θ):
+# 1st harmonic = residual hard-iron/mounting, 2nd = soft-iron ellipticity. Higher
+# orders have no physical mechanism in a mag deviation. Denser sweeps (e.g. 24
+# points) still unlock 3–4 harmonics.
+MIN_DOF_MARGIN = 6
+
 
 def load_csv(path):
     with open(path, newline='') as f:
@@ -84,9 +93,28 @@ def main():
         fits[n] = dict(coeffs=coeffs, pred=pred, resid=resid, rms=rms, maxerr=maxerr)
         print(f"{n:>4}  {2*n+1:>6}  {rms:>7.2f}°  {maxerr:>7.2f}°")
 
-    best_n = next((n for n in range(1, 5) if fits[n]['maxerr'] < 3.0), 3)
+    # Cap harmonics by data: each harmonic costs 2 params (+1 DC). Fitting close
+    # to the point count nails the samples but oscillates wildly between them
+    # (over-fit) — a tiny RMS on N points is not evidence of a good curve. Require
+    # a comfortable margin of points per parameter so the fit generalizes to the
+    # sectors the 4-point check actually lands in.
+    n_pts = len(data)
+    max_n = max(1, min(4, (n_pts - 1 - MIN_DOF_MARGIN) // 2))
+    best_n = next((n for n in range(1, max_n + 1) if fits[n]['maxerr'] < 3.0), max_n)
     print(f"\nSelected: {best_n} harmonic(s)  "
           f"(RMS {fits[best_n]['rms']:.2f}°, max {fits[best_n]['maxerr']:.2f}°)")
+    if max_n < 4:
+        print(f"  (capped at {max_n} harmonic(s): only {n_pts} points — "
+              f"higher orders would over-fit)")
+
+    # Uneven angular coverage lets the fit swing in the gaps regardless of order.
+    gaps = np.diff(np.sort(np.concatenate([indicated_deg % 360, [indicated_deg.min() % 360 + 360]])))
+    max_gap = gaps.max()
+    if max_gap > 45.0:
+        print(f"  WARNING: largest gap between sampled headings is {max_gap:.0f}° "
+              f"(indicated frame).")
+        print(f"           The fit is unconstrained there — collect a point inside "
+              f"large gaps before trusting corrections in those sectors.")
 
     coeffs = fits[best_n]['coeffs']
     print(f"\nHarmonic amplitudes:")

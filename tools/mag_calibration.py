@@ -21,9 +21,29 @@ Theory:
 """
 
 import numpy as np
+import os
 import sys
 import json
 from scipy import linalg
+
+
+def warn_device_filename(output_file, expected):
+    """Warn loudly if the output filename won't be read by the firmware.
+
+    The nav device only ever loads fixed filenames from its filesystem root
+    (/mag_base.json, /mag_mount.json — see src/util/storage.h). A file uploaded
+    under any other name (e.g. mag_mounted.json) is silently ignored, and the
+    device keeps running its previous calibration. Guard against that footgun.
+    """
+    basename = os.path.basename(output_file)
+    if basename != expected:
+        print("\n" + "!"*60)
+        print(f"  WARNING: output '{basename}' is NOT the name the firmware reads.")
+        print(f"           The device only loads /{expected} from its root.")
+        print(f"           Upload this file AS /{expected}, or it will be ignored")
+        print(f"           and the previous (stale) calibration stays in effect.")
+        print("!"*60)
+
 
 def fit_ellipsoid_simple(X):
     """
@@ -699,8 +719,9 @@ def run_baseline(args):
 
     print("\n" + "="*60)
     save_json_calibration(output_file, bias, soft_iron)
+    warn_device_filename(output_file, "mag_base.json")
     print(f"\nNext steps:")
-    print(f"  1. Upload {output_file} to device as /calib/mag_base.json")
+    print(f"  1. Upload {output_file} to the device filesystem root as /mag_base.json")
     print(f"  2. Mount unit on scooter, run 'Mounted cal' from menu")
     print(f"  3. Download /mag_mounted_samples.csv, run:")
     print(f"     python mag_calibration.py --mode mounted --base {output_file} <mounted.csv>")
@@ -765,8 +786,9 @@ def run_mounted(args):
 
     print("\n" + "="*60)
     save_json_calibration(output_file, b_mount, M_mount)
+    warn_device_filename(output_file, "mag_mount.json")
     print(f"\nNext steps:")
-    print(f"  1. Upload {output_file} to device as /calib/mag_mount.json")
+    print(f"  1. Upload {output_file} to the device filesystem root as /mag_mount.json")
     print(f"  2. Reboot device — it will apply the full base+mount correction chain")
     print(f"     corrected = M_mount * (M_base * (raw - b_base) - b_mount)")
 

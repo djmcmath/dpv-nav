@@ -101,8 +101,8 @@ Both calibrations collect raw samples using a **bin-aware** approach: the screen
 2. Open menu (BTN1) → **CAL > Mounted**.
 3. Rotate the DPV through heading and tilt orientations. DPV operation is primarily horizontal so the grid only requires 3 elevation bands.
 4. Fill all required bins green, then export CSV (`/mag_mounted_samples.csv`) and run:
-   `python tools/mag_calibration.py mag_baseline_samples.csv mag_mounted_samples.csv`
-5. Upload the generated `mag_mount.json` to LittleFS.
+   `python tools/mag_calibration.py --mode mounted --base mag_base.json mag_mounted_samples.csv`
+5. Upload the generated `mag_mount.json` to LittleFS **under exactly that name** (`/mag_mount.json`). Do not pass `--output` with a different name unless you rename it on upload — the firmware only reads `/mag_mount.json` and silently ignores anything else. See the heading troubleshooting notes for why this bites.
 
 ### What each calibration corrects
 
@@ -251,6 +251,20 @@ headingDeg = headingRawDeg + correction(headingRawDeg)
 ### Recalibrating
 
 Run **CAL > Hdg cal** again, then redo the offline fit and upload the new `hdg_fourier.json`.
+
+### Troubleshooting: heading still off after a full calibration
+
+Real failure modes actually hit in the field, hardest-to-spot first. If the heading is wrong *after* baseline + mounted + Fourier, it is almost always one of these, not the mag math:
+
+1. **Checking in TRUE mode against a magnetic reference (or vice-versa).** *Symptom:* a near-constant offset of roughly the local declination (≈14.7° here) in **every** sector, with only a few degrees of per-sector variation on top. The nav device always computes TRUE heading; **DISPLAY > Heading** toggles TRUE/MAG on the display side ([display_main.cpp:237-244](../src/display_main.cpp#L237-L244)). A handheld compass reads MAGNETIC. When checking against a compass, set the display to **MAG**. This is the #1 cause of "everything is ~15° off."
+
+2. **Mounted correction uploaded under the wrong filename.** The firmware only ever loads `/mag_mount.json` ([storage.h:28](../src/util/storage.h#L28)). If you run the tool with `--output mag_mounted.json` (or any other name) and upload *that*, it is silently ignored — the **previous** mounted cal stays in effect and your fresh numbers never take. *Symptom:* the soft-iron ellipticity you meant to remove is still present (large residual 2nd harmonic). `mag_calibration.py` now prints a loud warning when the output name won't be read; heed it. Confirm on boot: `[STORAGE] mag_mount.json loaded`, with a `b_eff` that matches the new values.
+
+3. **Motor offset shifts the check but not the cal.** `/motor_cal.json`'s `heading_offset_deg` is added to the *displayed* heading **after** the Fourier correction ([nav_main.cpp:333](../src/nav_main.cpp#L333)), but the hdg-cal samples record `heading_raw_deg`, which is *before* it. So the motor offset is invisible to the fit and shows up as a constant bias in your check. Expect it, or zero it while collecting.
+
+4. **Fourier over-fit / coverage gaps.** With 12 points, `fourier_fit.py` caps at 2 harmonics on purpose — a tiny RMS at higher orders is over-fit, not accuracy. Because the deviation compresses the *indicated* scale, evenly-spaced targets can leave a large hole in the indicated domain (a ~50° gap near North is common); the fit is unconstrained there and worst in that sector. The tool warns when the largest gap exceeds 45°. Fill it by adding targets near the gap (see below).
+
+**Hand-collecting extra samples to fill a gap:** the new rows must be in the same frame as the existing ones — `heading_raw_deg`, i.e. **pre-Fourier, pre-motor magnetic**. To read that value off the nav screen: delete `hdg_fourier.json`, set `motor_cal.json` to `0`, reload cal, and put the display in **MAG** mode. Collect and append `actual,indicated` rows, refit, then restore both files. (Cleaner alternative: widen `kHdgCalTargets` in [display_main.cpp](../src/display_main.cpp#L68-L71) so the on-device flow gathers the extra points itself — no file juggling, guaranteed-consistent data.)
 
 ## Storage API
 

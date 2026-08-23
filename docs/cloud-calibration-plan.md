@@ -116,7 +116,31 @@ existing "DONE" screen and CSV save):
 
 - **CA/TLS story for the ESP32 client is undecided.** Needs a concrete plan (embedded
   root CA, or a smaller pinned cert) before Phase 1 (shared client) can be built —
-  flagging rather than picking one here.
+  flagging rather than picking one here. **Resolved by picking a pinned cert
+  (see below), which turned out to be the wrong call on its own.**
+- **Pinned root CA baked into firmware means every CA rotation needs a USB reflash
+  of every unit in the field — this bit us for real on 2026-08-22.** `cloud_client.cpp`
+  hardcodes `CLOUD_ROOT_CA_PEM` as a compile-time constant, and there's no OTA update
+  path (`ArduinoOTA`/`Update.begin()`) anywhere in this firmware — only LittleFS
+  *data* files (`menu.json`, `mag_base.json`, `hdg_fourier.json`, ...) can be pushed
+  via the existing web upload UI ([net/web_server.cpp](../src/net/web_server.cpp)),
+  not the firmware binary itself. When `divemap.diverdaniel.com`'s cert chain moved
+  to Let's Encrypt's new "Generation Y" root hierarchy after their 2026-05-13 default-profile
+  cutover, the pinned ISRG Root X1-only cert stopped validating and account-linking
+  silently hung on "Requesting code...". Fixed for now by pinning all three currently
+  live self-signed roots (YE, X2, X1) instead of just one, but that's a delay, not a
+  fix: the next Let's Encrypt root rotation hits every already-deployed unit the same
+  way, and the *only* remedy is finding it, plugging in a USB cable, and reflashing —
+  exactly the failure mode this project's own goal statement (units that "log in to
+  Dive Map on its own... as soon as it finds a connection") was trying to avoid.
+  **Real fix, not yet built:** move `CLOUD_ROOT_CA_PEM` out of compiled firmware into
+  a LittleFS file (e.g. `/cloud_ca.pem`), loaded at runtime the same way
+  `hdg_cal::load()` reads `/hdg_fourier.json`, with the compiled-in bundle kept only
+  as a first-boot default. A stale/soon-to-expire root could then be refreshed the
+  same way `mag_base.json` already is — upload a new file over the existing web UI,
+  no reflash, no USB — and would also let a still-linked unit self-update its own CA
+  file autonomously via the very cloud connection this plan is building, the first
+  time it successfully reaches the server after a new root ships server-side.
 - **Where the current bin-aware collector's source lives wasn't pinned down precisely**
   during this planning pass (CLAUDE.md and calibration-guide.md describe its behavior,
   but the source file wasn't conclusively located — likely `menu.cpp`/`display_main.cpp`/

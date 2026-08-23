@@ -14,13 +14,53 @@ namespace cloud {
 // TLS root CA
 // ---------------------------------------------------------------------------
 //
-// ISRG Root X1 (Let's Encrypt) -- divemap.diverdaniel.com's cert chain
-// terminates here. Fetched directly from
-// https://letsencrypt.org/certs/isrgrootx1.pem, not from the live chain
-// (which usually omits the self-signed root itself). rootCaConfigured()
-// below still fails closed (returns an error rather than falling back to
-// WiFiClientSecure::setInsecure()) if this is ever emptied out again.
+// divemap.diverdaniel.com's cert chain used to terminate directly at ISRG
+// Root X1. That stopped being true once Let's Encrypt's ACME default profile
+// cut over to the new "Generation Y" hierarchy on 2026-05-13: certs issued
+// after that (ours renewed 2026-08-11) chain leaf -> YE1 -> ISRG Root YE ->
+// ISRG Root X2 -> ISRG Root X1, cross-signed all the way down for compat
+// with trust stores that don't know about YE/X2 yet. See
+// https://letsencrypt.org/2025/11/24/gen-y-hierarchy.
+//
+// Pinning all three self-signed roots below (YE, X2, X1) rather than just X1
+// lets BearSSL terminate the chain walk at whichever one it reaches first --
+// two hops for the current cert instead of four -- and keeps this working
+// across Let's Encrypt's next couple of root transitions without a firmware
+// update each time. rootCaConfigured() below still fails closed (returns an
+// error rather than falling back to WiFiClientSecure::setInsecure()) if this
+// is ever emptied out.
+//
+// Self-signed PEMs fetched directly from:
+//   https://letsencrypt.org/certs/gen-y/root-ye.pem
+//   https://letsencrypt.org/certs/isrg-root-x2.pem
+//   https://letsencrypt.org/certs/isrgrootx1.pem
 static const char* CLOUD_ROOT_CA_PEM = R"EOF(
+-----BEGIN CERTIFICATE-----
+MIIB2TCCAWCgAwIBAgIRAKQCa6LvbHwg1AR+XmWmk4AwCgYIKoZIzj0EAwMwLjEL
+MAkGA1UEBhMCVVMxDTALBgNVBAoTBElTUkcxEDAOBgNVBAMTB1Jvb3QgWUUwHhcN
+MjUwOTAzMDAwMDAwWhcNNDUwOTAyMjM1OTU5WjAuMQswCQYDVQQGEwJVUzENMAsG
+A1UEChMESVNSRzEQMA4GA1UEAxMHUm9vdCBZRTB2MBAGByqGSM49AgEGBSuBBAAi
+A2IABDwS/6vhrcVqcbBo+wgdI3fwn9x7DNJJOY/lTOti0vkwuRN87RhEhTH17E7X
+yFjWsPYhIPt/wzOqxTd2b+4ZJNy9ID04YywF9U5zasDVyGSNErVNtz8uSGh5izW8
+7j77GaNCMEAwDgYDVR0PAQH/BAQDAgEGMA8GA1UdEwEB/wQFMAMBAf8wHQYDVR0O
+BBYEFKPIJlqOoUzQNWP8myPIOq5W809WMAoGCCqGSM49BAMDA2cAMGQCMHhMr8N9
+LdL1VQKs9BdV81r76eXRB6mtjuNjzk6/lBsPNToWLTDzGYgtQKO1jl63uAIwGV7m
+onyF377c+MM1oqVNs17sgu7F9YKZwgLmVbeOMDbKAXHtKMDLbiGllCcs8f47
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIICGzCCAaGgAwIBAgIQQdKd0XLq7qeAwSxs6S+HUjAKBggqhkjOPQQDAzBPMQsw
+CQYDVQQGEwJVUzEpMCcGA1UEChMgSW50ZXJuZXQgU2VjdXJpdHkgUmVzZWFyY2gg
+R3JvdXAxFTATBgNVBAMTDElTUkcgUm9vdCBYMjAeFw0yMDA5MDQwMDAwMDBaFw00
+MDA5MTcxNjAwMDBaME8xCzAJBgNVBAYTAlVTMSkwJwYDVQQKEyBJbnRlcm5ldCBT
+ZWN1cml0eSBSZXNlYXJjaCBHcm91cDEVMBMGA1UEAxMMSVNSRyBSb290IFgyMHYw
+EAYHKoZIzj0CAQYFK4EEACIDYgAEzZvVn4CDCuwJSvMWSj5cz3es3mcFDR0HttwW
++1qLFNvicWDEukWVEYmO6gbf9yoWHKS5xcUy4APgHoIYOIvXRdgKam7mAHf7AlF9
+ItgKbppbd9/w+kHsOdx1ymgHDB/qo0IwQDAOBgNVHQ8BAf8EBAMCAQYwDwYDVR0T
+AQH/BAUwAwEB/zAdBgNVHQ4EFgQUfEKWrt5LSDv6kviejM9ti6lyN5UwCgYIKoZI
+zj0EAwMDaAAwZQIwe3lORlCEwkSHRhtFcP9Ymd70/aTSVaYgLXTWNLxBo1BfASdW
+tL4ndQavEi51mI38AjEAi/V3bNTIZargCyzuFJ0nN6T5U6VR5CmD1/iQMVtCnwr1
+/q4AaOeMSQ+2b1tbFfLn
+-----END CERTIFICATE-----
 -----BEGIN CERTIFICATE-----
 MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw
 TzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2Vh

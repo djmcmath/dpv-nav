@@ -51,11 +51,6 @@ constexpr float DEFAULT_DECLINATION_DEG  = 14.7f;   // ~14.7°E for southern Ore
 #define DISPLAY_MODE 0
 #endif
 
-// Display units: 0 = metric (m, m/min), 1 = imperial (ft, ft/min)
-#ifndef DISPLAY_UNITS_IMPERIAL
-#define DISPLAY_UNITS_IMPERIAL 0
-#endif
-
 // Enable debug packet transmission from nav device (0 = off, 1 = on)
 #ifndef ENABLE_DEBUG_PACKET
 #define ENABLE_DEBUG_PACKET 0
@@ -240,6 +235,25 @@ constexpr float SPEED_CAL_MIN_RUN_S           = 30.0f;
 // EMA alpha for heading tracking during the speed cal run.
 // Low alpha = slow-moving reference that represents the "stable" course.
 constexpr float SPEED_CAL_HDG_EMA_ALPHA       = 0.02f;
+
+// ---------------------------------------------------------------------------
+// Depth sensor (BlueRobotics Bar30 / MS5837-30BA)
+// ---------------------------------------------------------------------------
+
+// Water density used to convert pressure -> depth. Selectable at runtime
+// via the CONFIG > Water menu toggle (see sensors/depth.h setSaltWater()).
+constexpr float WATER_DENSITY_FRESH_KG_M3 = 997.0f;
+constexpr float WATER_DENSITY_SALT_KG_M3  = 1025.0f;
+constexpr bool  DEFAULT_SALT_WATER        = true;  // saltwater diving is the primary use case
+
+// Depth-driven surface<->dive mode transition (disables GPS+WiFi in dive
+// mode). Asymmetric on purpose: entering dive mode is immediate (kill the
+// radios fast once underwater), reverting to surface requires staying
+// shallow for a sustained period (avoids GPS/WiFi flapping from wave action
+// at the surface).
+constexpr float DEPTH_DIVE_TRIGGER_M         = 0.3f;   // ~1 ft — crossing this enters dive mode immediately
+constexpr float DEPTH_SURFACE_REVERT_M       = 0.15f;  // ~0.5 ft — must stay shallower than this...
+constexpr float DEPTH_SURFACE_REVERT_DWELL_S = 30.0f;  // ...for this long before reverting to surface mode
 
 // ---------------------------------------------------------------------------
 // Cloud calibration (docs/cloud-calibration-plan.md)

@@ -56,6 +56,9 @@ struct NavPacket {
     uint8_t gps_hdop_x10;  // HDOP × 10 (0=no fix/unknown; 12 = HDOP 1.2)
     uint8_t gps_antenna;   // 0=unknown, 1=error/shorted, 2=internal, 3=active external
     uint8_t flags2;        // see FLAG2_* constants below
+
+    float   depth_m;       // depth below surface, meters (0 if sensor absent, see FLAG2_DEPTH_PRESENT)
+    float   water_temp_c;  // water temperature, degrees C (0 if sensor absent)
 };
 
 // NavPacket.boot_flags bit definitions
@@ -65,6 +68,7 @@ constexpr uint8_t BOOT_MAG_CAL_OK   = 0x04;  // mag calibration loaded from flas
 constexpr uint8_t BOOT_GYRO_CAL_OK  = 0x08;  // gyro calibration loaded from flash
 constexpr uint8_t BOOT_ACCEL_CAL_OK = 0x10;  // accel calibration loaded from flash
 constexpr uint8_t BOOT_HDG_CAL_OK   = 0x20;  // Fourier heading calibration loaded from flash
+constexpr uint8_t BOOT_DEPTH_OK     = 0x40;  // depth sensor (MS5837) detected and probed OK
 
 // NavPacket.flags bit definitions
 constexpr uint8_t FLAG_TRUE_HEADING    = 0x01;  // 1 = true heading, 0 = magnetic
@@ -77,7 +81,12 @@ constexpr uint8_t FLAG_LOG_LEVEL_MASK  = 0xC0;  // bits 7:6 — log level (0=OFF
 constexpr uint8_t FLAG_LOG_LEVEL_SHIFT = 6;
 
 // NavPacket.flags2 bit definitions
-constexpr uint8_t FLAG2_WIFI_CLIENT = 0x01;  // 1 = connected to stored AP (client), 0 = own AP mode
+constexpr uint8_t FLAG2_WIFI_CLIENT   = 0x01;  // 1 = connected to stored AP (client), 0 = own AP mode
+constexpr uint8_t FLAG2_DEPTH_PRESENT = 0x02;  // 1 = depth sensor detected; depth_m/water_temp_c valid
+constexpr uint8_t FLAG2_SALT_WATER    = 0x04;  // 1 = salt water density selected, 0 = fresh water
+constexpr uint8_t FLAG2_DIVE_MODE     = 0x08;  // 1 = dive mode active (GPS+WiFi off), 0 = surface mode.
+                                                // Authoritative source of truth — dive mode can now be
+                                                // triggered automatically by depth, not just the menu.
 
 // ---------------------------------------------------------------------------
 // Debug packet  (sent alongside NavPacket when debug mode enabled)
@@ -251,6 +260,7 @@ enum class DisplayCmd : uint8_t {
     LINK_ACCOUNT           = 33, // begin device-auth cloud account link (RFC 8628)
     CANCEL_LINK            = 34, // cancel an in-progress account-link poll (BTN2 during wait)
     FINISH_BASELINE_COLLECTION = 35, // diver declares baseline collection done -> dump CSV, upload for grading
+    TOGGLE_WATER_DENSITY   = 36, // toggle salt/fresh water density used for depth calculation
 };
 
 // ---------------------------------------------------------------------------

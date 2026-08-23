@@ -13,10 +13,12 @@
 #include "types/types.h"
 #include "sensors/imu.h"
 #include "sensors/calib.h"
+#include "sensors/depth.h"
 #include "math/mahony.h"
 #include "math/orientation.h"
 #include "drivers/flow_sensor.h"
 #include "drivers/gps.h"
+#include "drivers/i2c_bus.h"
 #include "util/storage.h"
 #include "util/logging.h"
 #include "nav/state.h"
@@ -128,6 +130,11 @@ static uint8_t gBootFlags = 0;
 static bool gGpsEnabled  = DEFAULT_USE_GPS_POSITION;  // GPS usage (position + speed)
 static bool gWifiEnabled = true;   // WiFi radio enabled (surface mode default)
 static bool gDiveMode      = false;  // Dive mode active (persisted to NVS)
+static bool gSaltWater     = DEFAULT_SALT_WATER;  // water density for depth calc (persisted to NVS)
+
+// ---- Depth sensor state -----------------------------------------------------
+static bool     gDepthZeroed        = false;  // one-shot: surface pressure captured yet?
+static uint32_t gDepthSurfaceSinceMs = 0;      // 0 = not currently shallow; else millis() we became shallow
 
 // ---- Serial link buffer ----------------------------------------------------
 static char linkBuf[256];
@@ -138,12 +145,13 @@ static char wpBuf[3200];  // waypoint list packet — up to 50 waypoints in JSON
 static nvs_nav::State currentNavNvsState() {
     nav::Position pos = nav::getPosition();
     nvs_nav::State s;
-    s.gps       = gGpsEnabled;
-    s.wifi      = gWifiEnabled;
-    s.dive_mode = gDiveMode;
-    s.log_level = static_cast<uint8_t>(logging::getLevel());
-    s.pos_x     = pos.x_m;
-    s.pos_y     = pos.y_m;
+    s.gps        = gGpsEnabled;
+    s.wifi       = gWifiEnabled;
+    s.dive_mode  = gDiveMode;
+    s.log_level  = static_cast<uint8_t>(logging::getLevel());
+    s.pos_x      = pos.x_m;
+    s.pos_y      = pos.y_m;
+    s.salt_water = gSaltWater;
     return s;
 }
 
@@ -156,6 +164,7 @@ static void sendNavPacket(float heading, float headingRaw, float pitch, float ro
                           const GpsFix& fix);
 static void sendWaypointListPacket();
 static void handleDisplayCmd();
+static void setDiveMode(bool dive);
 
 // ===========================================================================
 void setup() {
@@ -165,8 +174,8 @@ void setup() {
     // Serial link to display device
     Serial1.begin(LINK_BAUD, SERIAL_8N1, LINK_RX_PIN, LINK_TX_PIN);
 
-    // I2C bus
-    Wire.begin(SDA_PIN, SCL_PIN);
+    // I2C bus (recovers a stuck bus left by a reset mid-transaction, then begin()s)
+    i2c_bus::begin(SDA_PIN, SCL_PIN);
 
     // LittleFS for calibration persistence
     if (!LittleFS.begin(true)) {
@@ -215,6 +224,14 @@ void setup() {
             Serial.println("WARNING: GPS init failed");
         }
         gps::setRawNmeaDebug(GPS_RAW_NMEA_ENABLE);
+
+        // Depth sensor (BlueRobotics Bar30 / MS5837-30BA) — optional, J3 connector
+        if (depth::init()) {
+            Serial.println("Depth sensor init OK");
+            gBootFlags |= BOOT_DEPTH_OK;
+        } else {
+            Serial.println("Depth sensor not detected (J3 unpopulated?) — skipping");
+        }
 
         // Flow sensor
         {
@@ -266,8 +283,10 @@ void setup() {
         nvs_nav::State nvsState = nvs_nav::load();
         gGpsEnabled = nvsState.gps;
         gDiveMode   = nvsState.dive_mode;
+        gSaltWater  = nvsState.salt_water;
         nav::setUseGps(gGpsEnabled);
         nav::setPosition(nvsState.pos_x, nvsState.pos_y);
+        depth::setSaltWater(gSaltWater);
         if (nvsState.log_level > 0) {
             logging::setLevel(static_cast<logging::LogLevel>(nvsState.log_level));
         }
@@ -279,9 +298,9 @@ void setup() {
             gWifiEnabled = nvsState.wifi;
             if (!gWifiEnabled) wifi::stop();
         }
-        Serial.printf("[NVS] Restored: gps=%d wifi=%d dive=%d log=%d pos=(%.1f,%.1f)\n",
+        Serial.printf("[NVS] Restored: gps=%d wifi=%d dive=%d log=%d pos=(%.1f,%.1f) salt=%d\n",
                       gGpsEnabled, gWifiEnabled, gDiveMode,
-                      nvsState.log_level, nvsState.pos_x, nvsState.pos_y);
+                      nvsState.log_level, nvsState.pos_x, nvsState.pos_y, gSaltWater);
     }
 
     lastLoopUs = micros();
@@ -353,6 +372,39 @@ void loop() {
     // --- Peripheral sensors -------------------------------------------------
     gps::update();
     flow::update();
+    depth::update();
+
+    // --- Depth: one-shot boot zero, then auto dive/surface trigger ----------
+    if (depth::isPresent()) {
+        if (depth::hasNewSample() && !gDepthZeroed) {
+            depth::zero();
+            gDepthZeroed = true;
+            Serial.println("[DEPTH] Surface zero captured");
+        }
+
+        // Asymmetric trigger: entering dive mode is immediate (kill GPS/WiFi
+        // fast once underwater); reverting to surface requires staying
+        // shallow for DEPTH_SURFACE_REVERT_DWELL_S (avoids GPS/WiFi flapping
+        // from wave action at the surface).
+        if (gDepthZeroed) {
+            float d = depth::getDepth_m();
+            if (!gDiveMode && d >= DEPTH_DIVE_TRIGGER_M) {
+                Serial.printf("[DEPTH] %.2fm >= trigger -> auto DIVE\n", (double)d);
+                setDiveMode(true);
+                gDepthSurfaceSinceMs = 0;
+            } else if (gDiveMode && d < DEPTH_SURFACE_REVERT_M) {
+                if (gDepthSurfaceSinceMs == 0) {
+                    gDepthSurfaceSinceMs = millis();
+                } else if (millis() - gDepthSurfaceSinceMs >= (uint32_t)(DEPTH_SURFACE_REVERT_DWELL_S * 1000.0f)) {
+                    Serial.printf("[DEPTH] shallow for %.0fs -> auto SURFACE\n", DEPTH_SURFACE_REVERT_DWELL_S);
+                    setDiveMode(false);
+                    gDepthSurfaceSinceMs = 0;
+                }
+            } else {
+                gDepthSurfaceSinceMs = 0;
+            }
+        }
+    }
 
     // --- GPS COG coherence filter -------------------------------------------
     // Track consistency of Course Over Ground to distinguish real motion from
@@ -510,6 +562,8 @@ void loop() {
             ld.pos_src       = (nav::isUsingGps() && gpsFresh) ? 'G' : 'E';
             ld.gps_satellites = fix.has_fix ? fix.satellites : 0;
             ld.gps_hdop       = fix.has_fix ? fix.hdop       : 0.0f;
+            ld.depth_m        = depth::isPresent() ? depth::getDepth_m() : 0.0f;
+            ld.water_temp_c   = depth::isPresent() ? depth::getTemp_c()  : 0.0f;
             ld.mag_raw       = magRaw;
             ld.accel_raw     = accelRaw;
             ld.gyro_raw      = gyroRaw;
@@ -1102,6 +1156,13 @@ static void sendNavPacket(float heading, float headingRaw, float pitch, float ro
     // WiFi mode: client (connected to stored AP) vs. own AP
     uint8_t flags2 = 0;
     if (gWifiEnabled && wifi::isStaConnected()) flags2 |= FLAG2_WIFI_CLIENT;
+    if (depth::isPresent()) {
+        flags2 |= FLAG2_DEPTH_PRESENT;
+        pkt.depth_m      = depth::getDepth_m();
+        pkt.water_temp_c = depth::getTemp_c();
+    }
+    if (gSaltWater) flags2 |= FLAG2_SALT_WATER;
+    if (gDiveMode)  flags2 |= FLAG2_DIVE_MODE;
     pkt.flags2 = flags2;
 
     updateBattMv();
@@ -1192,6 +1253,27 @@ static void sendWaypointListPacket() {
     }
     size_t nb = waypointListPacketToBytes(pkt, wpBuf, sizeof(wpBuf));
     if (nb > 0) Serial1.write(wpBuf, nb);
+}
+
+// Enters/exits dive mode (disables/re-enables GPS + WiFi). Shared by the
+// manual TOGGLE_OP_MODE command and the automatic depth-based trigger in
+// loop() — see config.h DEPTH_DIVE_TRIGGER_M / DEPTH_SURFACE_REVERT_M.
+static void setDiveMode(bool dive) {
+    if (dive == gDiveMode) return;
+    gDiveMode = dive;
+    if (gDiveMode) {
+        gps::setEnabled(false);
+        wifi::stop();
+        gWifiEnabled = false;
+        Serial.println("[NAV] OP_MODE -> DIVE (GPS+WiFi off)");
+    } else {
+        gps::setEnabled(true);
+        wifi::init();
+        web::init();
+        gWifiEnabled = true;
+        Serial.println("[NAV] OP_MODE -> SURFACE (GPS+WiFi on)");
+    }
+    nvs_nav::save(currentNavNvsState());
 }
 
 static void handleDisplayCmd() {
@@ -1378,19 +1460,14 @@ static void handleDisplayCmd() {
                         nvs_nav::save(currentNavNvsState());
                         break;
                     case DisplayCmd::TOGGLE_OP_MODE:
-                        gDiveMode = !gDiveMode;
-                        if (gDiveMode) {
-                            gps::setEnabled(false);
-                            wifi::stop();
-                            gWifiEnabled = false;
-                            Serial.println("CMD: OP_MODE -> DIVE (GPS+WiFi off)");
-                        } else {
-                            gps::setEnabled(true);
-                            wifi::init();
-                            web::init();
-                            gWifiEnabled = true;
-                            Serial.println("CMD: OP_MODE -> SURFACE (GPS+WiFi on)");
-                        }
+                        Serial.println("CMD: TOGGLE_OP_MODE (manual)");
+                        setDiveMode(!gDiveMode);
+                        break;
+                    case DisplayCmd::TOGGLE_WATER_DENSITY:
+                        gSaltWater = !gSaltWater;
+                        depth::setSaltWater(gSaltWater);
+                        Serial.print("CMD: TOGGLE_WATER_DENSITY -> ");
+                        Serial.println(gSaltWater ? "SALT" : "FRESH");
                         nvs_nav::save(currentNavNvsState());
                         break;
                     case DisplayCmd::START_HDG_FOURIER_CAL:

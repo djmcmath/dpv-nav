@@ -670,6 +670,7 @@ void loop() {
                 }
             } else {
 
+            display::setImperialUnits(menu::settings().imperial);
             SystemState navState = static_cast<SystemState>(lastNav.system_state);
             if (navState == SystemState::CALIBRATION) {
                 // Dispatch by cal_mode: 0/1 = mag cal (legacy), 2/3/4 = speed cal
@@ -728,7 +729,7 @@ static void processNavLine() {
         if (bytesToNavPacket(rxBuf, rxPos, lastNav)) {
             navValid  = true;
             lastNavMs = millis();
-            menu::updateNavState(lastNav.flags);
+            menu::updateNavState(lastNav.flags, lastNav.flags2);
             if (gBootPhase == BootPhase::LOGO) {
                 // Only switch to STATUS if the logo minimum hold has elapsed;
                 // otherwise navValid is now true and loop() will handle it at the 3 s mark.

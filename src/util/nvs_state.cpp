@@ -1,4 +1,5 @@
 #include "nvs_state.h"
+#include "../config.h"
 #include <Preferences.h>
 
 // NVS namespace names — max 15 chars (ESP32 NVS constraint)
@@ -16,20 +17,22 @@ State load() {
     // readOnly=true: returns false if the namespace has never been written
     if (!prefs.begin(NAV_NS, /*readOnly=*/true)) {
         // First boot — namespace doesn't exist yet; return factory defaults
-        s.gps       = true;
-        s.wifi      = true;
-        s.dive_mode = false;
-        s.log_level = 0;
-        s.pos_x     = 0.0f;
-        s.pos_y     = 0.0f;
+        s.gps        = true;
+        s.wifi       = true;
+        s.dive_mode  = false;
+        s.log_level  = 0;
+        s.pos_x      = 0.0f;
+        s.pos_y      = 0.0f;
+        s.salt_water = DEFAULT_SALT_WATER;
         return s;
     }
-    s.gps       = prefs.getBool ("gps",        true);
-    s.wifi      = prefs.getBool ("wifi",       true);
-    s.dive_mode = prefs.getBool ("dive_mode",  false);
-    s.log_level = prefs.getUChar("log_level",  0);
-    s.pos_x     = prefs.getFloat("pos_x",      0.0f);
-    s.pos_y     = prefs.getFloat("pos_y",      0.0f);
+    s.gps        = prefs.getBool ("gps",        true);
+    s.wifi       = prefs.getBool ("wifi",       true);
+    s.dive_mode  = prefs.getBool ("dive_mode",  false);
+    s.log_level  = prefs.getUChar("log_level",  0);
+    s.pos_x      = prefs.getFloat("pos_x",      0.0f);
+    s.pos_y      = prefs.getFloat("pos_y",      0.0f);
+    s.salt_water = prefs.getBool ("salt",       DEFAULT_SALT_WATER);
     prefs.end();
     return s;
 }
@@ -43,6 +46,7 @@ void save(const State& s) {
     prefs.putUChar("log_level", s.log_level);
     prefs.putFloat("pos_x",     s.pos_x);
     prefs.putFloat("pos_y",     s.pos_y);
+    prefs.putBool ("salt",      s.salt_water);
     prefs.end();
 }
 

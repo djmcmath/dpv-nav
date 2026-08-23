@@ -1352,7 +1352,24 @@ static void handleDisplayCmd() {
                         Serial.print(pos.x_m, 1);
                         Serial.print(" y=");
                         Serial.println(pos.y_m, 1);
-                        // TODO: write to log file
+                        if (logging::isLogging()) {
+                            GpsFix fix = gps::getFix();
+                            logging::LogData ld{};
+                            ld.timestamp_ms   = millis();
+                            ld.heading_deg    = 0.0f;
+                            ld.speed_ms       = 0.0f;
+                            ld.gpsSpeed       = false;
+                            ld.pos_x_m        = pos.x_m;
+                            ld.pos_y_m        = pos.y_m;
+                            ld.lat            = pos.lat;
+                            ld.lon            = pos.lon;
+                            ld.pos_src        = 'M';
+                            ld.gps_satellites = fix.has_fix ? fix.satellites : 0;
+                            ld.gps_hdop       = fix.has_fix ? fix.hdop       : 0.0f;
+                            ld.depth_m        = depth::isPresent() ? depth::getDepth_m() : 0.0f;
+                            ld.water_temp_c   = depth::isPresent() ? depth::getTemp_c()  : 0.0f;
+                            logging::logImmediate(ld);
+                        }
                         break;
                     }
                     case DisplayCmd::START_FULL_CAL:

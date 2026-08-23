@@ -17,7 +17,7 @@ struct LogData {
     float pos_y_m;
     float lat;            // current latitude (GPS or DR-estimated)
     float lon;            // current longitude (GPS or DR-estimated)
-    char  pos_src;        // 'G' = GPS, 'W' = waypoint snap, 'E' = DR estimate
+    char  pos_src;        // 'G' = GPS, 'W' = waypoint snap, 'E' = DR estimate, 'M' = diver mark
     uint8_t gps_satellites; // satellites tracked (0 if no GPS fix)
     float   gps_hdop;       // HDOP (0.0 if no GPS fix)
     float   depth_m;        // depth below surface, meters (0 if sensor absent)

@@ -160,8 +160,9 @@ imu::AxisMap imuAxisMap{
 The system supports automatic calibration with persistence to LittleFS (flash storage):
 
 **Magnetometer (two-stage, menu-triggered, bin-aware):**
-- **Baseline** (CAL > Baseline): Device off DPV, full sphere coverage. Collects samples to `/mag_baseline_samples.csv`. Run `python tools/mag_calibration.py mag_baseline_samples.csv`, upload `mag_base.json`.
-- **Mounted** (CAL > Mounted): Device installed on DPV, horizontal rotations. Collects samples to `/mag_mounted_samples.csv`. Run `python tools/mag_calibration.py mag_baseline_samples.csv mag_mounted_samples.csv`, upload `mag_mount.json`.
+- **Baseline** (CAL > Baseline): Device off DPV, full sphere coverage. Collects samples to `/mag_baseline_samples.csv`. Run `python tools/mag_calibration.py --mode baseline mag_baseline_samples.csv`, upload the resulting `mag_base.json` to the device filesystem root as `/mag_base.json`.
+- **Mounted** (CAL > Mounted): Device installed on DPV, horizontal rotations. Collects samples to `/mag_mounted_samples.csv`. Run `python tools/mag_calibration.py --mode mounted --base mag_base.json mag_mounted_samples.csv`, upload the resulting `mag_mount.json` as `/mag_mount.json`.
+- **Filename matters:** the firmware only ever reads `/mag_base.json` and `/mag_mount.json` from the root (see [src/util/storage.h](src/util/storage.h)). Do **not** pass `--output` with a different name (e.g. `mag_mounted.json`) unless you rename it to `/mag_mount.json` on upload — otherwise the device silently ignores it and keeps running the previous (stale) calibration. The script warns if the output name won't be read.
 - Both stages show a live heading×elevation bin-coverage grid on the display. Auto-completes when required bins are green.
 - On boot: tries `mag_base.json` + `mag_mount.json` chain → falls back to legacy `mag_cal.json` → falls back to 90s blocking sweep.
 

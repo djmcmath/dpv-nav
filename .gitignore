@@ -11,3 +11,9 @@ tools/old csv/*
 *.ods
 .~lock.*#
 *.lock__pycache__/
+
+# Host-compiled calibration test harnesses (tools/README.md) -- built on demand
+# by their own runner scripts, never checked in.
+tools/orient_equiv/harness
+tools/orient_equiv/chain
+tools/dpvlink_test/roundtrip

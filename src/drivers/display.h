@@ -46,6 +46,10 @@ void drawHLine(int x, int y, int w, uint16_t color);
 // DISPLAY_UNITS_IMPERIAL macro, which never actually reached these draws.
 void setImperialUnits(bool imperial);
 
+// Mark the nav screen's heading as RAW (uncorrected magnetic). Cosmetic only;
+// the value substitution happens in display_main.cpp's applyHeadingMode().
+void setRawHeading(bool raw);
+
 // Draw the full navigation screen to canvas and flush to display.
 // Status bar + 2x2 grid: bearing, range, heading, speed.
 void showNav(const NavPacket& pkt);

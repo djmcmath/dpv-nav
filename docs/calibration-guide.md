@@ -219,25 +219,38 @@ The 12 fixed points (every 30°) can leave one span under-sampled — e.g. only 
 12 points falling in a 90° swing near North — which the whole-CSV fit can mask with a
 deceptively good in-sample error while the correction is actually bad in the gap. The
 server checks for this automatically on every heading fit (`sector_adequacy`): it
-looks for gaps wider than 45° between the collected headings and, if it finds one,
-suggests interior headings to fill it.
+looks for gaps wider than 45° between the collected **indicated** headings and, if it
+finds one, suggests bearings to steer that would land readings inside it.
+
+The two frames matter here. The gap is found in the *indicated* domain, because that
+is what the Fourier series is a function of and therefore where it is unconstrained —
+a gap is wide precisely because the indicated heading swung fast across it. But a
+diver can only steer an *actual* bearing, so each suggestion is projected back by
+interpolating between the two collected points that bracket the gap, then rounded to
+the nearest 5° (the finest anyone can hold against a small compass). Suggestions
+landing within 10° of a bearing you already collected are dropped, since they would
+add no constraint the fit doesn't already have.
 
 Unlike Baseline's gap-fill, there is **no on-device collection flow for this** — no
 firmware round trip, no menu item. It's a small manual-entry form on the website:
 
 1. On the Dive Map website, open **Calibration History** for the device. A heading
    (hdg) calibration row with a detected gap shows a **"N thin sector(s)"** badge.
-2. Expand it to see the flagged gap(s) and the suggested headings to fill them
-   (e.g. "gap 330°→060°, suggested: 0°, 30°").
-3. An editable-rows form appears, seeded with those suggested headings. For each
-   one: aim the DPV at that bearing using the same external reference (compass,
-   known landmark) the original 12-point collection used, read the **indicated**
-   heading off the unit's display, and type the `(actual, indicated)` pair into the
-   form by hand.
-4. Submit. This posts the typed rows to the server, which combines them with your
+2. Expand it to see the flagged gap(s) and the bearings to steer (e.g. "Between your
+   337° and 066° points the compass swung 90° — steer 015°, 050°").
+3. **On the unit, set DISPLAY > Heading to RAW** before taking any readings. The fit
+   needs the uncorrected magnetic heading; the nav screen normally shows the
+   corrected one, and readings taken in TRUE or MAG mode will make the calibration
+   worse rather than better.
+4. An editable-rows form appears, seeded with those bearings. For each one: aim the
+   DPV at that bearing using the same external reference (compass, known landmark)
+   the original 12-point collection used, read the heading off the unit's display,
+   and type the `(actual, indicated)` pair into the form by hand.
+5. Submit. This posts the typed rows to the server, which combines them with your
    original 12-point upload and re-fits — producing a new pending calibration row,
    same as any other fit (not auto-accepted).
-5. Review and **Accept** the new row on the website when you're satisfied.
+6. Review and **Accept** the new row on the website when you're satisfied. Set the
+   unit's heading mode back off RAW (it also reverts to MAG on the next boot).
 
 **Getting an accepted web result onto the physical unit:** accepting a calibration
 *on the website* only updates the database — there is no background mechanism that
@@ -390,7 +403,7 @@ as the first time.
 
 Real failure modes actually hit in the field, hardest-to-spot first. If the heading is wrong *after* baseline + mounted + Fourier, it is almost always one of these, not the mag math:
 
-1. **Checking in TRUE mode against a magnetic reference (or vice-versa).** *Symptom:* a near-constant offset of roughly the local declination (≈14.7° here) in **every** sector, with only a few degrees of per-sector variation on top. The nav device always computes TRUE heading; **DISPLAY > Heading** toggles TRUE/MAG on the display side ([display_main.cpp:237-244](../src/display_main.cpp#L237-L244)). A handheld compass reads MAGNETIC. When checking against a compass, set the display to **MAG**. This is the #1 cause of "everything is ~15° off."
+1. **Checking in TRUE mode against a magnetic reference (or vice-versa).** *Symptom:* a near-constant offset of roughly the local declination (≈14.7° here) in **every** sector, with only a few degrees of per-sector variation on top. The nav device always computes TRUE heading; **DISPLAY > Heading** cycles TRUE → MAG → RAW on the display side. A handheld compass reads MAGNETIC. When checking against a compass, set the display to **MAG**. This is the #1 cause of "everything is ~15° off." (**RAW** is a third, bench-only mode — magnetic *and* uncorrected — used for gap-fill collection, not for checking a finished calibration; see below.)
 
 2. **Mounted correction uploaded under the wrong filename.** The firmware only ever loads `/mag_mount.json` ([storage.h:28](../src/util/storage.h#L28)). This is specifically a risk of the **manual offline fallback path** (cloud uploads always write the correct filename automatically): if you run the tool with `--output mag_mounted.json` (or any other name) and upload *that*, it is silently ignored — the **previous** mounted cal stays in effect and your fresh numbers never take. *Symptom:* the soft-iron ellipticity you meant to remove is still present (large residual 2nd harmonic). `mag_calibration.py` now prints a loud warning when the output name won't be read; heed it. Confirm on boot: `[STORAGE] mag_mount.json loaded`, with a `b_eff` that matches the new values.
 
@@ -398,7 +411,13 @@ Real failure modes actually hit in the field, hardest-to-spot first. If the head
 
 4. **Fourier over-fit / coverage gaps.** With 12 points, the fit caps at 2 harmonics on purpose — a tiny RMS at higher orders is over-fit, not accuracy. Because the deviation compresses the *indicated* scale, evenly-spaced targets can leave a large hole in the indicated domain (a ~50° gap near North is common); the fit is unconstrained there and worst in that sector. The cloud fit flags this automatically (`sector_adequacy`, gaps > 45°) and the Dive Map website shows a "thin sector(s)" badge with suggested headings to fill it — use the manual-entry form described in [Filling Coverage Gaps](#filling-coverage-gaps) above, it's the supported way to close a gap without redoing all 12 points. `fourier_fit.py`, the offline-fallback tool, warns about the same gap but has no form to act on it — see the hand-collecting note below if you're on that path.
 
-**Hand-collecting extra samples to fill a gap (offline-fallback path only — if you're on WiFi, use the web form above instead):** the new rows must be in the same frame as the existing ones — `heading_raw_deg`, i.e. **pre-Fourier, pre-motor magnetic**. To read that value off the nav screen: delete `hdg_fourier.json`, set `motor_cal.json` to `0`, reload cal, and put the display in **MAG** mode. Collect and append `actual,indicated` rows to `hdg_samples.csv`, refit with `fourier_fit.py`, then restore both files.
+**Reading indicated headings for gap-fill (both paths):** the new rows must be in the same frame as the existing ones — `heading_raw_deg`, i.e. **pre-Fourier, pre-motor magnetic**. Set **DISPLAY > Heading** to **RAW** and read the value straight off the nav screen; the digits turn yellow and the suffix reads `R` so a RAW reading can't be mistaken for a navigable heading. RAW shows `heading_raw_deg` from the NavPacket verbatim — the same value `CAPTURE_HDG_POINT` records — so `hdg_fourier.json` and `motor_cal.json` can stay installed. Set the mode back when you're done; RAW is not sticky and reverts to MAG on the next boot anyway.
+
+> Before 2026-08-27 this required deleting `hdg_fourier.json`, zeroing `motor_cal.json`, reloading cal, and then restoring both by hand — with no backup path for `motor_cal.json`, so a copy had to be saved first. That is no longer necessary and should not be done.
+
+On the **offline-fallback path**, append the `actual,indicated` rows to `hdg_samples.csv` and refit with `fourier_fit.py`. On WiFi, use the web form described in [Filling Coverage Gaps](#filling-coverage-gaps) above.
+
+**What the suggested headings mean:** they are **bearings to steer**, rounded to the nearest 5° (the finest a diver can hold against a small compass). The gap itself is detected in the *indicated* domain — that is where the Fourier series is unconstrained — but each suggestion is projected back into the actual domain by interpolating between the two collected points bracketing the gap, so aiming at one lands the reading inside the hole. The website states both frames: "Between your 337° and 066° points the compass swung 90° — steer 015°, 050°."
 
 ## Storage API
 

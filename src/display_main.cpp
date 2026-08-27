@@ -321,16 +321,29 @@ void setup() {
 }
 
 // Returns a copy of pkt with heading/bearing adjusted for the current heading
-// mode (true vs. magnetic). Nav device always sends true heading; when the user
+// mode. Nav device always sends true heading in heading_deg; when the user
 // selects magnetic, subtract declination here and clear FLAG_TRUE_HEADING.
+//
+// RAW additionally swaps in heading_raw_deg, which the nav device already
+// sends as the pre-Fourier, pre-motor-offset *magnetic* heading (nav_main.cpp
+// passes headingMagDeg) -- the same value CAPTURE_HDG_POINT records as
+// "indicated". That makes RAW the supported way to read indicated headings for
+// the website's thin-sector gap-fill form, replacing the old routine of
+// deleting /hdg_fourier.json and /motor_cal.json and reloading cal.
+// Bearing-to-home stays on the magnetic treatment in RAW: there is no "raw"
+// bearing, and leaving the rest of the nav screen coherent matters more than
+// consistency with a field that has no raw counterpart.
 static NavPacket applyHeadingMode(NavPacket pkt) {
-    if (!menu::settings().trueHeading) {
+    const uint8_t mode = menu::settings().headingMode;
+    if (mode != nvs_disp::HEADING_TRUE) {
         auto wrap360 = [](float d) {
             while (d < 0.0f)    d += 360.0f;
             while (d >= 360.0f) d -= 360.0f;
             return d;
         };
-        pkt.heading_deg      = wrap360(pkt.heading_deg      - DEFAULT_DECLINATION_DEG);
+        pkt.heading_deg      = (mode == nvs_disp::HEADING_RAW)
+                                   ? wrap360(pkt.heading_raw_deg)
+                                   : wrap360(pkt.heading_deg - DEFAULT_DECLINATION_DEG);
         pkt.bearing_home_deg = wrap360(pkt.bearing_home_deg - DEFAULT_DECLINATION_DEG);
         pkt.flags &= ~FLAG_TRUE_HEADING;
     }
@@ -692,6 +705,7 @@ void loop() {
             } else {
 
             display::setImperialUnits(menu::settings().imperial);
+            display::setRawHeading(menu::settings().headingMode == nvs_disp::HEADING_RAW);
             SystemState navState = static_cast<SystemState>(lastNav.system_state);
             if (navState == SystemState::CALIBRATION) {
                 // Dispatch by cal_mode: 0/1 = mag cal (legacy), 2/3/4 = speed cal

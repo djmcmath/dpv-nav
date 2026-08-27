@@ -45,7 +45,12 @@ struct NavPacket {
     float    speed_cal_k_existing;   // k-factor before this calibration run
     float    speed_cal_k_proposed;   // computed k-factor from this run
 
-    float    heading_raw_deg;      // heading before hdg_cal correction (same as heading_deg if no cal loaded)
+    // Raw *magnetic* heading: pre-Fourier, pre-motor-offset, declination NOT
+    // added (nav_main.cpp passes headingMagDeg). This is the exact value
+    // CAPTURE_HDG_POINT records as "indicated", which is why the display's
+    // RAW heading mode shows this field verbatim. Note heading_deg is TRUE,
+    // so the two differ by declination even when no cal is loaded.
+    float    heading_raw_deg;
 
     uint16_t batt_mv;             // battery voltage in millivolts (0 = unknown / not read yet)
 

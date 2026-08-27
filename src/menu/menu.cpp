@@ -40,8 +40,19 @@ static DisplaySettings gSettings = {
     .debugMode   = false,
     .showETA     = false,
     .imperial    = false,
-    .trueHeading = true,
+    .headingMode = nvs_disp::HEADING_TRUE,
 };
+
+// Label for the DISPLAY > Heading item, and for the RAW marker on the nav
+// screen. Kept here so the menu suffix and the nav-screen banner can never
+// disagree about what mode the unit is in.
+const char* headingModeLabel(uint8_t mode) {
+    switch (mode) {
+        case nvs_disp::HEADING_MAG: return "MAG";
+        case nvs_disp::HEADING_RAW: return "RAW";
+        default:                    return "TRUE";
+    }
+}
 
 // Display coordinates for menu area (320×240 ST7789)
 // Layout: separator line at y=132 (= DIV_Y_MID), title at y=135 (size 2),
@@ -262,7 +273,7 @@ static void getDisplayLabel(const MenuItem& item, char* buf, size_t bufLen) {
             suffix = gSettings.imperial ? "ft" : "m";
             break;
         case Action::DISP_HDG_TYPE:
-            suffix = gSettings.trueHeading ? "TRUE" : "MAG";
+            suffix = headingModeLabel(gSettings.headingMode);
             break;
         case Action::NAV_OP_MODE:
             suffix = gDiveMode ? "DIVE" : "SURF";
@@ -350,22 +361,26 @@ static void executeAction(Action act) {
         case Action::DISP_MODE:
             gSettings.debugMode = !gSettings.debugMode;
             Serial.print("[MENU] Mode: "); Serial.println(gSettings.debugMode ? "DEBUG" : "NAV");
-            nvs_disp::save({gSettings.debugMode, gSettings.showETA, gSettings.imperial, gSettings.trueHeading});
+            nvs_disp::save({gSettings.debugMode, gSettings.showETA, gSettings.imperial, gSettings.headingMode});
             break;
         case Action::DISP_SPD_ETA:
             gSettings.showETA = !gSettings.showETA;
             Serial.print("[MENU] Show: "); Serial.println(gSettings.showETA ? "ETA" : "SPEED");
-            nvs_disp::save({gSettings.debugMode, gSettings.showETA, gSettings.imperial, gSettings.trueHeading});
+            nvs_disp::save({gSettings.debugMode, gSettings.showETA, gSettings.imperial, gSettings.headingMode});
             break;
         case Action::DISP_UNITS:
             gSettings.imperial = !gSettings.imperial;
             Serial.print("[MENU] Units: "); Serial.println(gSettings.imperial ? "ft" : "m");
-            nvs_disp::save({gSettings.debugMode, gSettings.showETA, gSettings.imperial, gSettings.trueHeading});
+            nvs_disp::save({gSettings.debugMode, gSettings.showETA, gSettings.imperial, gSettings.headingMode});
             break;
         case Action::DISP_HDG_TYPE:
-            gSettings.trueHeading = !gSettings.trueHeading;
-            Serial.print("[MENU] Heading: "); Serial.println(gSettings.trueHeading ? "TRUE" : "MAG");
-            nvs_disp::save({gSettings.debugMode, gSettings.showETA, gSettings.imperial, gSettings.trueHeading});
+            // TRUE -> MAG -> RAW -> TRUE. RAW is deliberately in the cycle
+            // rather than hidden: it's a routine step in the heading gap-fill
+            // procedure, not a service mode.
+            gSettings.headingMode = (gSettings.headingMode + 1) % 3;
+            Serial.print("[MENU] Heading: ");
+            Serial.println(headingModeLabel(gSettings.headingMode));
+            nvs_disp::save({gSettings.debugMode, gSettings.showETA, gSettings.imperial, gSettings.headingMode});
             break;
         case Action::NAV_OP_MODE:
             // Not optimistically toggled locally — dive mode can now also be
@@ -403,10 +418,10 @@ void init(SendCmdFn sendFn) {
     gSettings.debugMode   = nvsDisp.debug_mode;
     gSettings.showETA     = nvsDisp.show_eta;
     gSettings.imperial    = nvsDisp.imperial;
-    gSettings.trueHeading = nvsDisp.true_heading;
-    Serial.printf("[NVS] Disp restored: debug=%d eta=%d imperial=%d trueHdg=%d\n",
+    gSettings.headingMode = nvsDisp.heading_mode;  // never RAW on boot (nvs_disp::load)
+    Serial.printf("[NVS] Disp restored: debug=%d eta=%d imperial=%d hdg=%s\n",
                   gSettings.debugMode, gSettings.showETA,
-                  gSettings.imperial, gSettings.trueHeading);
+                  gSettings.imperial, headingModeLabel(gSettings.headingMode));
 
     stackDepth = 0;  // closed
     invalidateMenuCache();

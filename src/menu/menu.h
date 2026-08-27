@@ -3,6 +3,8 @@
 #include <stdint.h>
 #include <dpvlink.h>
 
+#include "../util/nvs_state.h"  // nvs_disp::HeadingMode
+
 namespace menu {
 
 // ---------------------------------------------------------------------------
@@ -66,10 +68,10 @@ struct SubMenu {
 // Local display settings (toggle states visible to menu)
 // ---------------------------------------------------------------------------
 struct DisplaySettings {
-    bool debugMode;       // true = debug, false = nav
-    bool showETA;         // true = ETA, false = speed
-    bool imperial;        // true = ft, false = m
-    bool trueHeading;     // true = true, false = mag
+    bool    debugMode;    // true = debug, false = nav
+    bool    showETA;      // true = ETA, false = speed
+    bool    imperial;     // true = ft, false = m
+    uint8_t headingMode;  // nvs_disp::HeadingMode (TRUE / MAG / RAW)
 };
 
 // ---------------------------------------------------------------------------
@@ -114,6 +116,9 @@ void forceRedraw();
 
 // Access current display settings (for use by display_main rendering logic).
 const DisplaySettings& settings();
+
+// "TRUE" / "MAG" / "RAW" for a nvs_disp::HeadingMode value.
+const char* headingModeLabel(uint8_t mode);
 
 // Update nav-device toggle states from NavPacket flags/flags2.
 // Call whenever a NavPacket is received so menu labels stay in sync.

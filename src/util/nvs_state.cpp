@@ -105,13 +105,25 @@ State load() {
         s.debug_mode   = false;
         s.show_eta     = false;
         s.imperial     = false;
-        s.true_heading = true;
+        s.heading_mode = HEADING_TRUE;
         return s;
     }
     s.debug_mode   = prefs.getBool("debug_mode",   false);
     s.show_eta     = prefs.getBool("show_eta",      false);
     s.imperial     = prefs.getBool("imperial",      false);
-    s.true_heading = prefs.getBool("true_heading",  true);
+
+    // "hdg_mode" superseded the older "true_heading" bool when RAW was added.
+    // Seed from the old key when the new one is absent so a unit upgrading in
+    // place keeps whatever the diver had selected.
+    uint8_t fallback = prefs.getBool("true_heading", true) ? HEADING_TRUE : HEADING_MAG;
+    s.heading_mode   = prefs.getUChar("hdg_mode", fallback);
+
+    // RAW is a bench mode: it shows an uncorrected heading, which is precisely
+    // what the Fourier cal exists to stop anyone navigating on. A diver who
+    // forgets the toggle must not find the unit still in RAW after a reboot.
+    if (s.heading_mode == HEADING_RAW) s.heading_mode = HEADING_MAG;
+    if (s.heading_mode > HEADING_RAW)  s.heading_mode = HEADING_TRUE;
+
     prefs.end();
     return s;
 }
@@ -122,7 +134,11 @@ void save(const State& s) {
     prefs.putBool("debug_mode",   s.debug_mode);
     prefs.putBool("show_eta",     s.show_eta);
     prefs.putBool("imperial",     s.imperial);
-    prefs.putBool("true_heading", s.true_heading);
+    // Persist RAW as MAG rather than refusing to save: the diver's *other*
+    // settings in this same call still need to land, and RAW is deliberately
+    // not sticky (see load()).
+    prefs.putUChar("hdg_mode",
+                   s.heading_mode == HEADING_RAW ? HEADING_MAG : s.heading_mode);
     prefs.end();
 }
 

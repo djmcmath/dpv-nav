@@ -75,6 +75,7 @@ struct NavCache {
     int     distCm        = -1;
     // HDG cell
     int     headingInt    = -999;
+    bool    rawHeading    = false;  // last-seen RAW mode, to force redraw on toggle
     // SPD cell
     int     speedDisplay  = -999;
     bool    gpsSpeed      = false;
@@ -99,6 +100,13 @@ static bool tftReady = false;
 static bool gImperialUnits = false;
 
 void display::setImperialUnits(bool imperial) { gImperialUnits = imperial; }
+
+// True while DISPLAY > Heading is RAW, so the nav screen can mark the heading
+// as deliberately uncorrected. Purely cosmetic -- the substitution itself
+// happens in display_main.cpp's applyHeadingMode().
+static bool gRawHeading = false;
+
+void display::setRawHeading(bool raw) { gRawHeading = raw; }
 
 // Boot status line Y cursor
 static int bootLineY = 0;
@@ -450,18 +458,20 @@ static void drawRange(const NavPacket& pkt) {
 
 static void drawHeading(const NavPacket& pkt) {
     int hdg_int = (int)(pkt.heading_deg + 0.5f) % 360;
-    char suffix = (pkt.flags & FLAG_TRUE_HEADING) ? 'T' : 'M';
+    // RAW is an uncorrected bench reading -- colour it and suffix it 'R' so it
+    // can never be mistaken for a heading worth navigating on.
+    char suffix = gRawHeading ? 'R' : ((pkt.flags & FLAG_TRUE_HEADING) ? 'T' : 'M');
 
     char digits[4];
     snprintf(digits, sizeof(digits), "%03d", hdg_int);
     tft.setTextSize(4);
-    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+    tft.setTextColor(gRawHeading ? COLOR_YELLOW : COLOR_WHITE, COLOR_BLACK);
     tft.setCursor(2, 158);
     tft.print(digits);
 
     char s[2] = { suffix, '\0' };
     tft.setTextSize(2);
-    tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
+    tft.setTextColor(gRawHeading ? COLOR_YELLOW : COLOR_CYAN, COLOR_BLACK);
     tft.setCursor(80, 165);
     tft.print(s);
 }
@@ -592,7 +602,10 @@ void showNav(const NavPacket& pkt) {
                         || battLevel             != navCache.battLevel);
     bool brgChanged     = (bearingInt != navCache.bearingInt || hasHome != navCache.hasHome || trueHdg != navCache.trueHeading);
     bool rngChanged     = (distCm != navCache.distCm        || hasHome != navCache.hasHome || unitsChanged);
-    bool hdgChanged     = (headingInt != navCache.headingInt || trueHdg != navCache.trueHeading);
+    // Entering/leaving RAW recolours the cell without necessarily changing the
+    // number, so it has to force the redraw itself.
+    bool hdgChanged     = (headingInt != navCache.headingInt || trueHdg != navCache.trueHeading
+                        || gRawHeading != navCache.rawHeading);
     bool spdChanged     = (speedDisp != navCache.speedDisplay || gpsSpd != navCache.gpsSpeed || unitsChanged);
     bool logChanged     = (logLevel != navCache.logLevel);
     bool depthChanged   = (depthCm != navCache.depthCm || unitsChanged);
@@ -618,6 +631,7 @@ void showNav(const NavPacket& pkt) {
     navCache.bearingInt    = bearingInt;
     navCache.distCm        = distCm;
     navCache.headingInt    = headingInt;
+    navCache.rawHeading    = gRawHeading;
     navCache.speedDisplay  = speedDisp;
     navCache.gpsSpeed      = gpsSpd;
     navCache.logLevel      = logLevel;

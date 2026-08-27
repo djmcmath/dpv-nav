@@ -62,9 +62,10 @@ MENU
 │   ├── Mark       — mark current position in logs
 │   └── Op Mode    — toggle dive/surface mode (shows DIVE or SURF)
 ├── CAL
-│   ├── Baseline   — bin-aware magnetometer calibration, device off DPV (full sphere coverage)
-│   ├── Mounted    — bin-aware magnetometer calibration, device on DPV (corrects DPV mag signature)
-│   ├── Hdg cal    — Fourier heading calibration: guided 12-point collection, then offline fit + upload
+│   ├── Baseline   — magnetometer calibration, device off DPV (full sphere coverage), cloud-fit on completion
+│   ├── Fill gaps  — patches thin/empty regions on an installed Baseline cal (requires synced target map)
+│   ├── Mounted    — bin-aware magnetometer calibration, device on DPV (corrects DPV mag signature), cloud-fit on completion
+│   ├── Hdg cal    — Fourier heading calibration: guided 12-point collection, then cloud-fit on completion
 │   └── Speed cal  — interactive flow-meter k-factor calibration (swim a known distance)
 ├── CONFIG (aka INPUT)
 │   ├── GPS        — toggle GPS position + speed on/off (shows current state)
@@ -79,7 +80,7 @@ MENU
     └── Heading    — toggle magnetic vs true heading
 ```
 
-Toggle items show their current state (e.g., "Units: m", "Op Mode: SURF") and stay open after toggling. Non-toggle items (Baseline, Mounted, Hdg cal, Mark) execute and close the menu. Select WP and Arrive WP open the waypoint selector UI.
+Toggle items show their current state (e.g., "Units: m", "Op Mode: SURF") and stay open after toggling. Non-toggle items (Baseline, Fill gaps, Mounted, Hdg cal, Mark) execute and close the menu. Select WP and Arrive WP open the waypoint selector UI.
 
 ### Waypoint Selector UI (NAV > Select WP and Arrive WP)
 
@@ -108,7 +109,7 @@ All toggle states (GPS, WiFi, Water, Op Mode, Log level, and all Display setting
 
 ### Fourier Heading Calibration (CAL > Hdg cal)
 
-After magnetometer calibration, systematic heading errors (5–20°) typically remain due to the DPV's magnetic geometry. Heading cal collects 12 data points for an offline Fourier fit that reduces residual error to ~2°.
+After magnetometer calibration, systematic heading errors (5–20°) typically remain due to the DPV's magnetic geometry. Heading cal collects 12 data points for a Fourier fit (done automatically in the cloud, or offline as a fallback) that reduces residual error to ~2°.
 
 **When to use:** After completing baseline + mounted mag cal. Run in a magnetically clean environment (not a garage with a concrete floor).
 
@@ -129,27 +130,51 @@ After magnetometer calibration, systematic heading errors (5–20°) typically r
 
 3. Press **BTN2**. The step advances to 030°, then 060°, … through all 12 steps at 30° intervals.
 
-4. After Step 12, the nav device saves `/hdg_samples.csv` and shows:
+4. After Step 12, the nav device saves `/hdg_samples.csv` and, **if the unit has WiFi connected**, automatically uploads it, gets a fitted result back within seconds, and shows an accept/reject screen right there:
    ```
-   HDG CAL
+   CLOUD CAL
    ─────────────────
-   12 points saved
-
-   Export /hdg_samples.csv
-   Run fourier_fit.py
-   Upload hdg_fourier.json
+   Quality: GOOD
+   Max err: 1.8°
    ─────────────────
-   Press BTN2 to exit
+   > ACCEPT
+     REJECT
    ```
+   Press **BTN1** to cycle ACCEPT/REJECT, **BTN2** to confirm. Accept installs the new heading correction immediately (no reboot needed); reject discards it and keeps whatever was active before.
 
-5. Press **BTN2** to return to normal navigation.
+   **If the unit has no WiFi**, you'll see an offline notice instead — the CSV is still saved, so the manual fallback below still works.
 
-**Part 2 — Offline fit and upload:**
+5. Press **BTN2** to exit and return to normal navigation.
+
+**Part 2 — Offline fit and upload (fallback only, for when the unit had no WiFi):**
 
 1. Download `/hdg_samples.csv` from the nav device LittleFS.
 2. Run: `python tools/fourier_fit.py hdg_samples.csv`
 3. Upload the resulting `hdg_fourier.json` to nav device LittleFS root.
 4. Reboot — the correction loads automatically on next boot.
+
+**If one section of the circle came out thin** (e.g. only a few of the 12 points landed within some 90° span), the cloud fit detects this automatically and the Dive Map website will show a "thin sector(s)" flag on that calibration with suggested headings to fill it — see **Filling a Thin Heading Sector** below. This only applies if you used the cloud path (step 4 above); the offline fallback tool doesn't check for this.
+
+### Filling a Thin Heading Sector
+
+If Dive Map flags a thin sector on your heading calibration, there's no need to redo
+all 12 points — a small web form fills just the gap:
+
+1. Sign in to Dive Map and open your device's **Calibration History**.
+2. The affected heading (hdg) calibration row shows a "thin sector(s)" badge. Expand
+   it to see the gap(s) and the suggested headings to add.
+3. For each suggested heading: aim the DPV at that bearing (same method as the
+   original 12-point collection — a compass or known landmark), read the
+   **indicated** heading off the unit's display, and type both the target and
+   indicated values into the form.
+4. Submit. The website combines your typed points with the original upload and
+   re-fits, producing a new (not-yet-active) calibration for you to review.
+5. Review the result and press **Accept** on the website.
+6. **This does not update the device yet.** Back on the unit, open the web
+   interface at `tern.local`, find **Calibration Cloud Sync**, and press **Check
+   for updates** — this is the step that actually pulls the accepted result onto
+   the device. Skipping it means the website shows an accepted calibration that
+   the unit still isn't using.
 
 ### Speed Calibration (CAL > Speed cal)
 
@@ -207,12 +232,12 @@ Speed cal measures how accurately the flow sensor reports speed by swimming a kn
 - After 3–6 runs the rolling average stabilises; use ACCEPT each time
 - Use RESET+ACCEPT when the DPV has been serviced or the impeller changed
 
-### Magnetometer Calibration Progress Screen (Baseline and Mounted)
+### Magnetometer Calibration Progress Screens
 
-When a bin-aware calibration is running (Baseline or Mounted), the display switches to a bin-coverage grid:
+**Mounted** (and **Fill gaps**) show a bin-coverage grid while collecting:
 
 ```
-BASELINE CAL   (or "MOUNTED CAL")
+MOUNTED CAL   (or "BASELINE CAL" during Fill gaps)
 
      N NE  E SE  S SW  W NW  N NE  E SE
  60° [  ][  ][██][██][██][██][██][  ][  ][  ][  ][  ]
@@ -225,8 +250,18 @@ Hdg: 037°  Pit: -2°       45/60 bins green
 ```
 
 Colors: **green** = fully covered, **yellow** = partial, **red** = sparse, **black** = empty.
+Collection auto-completes when all required (or targeted, for Fill gaps) bins turn green.
 
-The display returns to normal navigation automatically when all required bins turn green.
+**Baseline** shows axis-range bars and live fit stats instead — no grid (a live grid
+during a *first* baseline pass turned out not to be trustworthy; see
+[calibration-guide.md](calibration-guide.md#running-baseline-calibration)). Rotate
+through all orientations until the bars fill and the stats look stable, then press
+**BTN2** yourself to declare it done — there's no auto-completion here.
+
+**After any of these three, if the unit has WiFi:** the display automatically shows
+a "CLOUD CAL" wait screen, then an accept/reject result (quality band + RMS). See
+[calibration-guide.md](calibration-guide.md#magnetometer-calibration) for the full
+cloud round trip and the offline fallback if there's no WiFi.
 
 **Op Mode (Dive/Surface):** The device boots in the **last saved mode** (surface mode on first boot). Before entering the water, toggle to **dive mode** via NAV > Op Mode — this disables GPS processing and turns off the WiFi radio, and the selection is saved to NVS immediately. On surfacing, toggle back to surface mode to re-enable both.
 
@@ -312,9 +347,9 @@ Requires `ENABLE_DEBUG_PACKET 1` on the nav device to send sensor data:
 
 ## Recommended Calibration Order (New Installation)
 
-1. **Baseline mag cal** — device off DPV, full sphere coverage. Run offline Python fit, upload `mag_base.json`.
-2. **Mounted mag cal** — device installed on DPV, horizontal rotations. Run offline Python fit, upload `mag_mount.json`.
-3. **Fourier heading cal** — collect 12 points on DPV at 30° intervals, run `fourier_fit.py` offline, upload `hdg_fourier.json`.
+1. **Baseline mag cal** — device off DPV, full sphere coverage. Cloud-fits and shows accept/reject on-device if WiFi is connected (otherwise run the offline Python fit and upload `mag_base.json` manually).
+2. **Mounted mag cal** — device installed on DPV, horizontal rotations. Same cloud-fit/accept-reject flow, otherwise offline fit + upload `mag_mount.json`.
+3. **Fourier heading cal** — collect 12 points on DPV at 30° intervals. Same cloud-fit/accept-reject flow, otherwise offline `fourier_fit.py` + upload `hdg_fourier.json`. If the website flags a thin sector afterward, fill it via the web form (see **Filling a Thin Heading Sector** above) instead of redoing all 12 points.
 4. **Speed cal** — 3–6 runs over a known distance to dial in the flow sensor k-factor.
 
 Gyro and accel calibrate automatically on first boot if their files are absent.
@@ -358,8 +393,9 @@ and depth together.
 ## Troubleshooting
 
 - **"NO LINK" on display**: Check Serial1 wiring between devices. Nav device should be sending packets.
-- **Heading off by constant amount**: Run **CAL > Hdg cal** to collect 12-point data, fit, and upload `hdg_fourier.json`. If errors are large (>10°) or inconsistent, redo mounted mag cal first.
-- **Heading varies by orientation (tilt-dependent)**: Soft-iron distortion not fully corrected — redo mounted mag cal and run offline ellipsoid fitting.
+- **Heading off by constant amount**: Run **CAL > Hdg cal** to collect 12-point data — it cloud-fits and shows accept/reject automatically if the unit has WiFi. If errors are large (>10°) or inconsistent, redo mounted mag cal first.
+- **Heading varies by orientation (tilt-dependent)**: Soft-iron distortion not fully corrected — redo mounted mag cal (cloud-fits automatically, same as above).
+- **One part of the compass rose is worse than the rest after Hdg cal**: check Dive Map's Calibration History for a "thin sector(s)" flag on that calibration and fill it via the web form rather than redoing the full 12 points — see **Filling a Thin Heading Sector**.
 - **Position drifts without moving**: Check gyro calibration (should be done at rest). Flow sensor may be noisy — increase `FLOW_AVG_PERIOD_S`.
 - **GPS shows speed when stationary**: GPS position jitter creates phantom speed. The SOG deadband + COG coherence filter should reject this. Enable `GPS_DIAG_ENABLE` in nav_main.cpp to see raw SOG/COG and filter decisions.
 - **GPS not used for position**: Ensure `DEFAULT_USE_GPS_POSITION = true` in config.h. GPS needs clear sky view (not available underwater).

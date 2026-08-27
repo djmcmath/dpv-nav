@@ -1,6 +1,7 @@
 #include "cloud_client.h"
 
 #include <ArduinoJson.h>
+#include <string.h>
 #include <HTTPClient.h>
 #include <LittleFS.h>
 #include <Preferences.h>
@@ -428,6 +429,102 @@ bool fetchCalibrationStatus(std::vector<CalStatusEntry>& outEntries, String& err
         if (e.mode.length() > 0 && e.calibrationId.length() > 0 && e.resultUploadId.length() > 0) {
             outEntries.push_back(e);
         }
+    }
+    return true;
+}
+
+bool fetchCalTargets(uint8_t outGrid[60], bool& degradedOut,
+                      uint8_t outRollGrid[60][MAG_CAL_ROLL_SECTORS], bool& hasRollOut,
+                      String& errorOut) {
+    memset(outGrid, 0, 60);
+    degradedOut = false;
+    memset(outRollGrid, 0, 60 * MAG_CAL_ROLL_SECTORS);
+    hasRollOut = false;
+
+    String token = loadToken();
+    if (token.length() == 0) {
+        errorOut = "device not authorized -- run cloud setup first";
+        return false;
+    }
+
+    WiFiClientSecure client;
+    client.setInsecure();
+    HTTPClient https;
+    https.setTimeout(CLOUD_HTTP_TIMEOUT_MS);
+    if (!https.begin(client, apiUrl("/api/device/calibrations/targets"))) {
+        errorOut = "could not start connection";
+        return false;
+    }
+    https.addHeader("Authorization", "Bearer " + token);
+
+    int code = https.GET();
+    String body = https.getString();
+    https.end();
+
+    if (code == 404) {
+        // Not necessarily an alarm -- covers three distinct backend reasons
+        // (no accepted baseline at all / accepted baseline has no coverage
+        // field / coverage field present but malformed), which used to get
+        // collapsed into one hardcoded "no graded baseline to target yet"
+        // here regardless of which one it actually was. Pass the backend's
+        // own `details` message through instead so the three are
+        // distinguishable from the diver-visible result text (see
+        // handlers/device.rs's calibration_targets for the exact strings).
+        errorOut = extractError(body, code);
+        return false;
+    }
+    if (code != 200) {
+        errorOut = extractError(body, code);
+        return false;
+    }
+
+    JsonDocument doc;
+    if (deserializeJson(doc, body) != DeserializationError::Ok) {
+        errorOut = "malformed targets response";
+        return false;
+    }
+
+    // The grid must be exactly the size the device renders. A short or long
+    // array means the server and firmware disagree about the grid shape, and
+    // guessing which cells the values belong to would send the diver to the
+    // wrong orientations -- refuse instead.
+    JsonArray grid = doc["grid"];
+    if (grid.isNull() || grid.size() != 60) {
+        errorOut = "targets grid was not 60 cells";
+        return false;
+    }
+    const int bands   = doc["elev_bands"]  | 0;
+    const int sectors = doc["hdg_sectors"] | 0;
+    if (bands != MAG_CAL_BASELINE_ELEV_BANDS || sectors != MAG_CAL_BASELINE_HDG_SECTORS) {
+        errorOut = "targets grid shape does not match this firmware";
+        return false;
+    }
+
+    for (int i = 0; i < 60; i++) {
+        int v = grid[i] | 0;
+        // Clamp unknown codes to "ok" -- an unfamiliar status from a newer
+        // processor should look uninteresting, not send the diver somewhere.
+        outGrid[i] = (v >= 0 && v <= 3) ? (uint8_t)v : (uint8_t)0;
+    }
+    degradedOut = doc["degraded"] | false;
+
+    // roll_grid is optional (absent for pre-roll or degraded calibrations --
+    // see the server's `targets_grid_from_coverage`/`roll_grid_from_coverage`
+    // in dive-map's device.rs). Same refuse-rather-than-guess discipline as
+    // the flat grid above: a shape that doesn't match this firmware's own
+    // MAG_CAL_ROLL_SECTORS is treated as "no roll data", not as roll data
+    // read into the wrong slots.
+    JsonArray rollGrid = doc["roll_grid"];
+    const int rollSectors = doc["roll_sectors"] | 0;
+    if (!rollGrid.isNull() && rollSectors == MAG_CAL_ROLL_SECTORS &&
+        rollGrid.size() == 60 * (size_t)MAG_CAL_ROLL_SECTORS) {
+        for (int i = 0; i < 60; i++) {
+            for (int k = 0; k < MAG_CAL_ROLL_SECTORS; k++) {
+                int v = rollGrid[i * MAG_CAL_ROLL_SECTORS + k] | 0;
+                outRollGrid[i][k] = (v >= 0 && v <= 3) ? (uint8_t)v : (uint8_t)0;
+            }
+        }
+        hasRollOut = true;
     }
     return true;
 }

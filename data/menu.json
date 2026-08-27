@@ -3,48 +3,118 @@
     {
       "title": "MENU",
       "items": [
-        {"label": "OFF", "act": 17},
-        {"label": "NAV", "sub": 1},
-        {"label": "CAL", "sub": 2},
-        {"label": "INPUT", "sub": 3},
-        {"label": "DISPLAY", "sub": 4}
+        {
+          "label": "OFF",
+          "act": 17
+        },
+        {
+          "label": "NAV",
+          "sub": 1
+        },
+        {
+          "label": "CAL",
+          "sub": 2
+        },
+        {
+          "label": "INPUT",
+          "sub": 3
+        },
+        {
+          "label": "DISPLAY",
+          "sub": 4
+        }
       ]
     },
     {
       "title": "NAV",
       "items": [
-        {"label": "Select WP", "act": 19},
-        {"label": "Arrive WP", "act": 20},
-        {"label": "Mark", "act": 4},
-        {"label": "Op Mode", "act": 16}
+        {
+          "label": "Select WP",
+          "act": 19
+        },
+        {
+          "label": "Arrive WP",
+          "act": 20
+        },
+        {
+          "label": "Mark",
+          "act": 4
+        },
+        {
+          "label": "Op Mode",
+          "act": 16
+        }
       ]
     },
     {
       "title": "CAL",
       "items": [
-        {"label": "Baseline", "act": 5},
-        {"label": "Mounted", "act": 6},
-        {"label": "Hdg cal", "act": 18},
-        {"label": "Speed cal", "act": 7}
+        {
+          "label": "Baseline",
+          "act": 5
+        },
+        {
+          "label": "Fill gaps",
+          "act": 23
+        },
+        {
+          "label": "Mounted",
+          "act": 6
+        },
+        {
+          "label": "Hdg cal",
+          "act": 18
+        },
+        {
+          "label": "Speed cal",
+          "act": 7
+        }
       ]
     },
     {
       "title": "INPUT",
       "items": [
-        {"label": "GPS", "act": 8},
-        {"label": "WiFi", "act": 10},
-        {"label": "Logging", "act": 11},
-        {"label": "Water", "act": 22},
-        {"label": "Link acct", "act": 21}
+        {
+          "label": "GPS",
+          "act": 8
+        },
+        {
+          "label": "WiFi",
+          "act": 10
+        },
+        {
+          "label": "Logging",
+          "act": 11
+        },
+        {
+          "label": "Water",
+          "act": 22
+        },
+        {
+          "label": "Link acct",
+          "act": 21
+        }
       ]
     },
     {
       "title": "DISPLAY",
       "items": [
-        {"label": "Mode", "act": 12},
-        {"label": "Spd/ETA", "act": 13},
-        {"label": "Units", "act": 14},
-        {"label": "Heading", "act": 15}
+        {
+          "label": "Mode",
+          "act": 12
+        },
+        {
+          "label": "Spd/ETA",
+          "act": 13
+        },
+        {
+          "label": "Units",
+          "act": 14
+        },
+        {
+          "label": "Heading",
+          "act": 15
+        }
       ]
     }
   ]

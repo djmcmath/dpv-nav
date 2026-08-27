@@ -124,6 +124,15 @@ enum class CalType : uint8_t {
 enum class CalPhase : uint8_t {
     COLLECT    = 0,  // mounted only: collect samples until bins are green
     ROUGH_SCAN = 1,  // baseline only: no grid, just axis-range bars + fit stats
+    // Gap-fill: a *second* baseline pass that patches the cells the server
+    // reported thin or empty on an already-installed baseline cal. It gets a
+    // live grid where ROUGH_SCAN deliberately doesn't, because it runs only
+    // when a good cal already exists -- so orientation can be computed
+    // algebraically per sample (no Mahony, no filter lag) using the exact same
+    // math the server used to draw the map the diver is working from. See
+    // src/util/mag_cal_orient.h for why this isn't the seventh failed attempt
+    // at live orientation feedback.
+    GAP_FILL   = 2,
 };
 
 struct CalProgressPacket {
@@ -143,9 +152,38 @@ struct CalProgressPacket {
     uint8_t  cov_x, cov_y, cov_z;
     uint16_t sample_count;
 
+    // ROUGH_SCAN only: true when `complete` was triggered by the sample
+    // buffer hitting its cap rather than the diver pressing BTN2 -- lets the
+    // display say *why* it stopped instead of just "Done".
+    bool     max_samples_reached;
+
     // Incremental 2-D ellipse fit quality (updated each GetProgress call, ~2 Hz)
     // Reflects circularity of XY plane data in calibrated space — the quantity
     // that directly determines heading accuracy. Populated in both phases.
+    // GAP_FILL only: the per-cell status the *server* computed for the baseline
+    // being patched (0=ok, 1=thin, 2=empty, 3=over), straight from
+    // callib/coverage.py via GET /api/device/calibrations/targets. The device
+    // renders these and never recomputes them -- "which cells need work" is a
+    // server-side judgement still being tuned against real collections, and
+    // keeping it there means retuning it costs a sync, not a reflash.
+    // `has_targets` is false in every other phase, where the array is unused.
+    bool     has_targets;
+    uint8_t  targets[60];
+
+    // GAP_FILL only: roll-sector breakdown for whichever cell is *currently*
+    // targeted/highlighted (the one `current_bin` points at) -- not a
+    // per-cell array, since the persistent roll widget only ever needs the
+    // one cell under the highlight (see mag-cal-orient-roll-plan). Same
+    // server-computed status semantics as `targets[]` (0=ok,1=thin,2=empty,
+    // 3=over), one entry per roll sector (upright/right-side/inverted/
+    // left-side -- MAG_CAL_ROLL_SECTORS in config.h; hardcoded to 4 here the
+    // same way `bin_counts`/`targets` hardcode 60, since dpvlink is a shared
+    // wire-format header with no config.h dependency). Meaningless outside
+    // GAP_FILL or when has_targets is false.
+    uint8_t  current_bin_roll_counts[4];
+    uint8_t  current_bin_roll_targeted[4];
+    int8_t   current_roll_sector;  // live roll sector of current_bin's cell; -1 if unmappable, mirrors current_bin
+
     bool  fit_valid;        // true once ≥8 samples and a valid ellipse solution exists
     float fit_hdg_err_deg;  // estimated heading error from XY ellipticity (degrees);
                             // converges toward the expected error of the resulting cal
@@ -178,6 +216,15 @@ struct CalCloudResultPacket {
     int16_t coverage_gaps;        // stage == DONE only; baseline only. -1 = not
                                    // applicable (mounted, or pre-9-axis-firmware CSV).
                                    // See divemap's baseline-cal-coverage-feedback-plan.md.
+    // stage == DONE only. False for a gap-fill upload: that fit is computed
+    // from ONLY the cells the diver just patched (a handful out of 60), and
+    // is a merge candidate on the website, never something to install
+    // standalone. True (the default) preserves old wire behaviour for
+    // baseline/mounted, where accepting IS the intended action. The display
+    // must not offer ACCEPT/REJECT when this is false -- see
+    // divemap/docs/architecture/baseline-cal-coverage-feedback-plan.md,
+    // "gap-fill never overwrites the active baseline on its own."
+    bool    installable = true;
 };
 
 // ---------------------------------------------------------------------------
@@ -263,6 +310,7 @@ enum class DisplayCmd : uint8_t {
     FINISH_BASELINE_COLLECTION = 35, // diver declares baseline collection done -> dump CSV, upload for grading
     TOGGLE_WATER_DENSITY   = 36, // toggle salt/fresh water density used for depth calculation
     LINK_HELLO             = 37, // reply to a BOOT_PING — proves the display->nav direction is alive
+    START_GAPFILL_CAL      = 38, // begin a guided gap-fill baseline pass (requires an installed baseline cal + synced targets)
 };
 
 // ---------------------------------------------------------------------------

@@ -108,17 +108,23 @@ static void loadDefaults() {
     // CAL submenu (index 2)
     auto& cal = submenus[2];
     strncpy(cal.title, "Cal", MENU_LABEL_LEN);
-    cal.count = 5;
+    cal.count = 6;  // 5 actions + ".."  (MAX_ITEMS is 6 -- this submenu is now full)
     strncpy(cal.items[0].label, "Baseline", MENU_LABEL_LEN);
     cal.items[0].action = Action::CAL_BASELINE; cal.items[0].submenuIdx = -1;
-    strncpy(cal.items[1].label, "Mounted", MENU_LABEL_LEN);
-    cal.items[1].action = Action::CAL_MOUNTED; cal.items[1].submenuIdx = -1;
-    strncpy(cal.items[2].label, "Hdg cal", MENU_LABEL_LEN);
-    cal.items[2].action = Action::CAL_HDG; cal.items[2].submenuIdx = -1;
-    strncpy(cal.items[3].label, "Speed cal", MENU_LABEL_LEN);
-    cal.items[3].action = Action::CAL_SPEED; cal.items[3].submenuIdx = -1;
-    strncpy(cal.items[4].label, "..", MENU_LABEL_LEN);
-    cal.items[4].action = Action::NONE; cal.items[4].submenuIdx = -1;
+    // Directly under Baseline: gap-fill is the second half of that job, and
+    // the diver reaches for it right after the website tells them where the
+    // holes are. (Previously placed after Mounted despite this comment
+    // already saying otherwise -- fixed to match.)
+    strncpy(cal.items[1].label, "Fill gaps", MENU_LABEL_LEN);
+    cal.items[1].action = Action::CAL_GAPFILL; cal.items[1].submenuIdx = -1;
+    strncpy(cal.items[2].label, "Mounted", MENU_LABEL_LEN);
+    cal.items[2].action = Action::CAL_MOUNTED; cal.items[2].submenuIdx = -1;
+    strncpy(cal.items[3].label, "Hdg cal", MENU_LABEL_LEN);
+    cal.items[3].action = Action::CAL_HDG; cal.items[3].submenuIdx = -1;
+    strncpy(cal.items[4].label, "Speed cal", MENU_LABEL_LEN);
+    cal.items[4].action = Action::CAL_SPEED; cal.items[4].submenuIdx = -1;
+    strncpy(cal.items[5].label, "..", MENU_LABEL_LEN);
+    cal.items[5].action = Action::NONE; cal.items[5].submenuIdx = -1;
 
     // CONFIG submenu (index 3)
     auto& inp = submenus[3];
@@ -303,6 +309,15 @@ static void executeAction(Action act) {
             if (gSendCmd) gSendCmd(DisplayCmd::START_MOUNTED_CAL);
             display::clear();  // see CAL_BASELINE above
             Serial.println("[MENU] CAL_MOUNTED (START_MOUNTED_CAL)");
+            break;
+        case Action::CAL_GAPFILL:
+            // Nav may refuse this (no installed baseline, or no synced target
+            // map) and answer with a CalCloudResult FAILED screen instead of a
+            // cal session. Clearing here is still right either way -- both
+            // outcomes are full-screen.
+            if (gSendCmd) gSendCmd(DisplayCmd::START_GAPFILL_CAL);
+            display::clear();  // see CAL_BASELINE above
+            Serial.println("[MENU] CAL_GAPFILL (START_GAPFILL_CAL)");
             break;
         case Action::CAL_SPEED:
             gSpeedCalPending = true;  // signal display_main to enter distance selection

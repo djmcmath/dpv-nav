@@ -3,6 +3,7 @@
 #include "cal_sync.h"
 #include "cloud_client.h"
 #include "../util/waypoints.h"
+#include "../nav_main.h"
 #include <ArduinoJson.h>
 #include <WebServer.h>
 #include <WiFi.h>
@@ -72,17 +73,14 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
   .calsync .label { font-size: .85rem; color: #aaa; margin-top: .6rem; }
   #calsyncstatus { font-size: .9rem; color: #aaa; margin: .5rem 0; }
   #calsyncaction { font-size: .9rem; color: #72efdd; margin-top: .3rem; min-height: 1.2em; }
-  .divelog { margin-top: 1rem; padding: 1rem; background: #16213e; border-radius: 8px; }
-  .divelog button { background: #4cc9f0; color: #1a1a2e; border: none; padding: .3rem .7rem;
-    border-radius: 4px; cursor: pointer; font-weight: bold; margin: 0 .4rem .4rem 0; font-size: .85rem; }
-  .divelog button:hover { background: #72efdd; }
-  .divelog button:disabled { background: #333; color: #777; cursor: not-allowed; }
-  #cloudstatus { font-size: .9rem; color: #aaa; margin-bottom: .6rem; }
-  .divelog table { width: 100%; border-collapse: collapse; margin: .5rem 0; }
-  .divelog th, .divelog td { text-align: left; padding: .4rem .5rem; border-bottom: 1px solid #333; font-size: .9rem; }
-  .divelog th { color: #4cc9f0; }
-  .divelog .sel { display: none; width: 1.5rem; }
-  .divelog.selecting .sel { display: table-cell; }
+  #cloudstatus { font-size: .9rem; color: #aaa; margin: -.5rem 0 1rem; }
+  th.sel, td.sel { width: 1.5rem; }
+  .uploadbar { margin: -1rem 0 1.5rem; }
+  .uploadbar button, .btn-upload { background: #4cc9f0; color: #1a1a2e; border: none;
+    padding: .3rem .7rem; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: .85rem; }
+  .uploadbar button:hover, .btn-upload:hover { background: #72efdd; }
+  .uploadbar button:disabled, .btn-upload:disabled { background: #333; color: #777; cursor: not-allowed; }
+  .cloudresult { display: block; font-size: .8rem; color: #72efdd; margin-top: .25rem; }
   .wifisec { margin-top: 1.5rem; padding: 1rem; background: #16213e; border-radius: 8px; }
   .wifisec .row { margin: .4rem 0; }
   .wifisec label { display: inline-block; width: 3.5rem; }
@@ -99,10 +97,17 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <body>
 <h1>DPV-Nav File Manager</h1>
 <div class="info" id="fsinfo">Loading...</div>
+<div class="info" id="cloudstatus">Checking cloud link...</div>
 <table>
-  <thead><tr><th>File</th><th>Size</th><th></th><th></th></tr></thead>
-  <tbody id="files"><tr><td colspan="4">Loading...</td></tr></tbody>
+  <thead><tr>
+    <th class="sel"><input type="checkbox" id="selall" onchange="toggleSelectAll()" title="Select all uploadable files"></th>
+    <th>File</th><th>Size</th><th></th><th></th><th>Cloud</th>
+  </tr></thead>
+  <tbody id="files"><tr><td colspan="6">Loading...</td></tr></tbody>
 </table>
+<div class="uploadbar">
+  <button id="uploadselected" onclick="uploadSelected()">Upload Selected to Cloud</button>
+</div>
 <div class="upload">
   <b>Upload File</b>
   <form id="upform">
@@ -136,19 +141,6 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
     <button onclick="restoreCal('speed')">Speed</button>
   </div>
 </div>
-<div class="divelog" id="divelogpanel">
-  <b>Dive Log Upload</b>
-  <div id="cloudstatus">Checking...</div>
-  <table>
-    <thead><tr><th class="sel"><input type="checkbox" id="dlselall" onchange="toggleSelectAll()"></th><th>File</th><th>Size</th><th></th><th></th></tr></thead>
-    <tbody id="dlbody"><tr><td colspan="5">No dive logs</td></tr></tbody>
-  </table>
-  <div>
-    <button id="dlstart" onclick="toggleDiveLogSelect()">Upload Dive Logs</button>
-    <button id="dlupload" onclick="uploadSelectedLogs()" style="display:none">Upload Selected</button>
-    <button id="dlcancel" onclick="toggleDiveLogSelect()" style="display:none">Cancel</button>
-  </div>
-</div>
 <div class="waypoints">
   <b>Waypoints</b>
   <table>
@@ -178,6 +170,21 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
   <div id="wifistat2"></div>
 </div>
 <script>
+// Files recoverable via the calibration retry-upload flow (see
+// nav_main::retryCalibrationUpload) -- kept in sync with the whitelist in
+// nav_main.cpp's retryCalibrationUpload().
+const CAL_RECOVERABLE_FILES = new Set([
+  '/mag_baseline_samples.csv', '/mag_mounted_samples.csv',
+  '/mag_gapfill_samples.csv', '/hdg_samples.csv'
+]);
+let cloudLinked = false;
+
+function classifyUpload(name) {
+  if (name.startsWith('/logs/') && name.endsWith('.csv')) return 'dive_log';
+  if (CAL_RECOVERABLE_FILES.has(name)) return 'cal';
+  return null;
+}
+
 async function load() {
   const [files, info] = await Promise.all([
     fetch('/api/files').then(r => r.json()),
@@ -185,17 +192,62 @@ async function load() {
   ]);
   document.getElementById('fsinfo').textContent =
     `Storage: ${fmt(info.used)} / ${fmt(info.total)} used (${fmt(info.free)} free)`;
-  renderDiveLogs(files.filter(f => f.name.startsWith('/logs/') && f.name.endsWith('.csv')));
   const tb = document.getElementById('files');
-  if (!files.length) { tb.innerHTML = '<tr><td colspan="4">No files</td></tr>'; return; }
-  tb.innerHTML = files.map(f =>
-    `<tr>
+  if (!files.length) { tb.innerHTML = '<tr><td colspan="6">No files</td></tr>'; return; }
+  tb.innerHTML = files.map(f => {
+    const kind = classifyUpload(f.name);
+    const sel = kind
+      ? `<input type="checkbox" class="upsel" data-name="${f.name}" data-kind="${kind}">` : '';
+    const cloud = kind
+      ? `<button class="btn-upload" onclick="uploadOne('${f.name}','${kind}')" ${cloudLinked ? '' : 'disabled'}>Upload to cloud</button>` +
+        `<span class="cloudresult" data-name="${f.name}"></span>`
+      : '';
+    return `<tr>
+      <td class="sel">${sel}</td>
       <td>${f.name}</td>
       <td>${fmt(f.size)}</td>
       <td><a class="btn btn-dl" href="/api/download?file=${encodeURIComponent(f.name)}">Download</a></td>
       <td><button class="btn btn-del" onclick="del('${f.name}')">Delete</button></td>
-    </tr>`
-  ).join('');
+      <td>${cloud}</td>
+    </tr>`;
+  }).join('');
+}
+function toggleSelectAll() {
+  const on = document.getElementById('selall').checked;
+  document.querySelectorAll('#files .upsel').forEach(cb => cb.checked = on);
+}
+async function uploadOne(name, kind) {
+  const status = document.querySelector(`.cloudresult[data-name="${CSS.escape(name)}"]`);
+  if (status) status.textContent = 'Uploading...';
+  try {
+    if (kind === 'dive_log') {
+      const r = await fetch('/api/dive-logs/upload?file=' + encodeURIComponent(name), { method: 'POST' });
+      const text = await r.text();
+      if (status) status.textContent = r.ok ? 'Uploaded' : 'Failed: ' + text;
+      return;
+    }
+    const r = await fetch('/api/cal/retry-upload?file=' + encodeURIComponent(name), { method: 'POST' });
+    const j = await r.json();
+    if (!status) return;
+    if (!j.ok) { status.textContent = 'Failed: ' + (j.error || 'unknown error'); return; }
+    const unit = name === '/hdg_samples.csv' ? '°' : '%';
+    const next = j.installable
+      ? 'check the unit’s display to accept/reject.'
+      : 'uploaded — merge it into a calibration on the Dive Map website.';
+    status.textContent = `Fit ${j.quality_band} (${j.rms_pct.toFixed(1)}${unit} err) — ${next}`;
+  } catch (e) {
+    if (status) status.textContent = 'Failed: network error';
+  }
+}
+async function uploadSelected() {
+  const boxes = Array.from(document.querySelectorAll('#files .upsel:checked'));
+  if (!boxes.length) { alert('Select at least one file to upload.'); return; }
+  const btn = document.getElementById('uploadselected');
+  btn.disabled = true;
+  for (const cb of boxes) {
+    await uploadOne(cb.dataset.name, cb.dataset.kind);
+  }
+  btn.disabled = false;
 }
 function fmt(b) {
   if (b < 1024) return b + ' B';
@@ -363,58 +415,13 @@ async function loadCloudStatus() {
   const el = document.getElementById('cloudstatus');
   try {
     const s = await fetch('/api/cloud-status').then(r => r.json());
-    el.textContent = s.authorized
+    cloudLinked = s.authorized;
+    el.textContent = cloudLinked
       ? 'Linked to Dive Map account.'
       : 'Not linked — link this device from the CAL menu on the unit first.';
-    document.getElementById('dlstart').disabled = !s.authorized;
+    document.querySelectorAll('.btn-upload').forEach(b => b.disabled = !cloudLinked);
+    document.getElementById('uploadselected').disabled = !cloudLinked;
   } catch (e) { el.textContent = 'Could not check link status.'; }
-}
-function renderDiveLogs(files) {
-  const tb = document.getElementById('dlbody');
-  if (!files.length) { tb.innerHTML = '<tr><td colspan="5">No dive logs</td></tr>'; return; }
-  tb.innerHTML = files.map(f =>
-    `<tr data-name="${f.name}">
-      <td class="sel"><input type="checkbox" class="dlsel"></td>
-      <td>${f.name}</td>
-      <td>${fmt(f.size)}</td>
-      <td><a class="btn btn-dl" href="/api/download?file=${encodeURIComponent(f.name)}">Download</a></td>
-      <td class="dlstatus"></td>
-    </tr>`
-  ).join('');
-}
-function toggleSelectAll() {
-  const on = document.getElementById('dlselall').checked;
-  document.querySelectorAll('#dlbody .dlsel').forEach(cb => cb.checked = on);
-}
-function toggleDiveLogSelect() {
-  const panel = document.getElementById('divelogpanel');
-  const selecting = !panel.classList.contains('selecting');
-  panel.classList.toggle('selecting', selecting);
-  document.getElementById('dlstart').style.display  = selecting ? 'none' : '';
-  document.getElementById('dlupload').style.display = selecting ? '' : 'none';
-  document.getElementById('dlcancel').style.display = selecting ? '' : 'none';
-  document.getElementById('dlselall').checked = false;
-  document.querySelectorAll('#dlbody .dlsel').forEach(cb => cb.checked = false);
-  document.querySelectorAll('#dlbody .dlstatus').forEach(td => td.textContent = '');
-}
-async function uploadSelectedLogs() {
-  const rows = Array.from(document.querySelectorAll('#dlbody tr'))
-    .filter(tr => tr.querySelector('.dlsel') && tr.querySelector('.dlsel').checked);
-  if (!rows.length) { alert('Select at least one dive log to upload.'); return; }
-  document.getElementById('dlupload').disabled = true;
-  for (const tr of rows) {
-    const name = tr.dataset.name;
-    const status = tr.querySelector('.dlstatus');
-    status.textContent = 'Uploading...';
-    try {
-      const r = await fetch('/api/dive-logs/upload?file=' + encodeURIComponent(name), { method: 'POST' });
-      const text = await r.text();
-      status.textContent = r.ok ? 'Uploaded' : 'Failed: ' + text;
-    } catch (e) {
-      status.textContent = 'Failed: network error';
-    }
-  }
-  document.getElementById('dlupload').disabled = false;
 }
 load();
 loadWaypoints();
@@ -747,6 +754,38 @@ static void handleDiveLogUpload() {
     server.send(200, "text/plain", "Uploaded");
 }
 
+// --------------- calibration retry-upload ---------------
+// Diver-initiated recovery for a raw calibration sample CSV that's still on
+// LittleFS after its automatic cloud upload failed (WiFi blip, deploy
+// restart, etc. -- see dpvnav-http-minus3-causes). Runs the same
+// upload+fit+notify flow a live CAL-menu run performs
+// (nav_main::retryCalibrationUpload / runCalUploadAndNotify), so a
+// successful retry shows the normal accept/reject screen on the unit's
+// display exactly as a fresh cal would.
+
+static void handleCalRetryUpload() {
+    if (!server.hasArg("file")) {
+        server.send(400, "text/plain", "Missing 'file' parameter");
+        return;
+    }
+    CalRetryResult r = retryCalibrationUpload(server.arg("file").c_str());
+
+    JsonDocument doc;
+    doc["ok"] = r.ok;
+    doc["installable"] = r.installable;
+    if (r.ok) {
+        doc["quality_band"] = r.qualityBand;
+        doc["rms_pct"] = r.rmsPct;
+        doc["recommendation"] = r.recommendation;
+        doc["calibration_id"] = r.calibrationId;
+    } else {
+        doc["error"] = r.error;
+    }
+    String json;
+    serializeJson(doc, json);
+    server.send(r.ok ? 200 : 502, "application/json", json);
+}
+
 // --------------- public API ---------------
 
 void init() {
@@ -795,6 +834,7 @@ void init() {
     server.on("/api/wifi-status",   HTTP_GET,    handleWifiStatus);
     server.on("/api/cloud-status",     HTTP_GET,  handleCloudStatus);
     server.on("/api/dive-logs/upload", HTTP_POST, handleDiveLogUpload);
+    server.on("/api/cal/retry-upload", HTTP_POST, handleCalRetryUpload);
     server.onNotFound([]() {
         Serial.printf("[Web] 404: %s %s\n", server.method() == HTTP_GET ? "GET" : "POST",
                       server.uri().c_str());

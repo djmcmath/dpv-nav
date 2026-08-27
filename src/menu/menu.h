@@ -44,6 +44,7 @@ enum class Action : uint8_t {
     NAV_ARRIVE_WAYPOINT  = 20,  // open waypoint arrival UI (snap position TO a waypoint)
     CLOUD_LINK           = 21,  // begin device-auth cloud account link (RFC 8628)
     INPUT_WATER          = 22,  // toggle salt/fresh water density (depth calc)
+    CAL_GAPFILL          = 23,  // guided gap-fill pass over the cells the server flagged
 };
 
 // ---------------------------------------------------------------------------

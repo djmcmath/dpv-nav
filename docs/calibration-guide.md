@@ -1,10 +1,16 @@
 # Sensor Calibration Guide
 
-> **Planned:** magnetometer calibration (Baseline/Mounted) is planned to move to an
-> over-WiFi round-trip with Dive Map instead of the manual laptop-script step described
-> below — see [cloud-calibration-plan.md](./cloud-calibration-plan.md). Nothing below has
-> changed yet; the manual workflow remains the current, working procedure and will stay
-> the fallback path once the cloud flow ships.
+> **Shipped:** Baseline, Mounted, and Heading (12-pt) calibration all fit in the cloud
+> now. Collect on the unit with WiFi connected, and the nav device uploads the raw
+> samples, gets a fitted result + quality verdict back within seconds, and shows an
+> accept/reject screen right there on the display — no laptop step required. See
+> [cloud-calibration-plan.md](./cloud-calibration-plan.md) and divemap's
+> [heading-cal-cloud-plan.md](../../dive-map/docs/architecture/heading-cal-cloud-plan.md)
+> for the implementation history. The manual laptop workflow (export CSV, run the
+> Python fitting tool locally, upload the result under the exact expected filename)
+> described in places below is now the **offline fallback** — it still works, and is
+> what happens if the unit has no WiFi at the moment calibration finishes, since the
+> raw CSV is always saved to LittleFS either way.
 
 ## Overview
 
@@ -67,42 +73,53 @@ For hdg: load hdg_fourier.json — silently skip if absent (optional)
 
 ### Two-stage calibration chain
 
-The preferred calibration workflow uses two stages, each producing a JSON file that is the result of offline ellipsoid fitting (see [mag-calibration-workflow.md](mag-calibration-workflow.md)):
+The preferred calibration workflow uses two stages, each producing a JSON file that is the result of ellipsoid fitting — done automatically in the cloud when the unit has WiFi, or offline with the same fitting tool as a fallback:
 
 | Stage | Menu item | File | When to do |
 |-------|-----------|------|-----------|
 | Baseline | CAL > Baseline | `/mag_base.json` | First time, or after hardware change. Device off the DPV. Covers full sphere. |
 | Mounted | CAL > Mounted | `/mag_mount.json` | After baseline, with device installed on DPV. Corrects for DPV magnetic signature. |
 
-Both calibrations collect raw samples using a **bin-aware** approach: the screen shows a heading × elevation grid, and bins fill green as adequate samples are collected. When all required bins are green, the calibration is complete and the sample CSV is saved to LittleFS for offline processing.
+Mounted (and Baseline's `Fill gaps` patch pass) collect raw samples using a
+**bin-aware** approach: the screen shows a heading × elevation grid, and bins fill
+green as adequate samples are collected, completing automatically once all required
+bins are green. Baseline's first-time pass instead uses axis-range bars with no grid
+and completes when the diver presses BTN2 — see the note under **Running Baseline
+Calibration** below for why. Either way, the sample CSV is saved to LittleFS once
+collection ends.
 
 ### Running Baseline Calibration
 
-> **Superseded (2026-07-25):** the live bin-coverage grid described in steps 3-5 below
-> (including its two-pass revision from 2026-07-24, see
-> [baseline-cal-two-pass.md](./baseline-cal-two-pass.md)) failed on hardware and is
-> being retired for Baseline. The replacement collects with simple axis-range bars and
-> no live grid, then grades the result for real on the server and shows coverage gaps
-> on the Dive Map website instead of on the unit's screen — see
-> [divemap's baseline-cal-coverage-feedback-plan.md](../../divemap/docs/architecture/baseline-cal-coverage-feedback-plan.md).
-> Not yet implemented; this doc will get a fuller rewrite once it is.
+> **Live bin-coverage grid retired for Baseline (2026-07-25).** Six attempts at a
+> trustworthy live grid during a first-ever baseline pass all fought the same
+> chicken-and-egg problem (heading needs a calibration that doesn't exist yet) — see
+> [baseline-cal-two-pass.md](./baseline-cal-two-pass.md) for the failed attempts. The
+> replacement (shipped) collects with simple axis-range bars and live fit stats
+> instead — no grid, no false confidence — then grades coverage for real on the
+> server and shows a coverage heatmap on the Dive Map website. See divemap's
+> [baseline-cal-coverage-feedback-plan.md](../../dive-map/docs/architecture/baseline-cal-coverage-feedback-plan.md).
 
 1. **Remove device from DPV** and take it somewhere with low magnetic interference.
 2. Open menu (BTN1) → **CAL > Baseline**.
-3. The display switches to a bin-coverage grid screen. Rotate the device through all orientations — roll, pitch, yaw, and diagonals.
-4. Fill all bins green (the grid fills from left to right; level row must be 100%, tilted rows ~90%).
-5. When all required bins are green the display shows "DONE" briefly, then CSV data is saved to `/mag_baseline_samples.csv` on LittleFS.
-6. Export the CSV and run the Python offline fitting tool: `python tools/mag_calibration.py mag_baseline_samples.csv`
-7. Upload the generated `mag_base.json` to LittleFS.
+3. The display shows axis-range bars and live fit stats (no grid — see note above). Rotate the device through all orientations — roll, pitch, yaw, and diagonals — until the bars look full and the fit stats look stable.
+4. When you judge coverage good enough, press **BTN2**. The display shows a brief "finishing" screen while the nav device writes `/mag_baseline_samples.csv` to LittleFS.
+5. **If the unit has WiFi connected:** the nav device uploads the CSV, the server fits it and grades coverage, and the result is staged (not yet active). The display shows an accept/reject screen with the quality band and RMS. Accept to install it immediately (hot-reloads on the spot); reject to discard it and keep whatever was active before. The full coverage heatmap and any thin/empty regions are visible afterward on the Dive Map website under Calibration History.
+6. **If the unit has no WiFi:** the display shows an offline notice and no fit happens automatically. The CSV is still saved to LittleFS, so you can fall back to the manual path — download `/mag_baseline_samples.csv` (web interface or LittleFS tools) and run `python tools/mag_calibration.py mag_baseline_samples.csv`, then upload the generated `mag_base.json` to LittleFS yourself.
+
+**Filling coverage gaps:** see [Filling Coverage Gaps](#filling-coverage-gaps) below — thin or empty regions the website flags can be patched with **CAL > Fill gaps** without redoing the whole tumble.
 
 ### Running Mounted Calibration
+
+Mounted keeps the original live bin-coverage grid — its narrower ±30° operating range sidesteps the pole problem that motivated retiring Baseline's grid, so nothing about the collection UI changed here.
 
 1. **Mount device on DPV** in its normal installed position (all motors, batteries, and other magnetic sources present and at operational distance).
 2. Open menu (BTN1) → **CAL > Mounted**.
 3. Rotate the DPV through heading and tilt orientations. DPV operation is primarily horizontal so the grid only requires 3 elevation bands.
-4. Fill all required bins green, then export CSV (`/mag_mounted_samples.csv`) and run:
-   `python tools/mag_calibration.py --mode mounted --base mag_base.json mag_mounted_samples.csv`
-5. Upload the generated `mag_mount.json` to LittleFS **under exactly that name** (`/mag_mount.json`). Do not pass `--output` with a different name unless you rename it on upload — the firmware only reads `/mag_mount.json` and silently ignores anything else. See the heading troubleshooting notes for why this bites.
+4. When all required bins are green, the nav device writes `/mag_mounted_samples.csv` to LittleFS.
+5. **If the unit has WiFi connected:** same cloud round trip as Baseline — CSV uploads automatically, the server fits it, and the display shows an accept/reject screen with quality band and RMS. Accept to install and hot-reload immediately.
+6. **If the unit has no WiFi:** offline notice is shown; CSV is still saved. Fall back to the manual path: export `/mag_mounted_samples.csv` and run
+   `python tools/mag_calibration.py --mode mounted --base mag_base.json mag_mounted_samples.csv`,
+   then upload the generated `mag_mount.json` to LittleFS **under exactly that name** (`/mag_mount.json`). Do not pass `--output` with a different name unless you rename it on upload — the firmware only reads `/mag_mount.json` and silently ignores anything else (this only applies to the manual fallback path; the cloud path always writes the correct filename). See the heading troubleshooting notes for why this bites.
 
 ### What each calibration corrects
 
@@ -116,11 +133,121 @@ Both calibrations collect raw samples using a **bin-aware** approach: the screen
 
 Delete the corresponding JSON file(s) from LittleFS and reboot, or run the menu cal workflow to generate new sample CSVs.
 
-**Planned cloud workflow:** see [cloud-calibration-plan.md](./cloud-calibration-plan.md) —
-the offline steps above (export CSV, run `mag_calibration.py` locally, upload the
-result) are planned to become "unit uploads the CSV over WiFi, gets a fitted result and
-a quality verdict back, accept or reject on the spot." The on-device steps (positioning,
-menu navigation, bin-coverage collection) are unchanged either way.
+## Filling Coverage Gaps
+
+Redoing an entire baseline tumble or 12-point heading collection to patch one thin
+region is wasteful. Both mag baseline and heading (hdg) calibration support adding a
+short supplemental collection that the server merges into the existing fit, rather
+than starting over. The two work differently — mag's gap-fill is on-device, hdg's is
+a web form — because their gaps are detected differently (a 2-D orientation grid vs.
+a 1-D ring of headings).
+
+### Baseline: CAL > Fill gaps
+
+A *second* baseline pass that patches only the orientation cells the Dive Map website
+flagged as thin or empty on your installed baseline calibration — not a full redo.
+
+**Preconditions** (both refused on-screen if missing, rather than run degraded):
+- A baseline calibration must already be installed.
+- A target map must have been synced first: on `tern.local`, under **Calibration
+  Cloud Sync**, press **Check for updates** while connected to WiFi (cached on the
+  device as `/cal_targets.json`). This is a **web page button on the unit's own
+  `tern.local` page**, not a device menu item — there is no `CAL > Check for
+  updates` on the unit itself; the on-device refusal message says as much.
+  **Every** "Check for updates" click refreshes the target map, not just the
+  first — it's the same call whether or not there's a new cal file to install,
+  so re-run it any time you want the latest thin/empty regions (e.g. after
+  merging a gap-fill patch on the website), not just once ever.
+- If the target map fails to sync, the reason shows up right in the "Check for
+  updates" result text on `tern.local` (a common one: the currently-accepted
+  baseline predates coverage grading, or has none). It used to fail silently
+  into a Serial log only, useless for a diver checking from a phone with no USB
+  cable — fixed so the actual failure reason is always visible on the page.
+
+**Procedure:**
+1. Open menu (BTN1) → **CAL > Fill gaps**.
+2. Unlike the regular Baseline pass, this one *does* show a live coverage grid — a
+   good calibration already exists, so orientation can be computed algebraically
+   per-sample without needing the Mahony filter. Rotate toward the flagged cells;
+   the grid fills in as you go.
+3. Collection auto-completes once every targeted cell is satisfied. BTN2 also
+   finishes early, since a targeted cell can be physically unreachable depending on
+   how the device is mounted.
+4. The patch uploads to the cloud as a baseline-mode collection and is fit from
+   *just* the patched cells — small on purpose. This fit is never directly
+   installable (the on-device result screen is informational only, no accept/reject
+   toggle) — it only becomes useful once merged with your existing baseline.
+5. On the Dive Map website, open **Calibration History** for the device. Your most
+   recent baseline row shows a **"New collection available"** badge. Expand it to
+   see what the patch covers (a small coverage-grid thumbnail, which gaps it fills,
+   sample count), then tap to combine. This produces a new pending calibration row
+   (not yet accepted) that you review and **Accept** the same way as any fresh fit.
+
+**Why you sometimes have to hold the unit upside-down or on its side:**
+
+The 60-cell grid tracks *where* the sensor's tracked axis points — elevation and
+heading — but not how the unit is *rolled* about that axis while pointing there.
+That's on purpose: it's what makes tilt-compensated heading work at all. But it
+means a cell can show fully green ("enough samples at this elevation/heading")
+while every one of those samples came from roughly the same roll — a real gap in
+what the fit actually saw, invisible on the grid alone.
+
+To close it, each cell also grades **roll diversity** across four orientations —
+**upright**, **on its right side**, **upside-down**, **on its left side** — the
+same plain-language poses the accelerometer calibration section above uses.
+Upright needs about 3× the samples of the other three (most natural handling is
+upright-biased anyway, and closing this gap only needs enough angular diversity
+to break the "one roll" degeneracy, not dense sampling at every angle). A cell
+you're standing in can look done on the main grid and still want a quick
+roll — inverting the unit, or laying it on a side — before it clears.
+
+The screen shows a small square, split into four triangles (top/right/bottom/left
+= upright/right-side/upside-down/left-side), next to the orientation readout. It
+always reflects **whichever cell you're currently pointing at** — no separate
+screen to flip to — colored the same red/yellow/green as the main grid, with a
+white outline on whichever triangle matches your current roll. If a cell's
+triangles are still red or yellow once the main grid says you're on it, roll the
+unit through the outlined shape's neighbors until they clear.
+
+*(Readings can lag or jump while the unit is actively moving — the accelerometer
+briefly sees your hand's motion as "down," not just gravity. Pause near the
+target orientation rather than reading the grid or the roll widget mid-motion.)*
+
+### Heading (12-pt): the website manual-entry form
+
+The 12 fixed points (every 30°) can leave one span under-sampled — e.g. only 4 of the
+12 points falling in a 90° swing near North — which the whole-CSV fit can mask with a
+deceptively good in-sample error while the correction is actually bad in the gap. The
+server checks for this automatically on every heading fit (`sector_adequacy`): it
+looks for gaps wider than 45° between the collected headings and, if it finds one,
+suggests interior headings to fill it.
+
+Unlike Baseline's gap-fill, there is **no on-device collection flow for this** — no
+firmware round trip, no menu item. It's a small manual-entry form on the website:
+
+1. On the Dive Map website, open **Calibration History** for the device. A heading
+   (hdg) calibration row with a detected gap shows a **"N thin sector(s)"** badge.
+2. Expand it to see the flagged gap(s) and the suggested headings to fill them
+   (e.g. "gap 330°→060°, suggested: 0°, 30°").
+3. An editable-rows form appears, seeded with those suggested headings. For each
+   one: aim the DPV at that bearing using the same external reference (compass,
+   known landmark) the original 12-point collection used, read the **indicated**
+   heading off the unit's display, and type the `(actual, indicated)` pair into the
+   form by hand.
+4. Submit. This posts the typed rows to the server, which combines them with your
+   original 12-point upload and re-fits — producing a new pending calibration row,
+   same as any other fit (not auto-accepted).
+5. Review and **Accept** the new row on the website when you're satisfied.
+
+**Getting an accepted web result onto the physical unit:** accepting a calibration
+*on the website* only updates the database — there is no background mechanism that
+pushes it to the device. The device only picks up an accepted web-side result when
+you explicitly ask it to: on `tern.local`, under **Calibration Cloud Sync**, press
+**Check for updates**. This applies to both the Baseline gap-fill merge and the hdg
+manual-entry gap-fill described above — a calibration you accepted on the web is not
+"live" on the unit until you also do this step. (A calibration accepted *on the
+device itself*, via the normal accept/reject screen right after collection, needs no
+such step — it's already local.)
 
 ## Gyroscope Calibration
 
@@ -197,23 +324,22 @@ command, press Enter):
 3. Align the DPV to 0° (North). Watch the heading readout stabilise.
 4. Press **BTN2** to capture that heading. The screen advances to **Step 2/12: Target 030°**.
 5. Repeat for all 12 steps (every 30°: 0°, 30°, 60°, … 330°). Each BTN2 press captures the current indicated heading and records `(target, indicated)` on the nav device.
-6. After Step 12, the nav device saves `/hdg_samples.csv` and the done screen appears:
+6. After Step 12, the nav device saves `/hdg_samples.csv` and immediately hands off to
+   the same cloud upload/accept-reject flow Baseline and Mounted use (there is no
+   longer a separate "export CSV, run the tool, upload" screen here):
+   - **If the unit has WiFi connected:** the CSV uploads automatically, the server
+     fits it (auto-selecting 1–4 harmonics) and checks for sector gaps (see
+     [Filling Coverage Gaps](#filling-coverage-gaps) below), and the display shows
+     an accept/reject screen with the quality band and max error in **degrees**
+     (baseline/mounted show the equivalent number as a percent — same screen,
+     different unit label). Accept to install `hdg_fourier.json` immediately and
+     hot-reload; reject to discard and keep whatever heading correction was active
+     before.
+   - **If the unit has no WiFi:** the display shows an offline notice. `/hdg_samples.csv`
+     is still saved to LittleFS either way, so the manual fallback below still works.
+7. Press **BTN2** to exit the result screen and return to normal navigation.
 
-```
-HDG CAL
-─────────────────
-12 points saved
-
-Export /hdg_samples.csv
-Run fourier_fit.py
-Upload hdg_fourier.json
-─────────────────
-Press BTN2 to exit
-```
-
-7. Press **BTN2** to return to normal navigation.
-
-**Part 2 — Offline fit and upload:**
+**Part 2 — Offline fit and upload (fallback only, when the unit has no WiFi at cal time):**
 
 1. Download `/hdg_samples.csv` from the nav device (via web interface or LittleFS tools).
 2. Run: `python tools/fourier_fit.py hdg_samples.csv [--plot]`
@@ -222,6 +348,12 @@ Press BTN2 to exit
    - Optionally saves `hdg_fourier_fit.png` (requires `--plot`).
 3. Upload `hdg_fourier.json` to the nav device LittleFS root.
 4. Reboot — the correction loads automatically.
+
+This offline tool has no sector-gap check of its own — it fits whatever CSV you give
+it. If you took this fallback path and want gap detection too, you can still upload
+the CSV later once you have WiFi (via the same on-device Hdg cal flow, or by getting
+the raw CSV into a fresh cloud upload), or just watch for an obviously bad sector in
+the residual printout and hand-add points there before fitting.
 
 ### CSV format
 
@@ -250,7 +382,9 @@ headingDeg = headingRawDeg + correction(headingRawDeg)
 
 ### Recalibrating
 
-Run **CAL > Hdg cal** again, then redo the offline fit and upload the new `hdg_fourier.json`.
+Run **CAL > Hdg cal** again — the fresh 12-point collection uploads and fits in the
+cloud automatically (WiFi permitting) and replaces `hdg_fourier.json` on accept, same
+as the first time.
 
 ### Troubleshooting: heading still off after a full calibration
 
@@ -258,13 +392,13 @@ Real failure modes actually hit in the field, hardest-to-spot first. If the head
 
 1. **Checking in TRUE mode against a magnetic reference (or vice-versa).** *Symptom:* a near-constant offset of roughly the local declination (≈14.7° here) in **every** sector, with only a few degrees of per-sector variation on top. The nav device always computes TRUE heading; **DISPLAY > Heading** toggles TRUE/MAG on the display side ([display_main.cpp:237-244](../src/display_main.cpp#L237-L244)). A handheld compass reads MAGNETIC. When checking against a compass, set the display to **MAG**. This is the #1 cause of "everything is ~15° off."
 
-2. **Mounted correction uploaded under the wrong filename.** The firmware only ever loads `/mag_mount.json` ([storage.h:28](../src/util/storage.h#L28)). If you run the tool with `--output mag_mounted.json` (or any other name) and upload *that*, it is silently ignored — the **previous** mounted cal stays in effect and your fresh numbers never take. *Symptom:* the soft-iron ellipticity you meant to remove is still present (large residual 2nd harmonic). `mag_calibration.py` now prints a loud warning when the output name won't be read; heed it. Confirm on boot: `[STORAGE] mag_mount.json loaded`, with a `b_eff` that matches the new values.
+2. **Mounted correction uploaded under the wrong filename.** The firmware only ever loads `/mag_mount.json` ([storage.h:28](../src/util/storage.h#L28)). This is specifically a risk of the **manual offline fallback path** (cloud uploads always write the correct filename automatically): if you run the tool with `--output mag_mounted.json` (or any other name) and upload *that*, it is silently ignored — the **previous** mounted cal stays in effect and your fresh numbers never take. *Symptom:* the soft-iron ellipticity you meant to remove is still present (large residual 2nd harmonic). `mag_calibration.py` now prints a loud warning when the output name won't be read; heed it. Confirm on boot: `[STORAGE] mag_mount.json loaded`, with a `b_eff` that matches the new values.
 
 3. **Motor offset shifts the check but not the cal.** `/motor_cal.json`'s `heading_offset_deg` is added to the *displayed* heading **after** the Fourier correction ([nav_main.cpp:333](../src/nav_main.cpp#L333)), but the hdg-cal samples record `heading_raw_deg`, which is *before* it. So the motor offset is invisible to the fit and shows up as a constant bias in your check. Expect it, or zero it while collecting.
 
-4. **Fourier over-fit / coverage gaps.** With 12 points, `fourier_fit.py` caps at 2 harmonics on purpose — a tiny RMS at higher orders is over-fit, not accuracy. Because the deviation compresses the *indicated* scale, evenly-spaced targets can leave a large hole in the indicated domain (a ~50° gap near North is common); the fit is unconstrained there and worst in that sector. The tool warns when the largest gap exceeds 45°. Fill it by adding targets near the gap (see below).
+4. **Fourier over-fit / coverage gaps.** With 12 points, the fit caps at 2 harmonics on purpose — a tiny RMS at higher orders is over-fit, not accuracy. Because the deviation compresses the *indicated* scale, evenly-spaced targets can leave a large hole in the indicated domain (a ~50° gap near North is common); the fit is unconstrained there and worst in that sector. The cloud fit flags this automatically (`sector_adequacy`, gaps > 45°) and the Dive Map website shows a "thin sector(s)" badge with suggested headings to fill it — use the manual-entry form described in [Filling Coverage Gaps](#filling-coverage-gaps) above, it's the supported way to close a gap without redoing all 12 points. `fourier_fit.py`, the offline-fallback tool, warns about the same gap but has no form to act on it — see the hand-collecting note below if you're on that path.
 
-**Hand-collecting extra samples to fill a gap:** the new rows must be in the same frame as the existing ones — `heading_raw_deg`, i.e. **pre-Fourier, pre-motor magnetic**. To read that value off the nav screen: delete `hdg_fourier.json`, set `motor_cal.json` to `0`, reload cal, and put the display in **MAG** mode. Collect and append `actual,indicated` rows, refit, then restore both files. (Cleaner alternative: widen `kHdgCalTargets` in [display_main.cpp](../src/display_main.cpp#L68-L71) so the on-device flow gathers the extra points itself — no file juggling, guaranteed-consistent data.)
+**Hand-collecting extra samples to fill a gap (offline-fallback path only — if you're on WiFi, use the web form above instead):** the new rows must be in the same frame as the existing ones — `heading_raw_deg`, i.e. **pre-Fourier, pre-motor magnetic**. To read that value off the nav screen: delete `hdg_fourier.json`, set `motor_cal.json` to `0`, reload cal, and put the display in **MAG** mode. Collect and append `actual,indicated` rows to `hdg_samples.csv`, refit with `fourier_fit.py`, then restore both files.
 
 ## Storage API
 
@@ -279,7 +413,8 @@ storage::loadMagCalibration("/mag_base.json", magCal);
 storage::saveCalib3("/gyro_cal.json", gyroCal);
 storage::loadCalib3("/gyro_cal.json", gyroCal);
 
-// Heading cal (read-only on device — file is uploaded by user after offline fit)
+// Heading cal (read-only on device — file is written by ACCEPT_CLOUD_CAL after a
+// cloud fit, or uploaded manually after the offline fallback)
 #include "util/hdg_cal.h"
 hdg_cal::load(gHdgCal);                    // returns bool; reads /hdg_fourier.json
 hdg_cal::apply(headingDeg, gHdgCal);       // returns corrected heading

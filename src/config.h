@@ -138,6 +138,72 @@ constexpr int MAG_CAL_ROUGH_SCAN_MIN_SAMPLES = 40;
 constexpr float MAG_CAL_ROUGH_SCAN_EXPECTED_RANGE = 6800.0f;
 
 // ---------------------------------------------------------------------------
+// Guided gap-fill (2026-08-24) — a second baseline pass that patches only the
+// cells the server flagged. See divemap/docs/architecture/
+// baseline-cal-coverage-feedback-plan.md Phase 2 and src/util/mag_cal_orient.h.
+// ---------------------------------------------------------------------------
+
+// Per-cell acceptance caps. Gap-fill exists because unbalanced bins make fits
+// worse, so it must not create the next over-weighted bin on its way to
+// filling an empty one: a targeted cell stops accepting once it has enough to
+// constrain the fit locally, and an untargeted cell takes only a token amount.
+//
+// The untargeted allowance is not zero on purpose — a diver sweeping toward a
+// target passes through neighbouring cells, and a few samples of free context
+// costs nothing while a hard zero would throw away good data for no reason.
+//
+// TARGET_CAP sits just under MAG_CAL_BIN_GREEN_THRESHOLD (18) rather than at
+// it: the server's own adequacy floor is a *median-relative* threshold
+// (callib/coverage.py's MIN_UNDERREP_RATIO/MIN_BIN_FLOOR), so there is no
+// device-side number that can be exactly right. Under-shooting slightly and
+// letting the server re-grade the merged result is the honest option;
+// over-shooting would recreate the imbalance.
+constexpr uint8_t MAG_CAL_GAPFILL_TARGET_CAP     = 15;
+constexpr uint8_t MAG_CAL_GAPFILL_UNTARGETED_CAP = 4;
+
+// A gap-fill session must gather at least this many samples before the diver's
+// "done" is honoured — same floor-not-quality-bar role as
+// MAG_CAL_ROUGH_SCAN_MIN_SAMPLES, but lower, because a gap-fill pass is
+// legitimately small (it patches a handful of cells, not a whole sphere).
+constexpr int MAG_CAL_GAPFILL_MIN_SAMPLES = 20;
+
+// ---------------------------------------------------------------------------
+// Roll coverage (2026-08-26) — gap-fill's grid tracks only 2 of the 3
+// orientation degrees of freedom that matter for ellipsoid calibration:
+// elevation and heading of the tracked axis. Roll (spin about that axis)
+// never enters elevBand/hdgSector by design (that's what makes tilt
+// compensation work), so a cell could show fully green while every sample
+// came from the same roll — a real, previously invisible blind spot in what
+// "green" proves about coverage. See dive-map's callib/coverage.py
+// (ROLL_SECTORS, UPRIGHT_ROLL_WEIGHT) — this must match it exactly, same
+// verbatim-port discipline as everything else keyed off mag_cal_orient.h.
+// ---------------------------------------------------------------------------
+
+// Upright / right-side / upside-down / left-side — reuses the plain-language
+// vocabulary docs/calibration-guide.md's accelerometer-calibration section
+// (and the `accel_orient` serial diagnostic) already established.
+constexpr int MAG_CAL_ROLL_SECTORS = 4;
+
+// Upright needs this many times the samples of each other roll sector before
+// a cell counts as adequately covered — closing the roll blind spot only
+// needs enough angular diversity to break the single-roll degeneracy, not
+// dense sampling at every roll, and most natural handling is upright-biased
+// anyway. Unvalidated starting default, same caveat as
+// MAG_CAL_GAPFILL_TARGET_CAP below — needs tuning against a real collection
+// corpus. Must match dive-map's UPRIGHT_ROLL_WEIGHT.
+constexpr int MAG_CAL_UPRIGHT_ROLL_WEIGHT = 3;
+
+// Per-roll-sector acceptance cap during a live gap-fill session for the
+// three non-upright sectors (device-local live-session bookkeeping; separate
+// from the server's adequacy floor in cal_targets.json — see
+// MAG_CAL_GAPFILL_TARGET_CAP's comment for why the two can't be the same
+// number). MAG_CAL_GAPFILL_TARGET_CAP above is the upright sector's cap;
+// each other roll sector gets a fraction of it, matching
+// MAG_CAL_UPRIGHT_ROLL_WEIGHT.
+constexpr uint8_t MAG_CAL_GAPFILL_TARGET_CAP_OTHER_ROLL =
+    MAG_CAL_GAPFILL_TARGET_CAP / MAG_CAL_UPRIGHT_ROLL_WEIGHT;  // 5
+
+// ---------------------------------------------------------------------------
 // GPS signal quality scoring
 // ---------------------------------------------------------------------------
 // computeSignalBars() produces a 0–4 bar count from a GpsFix.

@@ -3,6 +3,8 @@
 #include <Arduino.h>
 #include <vector>
 
+#include "../config.h"  // MAG_CAL_ROLL_SECTORS
+
 // Shared outbound HTTPS client for divemap.diverdaniel.com: device-auth
 // bootstrap (RFC 8628) + generic upload/fit helpers for magnetometer
 // calibration. Not calibration-specific by design -- dive-log upload needs
@@ -114,6 +116,36 @@ struct CalStatusEntry {
 // (not an error) when everything is in sync. Returns false only on a
 // network/auth/parse failure.
 bool fetchCalibrationStatus(std::vector<CalStatusEntry>& outEntries, String& errorOut);
+
+// GET /api/device/calibrations/targets -- the 60 per-cell coverage statuses
+// (0=ok, 1=thin, 2=empty, 3=over) from this device's most recent accepted
+// baseline, in elev-major order. Drives the guided gap-fill grid; see
+// src/util/mag_cal_orient.h.
+//
+// A separate call from fetchCalibrationStatus() by server-side design: that
+// endpoint returns a bare JSON array which shipped firmware parses as one, so
+// targets could not be folded into it without breaking un-flashed units
+// mid-rollout.
+//
+// Returns false (with errorOut set) when the server has nothing to target --
+// no accepted baseline, or one with no coverage grid. That is the normal
+// answer for a device that has never had a baseline graded, not an error
+// worth alarming the diver about. `degradedOut` is set when the grid was
+// reconstructed from bare counts and so knows only empty cells, not thin ones.
+//
+// `outRollGrid`/`hasRollOut`: the same statuses one axis finer -- per (cell,
+// roll-sector), MAG_CAL_ROLL_SECTORS entries per cell, same row-major-elev/
+// roll-fastest order as the server's `roll_grid.status` (see
+// dive-map/docs/architecture/calibration-grid-conventions.md §2). Lets the
+// persistent roll widget know a cell's roll sectors already covered by a
+// *prior accepted upload*, instead of assuming every cell starts this
+// session at zero roll coverage. `hasRollOut` is false whenever the server
+// didn't send `roll_grid` at all (pre-roll or degraded calibrations) -- the
+// widget then falls back to session-local-only tracking, same as before this
+// existed.
+bool fetchCalTargets(uint8_t outGrid[60], bool& degradedOut,
+                      uint8_t outRollGrid[60][MAG_CAL_ROLL_SECTORS], bool& hasRollOut,
+                      String& errorOut);
 
 // Downloads a device_uploads row's raw bytes to outputPath on LittleFS.
 // Works for any kind readable by this device -- calibration_result (install

@@ -2,6 +2,8 @@
 
 #include <Arduino.h>
 
+#include "../config.h"  // MAG_CAL_ROLL_SECTORS
+
 // tern.local's "Calibration Install Sync" surface
 // (divemap/docs/architecture/calibration-install-sync-plan.md): pulls
 // accepted-but-not-installed mag calibrations down to the unit, mirrors
@@ -44,6 +46,37 @@ void backupIfConnected(const char* kind, const char* path);
 // display on the page (e.g. "Installed baseline cal from upload ..." or
 // "You're running the most recent cal data for everything").
 String checkForUpdates();
+
+// Reads the last-synced gap-fill target map off LittleFS into `outGrid60`
+// (60 per-cell status codes, elev-major: 0=ok, 1=thin, 2=empty, 3=over).
+// Returns false when no map has been synced, or the stored one is unusable --
+// in which case gap-fill must refuse to start rather than show a grid that
+// means nothing. See src/util/mag_cal_orient.h.
+//
+// Deliberately a local read with no network call: the diver may well be at the
+// water with no WiFi by the time they run gap-fill, and the map is only
+// refreshed by checkForUpdates(), which is an explicit action.
+bool loadTargets(uint8_t outGrid60[60]);
+
+// Reads the last-synced per-roll-sector coverage statuses into
+// `outRollGrid60x4` (MAG_CAL_ROLL_SECTORS entries per cell, same status
+// codes/ordering as loadTargets()). Lets the persistent gap-fill roll widget
+// start a cell already knowing which roll sectors a prior accepted upload
+// already covered, instead of assuming zero roll coverage every session.
+//
+// Returns false whenever no roll data was synced -- an older server build,
+// or a calibration fit before roll coverage existed (see dive-map's
+// device.rs::roll_grid_from_coverage) -- in which case the caller should
+// fall back to session-local-only roll tracking, exactly as gap-fill behaved
+// before this existed. Same local-read-only contract as loadTargets().
+bool loadRollTargets(uint8_t outRollGrid60x4[60][MAG_CAL_ROLL_SECTORS]);
+
+// True when the stored map was reconstructed server-side from bare sample
+// counts and therefore knows only *empty* cells, not thin ones (an older
+// calibration, fit before per-cell status existed). The display says so rather
+// than implying a partial map is a complete one. Meaningless if loadTargets()
+// returned false.
+bool targetsAreDegraded();
 
 // Uploads the current on-device accel/gyro/speed cal files as archival
 // backups. Mag/hdg have no separate backup concept here -- the cloud's

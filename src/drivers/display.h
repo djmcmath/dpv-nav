@@ -135,6 +135,13 @@ void showCloudCalFailed(const char* message);
 void showCloudCalResult(uint8_t quality, float rmsPct, const char* recommendation,
                          int16_t coverageGaps, uint8_t choice, uint8_t calType);
 
+// Gap-fill's upload result screen: no ACCEPT/REJECT, single BTN2 dismiss.
+// coverageGaps here counts remaining thin/empty cells in THIS PATCH's own
+// coverage (a handful out of 60 -- gap-fill only samples what it was sent to);
+// -1 = not applicable. See the definition for why this fit is never offered
+// as something to install.
+void showGapFillUploaded(float rmsPct, const char* recommendation, int16_t coverageGaps);
+
 // Cloud account-link screens (device-code account link). Shown after the
 // diver selects "Link acct" from the Config menu. No URL is ever shown --
 // the diver enters this same code under "My Devices" in account settings.

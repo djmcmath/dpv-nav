@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <math.h>
 
 #ifndef mag_reading_h
 #define mag_reading_h
@@ -46,6 +47,40 @@ struct MagCalib {
   imu::Vec3f bias;       // hard-iron offset
   float softIron[3][3]; // 3x3 (identity if unused)
 };
+
+// ---- Calibration sanity ----------------------------------------------------
+// A single non-finite float in a calibration poisons the AHRS permanently.
+// The path is not obvious: an inf scale factor makes readAccel_g_raw_cal()
+// return inf, then Mahony normalizes it as invSqrt(inf) == 0 and computes
+// inf * 0 == NaN. Every magnitude guard in the filter is a `<` comparison,
+// which is false for NaN, so nothing short-circuits and the NaN lands in the
+// quaternion, where it survives normalization and every subsequent update.
+// Only a reboot clears it -- and if the poison is a cal file, not even that.
+//
+// So: nothing non-finite may reach flash, and nothing non-finite may come
+// back off it. These are the checks both sides use.
+inline bool calibFinite(const imu::Vec3f& v) {
+  return isfinite(v.x) && isfinite(v.y) && isfinite(v.z);
+}
+
+inline bool calibFinite(const Calib3& c) {
+  return calibFinite(c.bias) && calibFinite(c.scale);
+}
+
+inline bool calibFinite(const MagCalib& c) {
+  if (!calibFinite(c.bias)) return false;
+  for (int i = 0; i < 3; i++)
+    for (int j = 0; j < 3; j++)
+      if (!isfinite(c.softIron[i][j])) return false;
+  return true;
+}
+
+// A scale factor at or near zero is not poison by itself, but it zeroes out an
+// axis and is never a legitimate calibration result -- it means the 6-point cal
+// saw no span on that axis. Treated as invalid alongside non-finite values.
+inline bool calibScaleUsable(float s) {
+  return isfinite(s) && fabsf(s) > 1e-6f && fabsf(s) < 1e3f;
+}
 
 struct GpsFix {
   float lat;            // degrees (negative = South)

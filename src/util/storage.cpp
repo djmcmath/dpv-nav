@@ -33,6 +33,15 @@ static void ensureParentDir(const char* filePath) {
 }
 
 bool saveMagCalibration(const char* filename, const MagCalib& cal) {
+  // Do not let a non-finite calibration reach flash. printf("%.6f") writes inf
+  // and NaN as the literal text "inf"/"nan", and atof() reads them straight
+  // back, so one bad write persists across reboots and reflashes.
+  if (!calibFinite(cal)) {
+    Serial.print("[STORAGE] REFUSING to save non-finite MagCalib to ");
+    Serial.println(filename);
+    return false;
+  }
+
   if (!ensureLittleFS()) {
     return false;
   }
@@ -313,6 +322,24 @@ static bool parseJsonMagCalib(const char* json, MagCalib& cal) {
     //Serial.println(row);
   }
 
+  // Same flash round-trip hazard as Calib3: neutralize non-finite components
+  // instead of failing the load outright.
+  if (!isfinite(cal.bias.x) || !isfinite(cal.bias.y) || !isfinite(cal.bias.z)) {
+    Serial.printf("[STORAGE] POISON: mag bias (%f, %f, %f) -- zeroing\n",
+                  (double)cal.bias.x, (double)cal.bias.y, (double)cal.bias.z);
+    cal.bias = {0, 0, 0};
+  }
+  for (int i = 0; i < 3; i++) {
+    for (int j = 0; j < 3; j++) {
+      if (!isfinite(cal.softIron[i][j])) {
+        Serial.printf("[STORAGE] POISON: softIron[%d][%d] = %f -- forcing identity row\n",
+                      i, j, (double)cal.softIron[i][j]);
+        for (int k = 0; k < 3; k++) cal.softIron[i][k] = (i == k) ? 1.0f : 0.0f;
+        break;
+      }
+    }
+  }
+
   //Serial.println("[STORAGE] Successfully parsed magnetometer calibration JSON");
   return true;
 }
@@ -424,6 +451,19 @@ bool loadMagCalibrationChain(MagCalib& effectiveCal, bool& hasBase, bool& hasMou
 }
 
 bool saveCalib3(const char* filename, const Calib3& cal) {
+  // See saveMagCalibration() -- non-finite values round-trip through flash.
+  if (!calibFinite(cal) ||
+      !calibScaleUsable(cal.scale.x) ||
+      !calibScaleUsable(cal.scale.y) ||
+      !calibScaleUsable(cal.scale.z)) {
+    Serial.printf("[STORAGE] REFUSING to save bad Calib3 to %s "
+                  "(bias %.3f/%.3f/%.3f scale %.3f/%.3f/%.3f)\n",
+                  filename,
+                  (double)cal.bias.x,  (double)cal.bias.y,  (double)cal.bias.z,
+                  (double)cal.scale.x, (double)cal.scale.y, (double)cal.scale.z);
+    return false;
+  }
+
   if (!ensureLittleFS()) {
     return false;
   }
@@ -517,6 +557,28 @@ bool loadCalib3(const char* filename, Calib3& cal) {
   return success;
 }
 
+// Replace any non-finite or unusable calibration component with its identity
+// value, logging loudly. See calibFinite() in types.h for why a single inf is
+// fatal to the AHRS.
+static void sanitizeCalib3(Calib3& cal) {
+  struct { float* v; const char* name; float ident; bool isScale; } f[] = {
+    { &cal.bias.x,  "bias.x",  0.0f, false },
+    { &cal.bias.y,  "bias.y",  0.0f, false },
+    { &cal.bias.z,  "bias.z",  0.0f, false },
+    { &cal.scale.x, "scale.x", 1.0f, true  },
+    { &cal.scale.y, "scale.y", 1.0f, true  },
+    { &cal.scale.z, "scale.z", 1.0f, true  },
+  };
+  for (auto& e : f) {
+    bool bad = e.isScale ? !calibScaleUsable(*e.v) : !isfinite(*e.v);
+    if (bad) {
+      Serial.printf("[STORAGE] POISON: %s = %f is unusable -- forcing %.1f\n",
+                    e.name, (double)*e.v, (double)e.ident);
+      *e.v = e.ident;
+    }
+  }
+}
+
 // Helper function: Parse Calib3 JSON
 static bool parseJsonCalib3(const char* json, Calib3& cal) {
   // Initialize to defaults
@@ -564,6 +626,13 @@ static bool parseJsonCalib3(const char* json, Calib3& cal) {
   if (!zStr) return false;
   cal.scale.z = atof(strstr(zStr, ":") + 1);
 
+  // atof() parses "inf" and "nan" as real inf/NaN -- and printf("%.6f") in
+  // saveCalib3() emits exactly those spellings. A cal that went non-finite
+  // once therefore round-trips through flash and survives reboots and
+  // reflashes. Neutralize the bad components rather than rejecting the whole
+  // file: returning false here would drop the caller into the blocking
+  // interactive 6-point cal, which hangs forever with no serial attached.
+  sanitizeCalib3(cal);
   return true;
 }
 

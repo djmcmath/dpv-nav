@@ -21,13 +21,31 @@ static inline imu::Vec3f mul(const imu::Vec3f& a, float k) {
   return {a.x*k, a.y*k, a.z*k};
 }
 
+bool quatIsFinite(const Quaternion& q) {
+  return isfinite(q.w) && isfinite(q.x) && isfinite(q.y) && isfinite(q.z);
+}
+
+static inline bool vecIsFinite(const imu::Vec3f& v) {
+  return isfinite(v.x) && isfinite(v.y) && isfinite(v.z);
+}
+
 void mahonyInit(MahonyState& s) {
   s.q = {1,0,0,0};
   s.integralFB = {0,0,0};
+  s.rejectedInputs = 0;
+  s.rollbacks = 0;
 }
 
 void quatNormalize(Quaternion& q) {
-  float n = invSqrt(q.w*q.w + q.x*q.x + q.y*q.y + q.z*q.z);
+  // A zero quaternion is finite but not normalizable: invSqrt(0) is inf and
+  // 0 * inf is NaN. That is reachable from a default-constructed MahonyState
+  // that never went through mahonyInit(), so check rather than assume.
+  float n2 = q.w*q.w + q.x*q.x + q.y*q.y + q.z*q.z;
+  if (!(n2 > 1e-20f) || !isfinite(n2)) {
+    q = {1, 0, 0, 0};
+    return;
+  }
+  float n = invSqrt(n2);
   q.w *= n; q.x *= n; q.y *= n; q.z *= n;
 }
 
@@ -69,10 +87,36 @@ void mahonyUpdate(
   //   Body Z-axis (down) should align with gravity vector
   //   Body X-axis (north) should align with magnetic north
 
+  // 0) Reject non-finite input before it can touch the quaternion.
+  //    Every magnitude guard below is a `<` or `>` comparison, and all of those
+  //    are false for NaN -- so a NaN sample would sail past all of them and
+  //    land in s.q, where quatNormalize()'s 1/sqrtf(nan) keeps it NaN for the
+  //    life of the process. inf is just as bad by a longer route: an2 == inf
+  //    passes the check below, invSqrt(inf) == 0, and inf * 0 == NaN.
+  //    The usual source is a calibration whose scale factor divided by a zero
+  //    span; see calibrateAccelerometer() and the guards in storage.cpp.
+  if (!isfinite(dt) || dt <= 0.0f || !vecIsFinite(gyro) || !vecIsFinite(accelIn)) {
+    s.rejectedInputs++;
+    return;
+  }
+
+  // A poisoned quaternion cannot fix itself, so re-seed rather than iterate on
+  // garbage. Attitude re-converges from accel/mag within a few seconds.
+  // The zero-norm case matters too: {0,0,0,0} is finite, so quatIsFinite()
+  // alone would pass it through to become NaN at the first normalize.
+  float qn2 = s.q.w*s.q.w + s.q.x*s.q.x + s.q.y*s.q.y + s.q.z*s.q.z;
+  if (!quatIsFinite(s.q) || !(qn2 > 1e-20f)) {
+    s.q = {1,0,0,0};
+    s.integralFB = {0,0,0};
+    s.rollbacks++;
+  }
+
+  const Quaternion qBefore = s.q;
+
   // 1) Normalize accel (gravity direction in body frame)
   imu::Vec3f a = accelIn;
   float an2 = a.x*a.x + a.y*a.y + a.z*a.z;
-  if (an2 < 1e-12f) return; // invalid accel
+  if (!(an2 > 1e-12f) || !isfinite(an2)) return; // invalid accel (negated form also rejects NaN)
   float invAn = invSqrt(an2);
   a = mul(a, invAn);
 
@@ -95,7 +139,7 @@ void mahonyUpdate(
     if (absSinp < 0.866f) {  // 0.866 ≈ sin(60°), allows ±60° pitch range
       imu::Vec3f m = magIn;
       float mn2 = m.x*m.x + m.y*m.y + m.z*m.z;
-      if (mn2 > 1e-12f) {
+      if (vecIsFinite(m) && mn2 > 1e-12f && isfinite(mn2)) {
         float invMn = invSqrt(mn2);
         m = mul(m, invMn);
 
@@ -147,5 +191,21 @@ void mahonyUpdate(
   s.q.y += 0.5f * qDot.y * dt;
   s.q.z += 0.5f * qDot.z * dt;
 
+  // Last line of defense: if this update still produced a non-finite
+  // quaternion, discard it and keep the last good attitude. Without this a
+  // single bad step is permanent, because nothing downstream can recover it.
+  if (!quatIsFinite(s.q)) {
+    s.q = qBefore;
+    s.integralFB = {0,0,0};
+    s.rollbacks++;
+    return;
+  }
+
   quatNormalize(s.q);
+
+  if (!quatIsFinite(s.q)) {
+    s.q = qBefore;
+    s.integralFB = {0,0,0};
+    s.rollbacks++;
+  }
 }

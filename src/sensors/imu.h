@@ -5,6 +5,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include "calib.h"  // For MagCalib struct
+#include "../config.h"  // MAG_CAL_ROLL_SECTORS
 
 // Forward declaration — CalProgressPacket defined in dpvlink.h
 struct CalProgressPacket;
@@ -59,6 +60,12 @@ ImuStatus readMag(Vec3f& out);            // Mag with hard/soft-iron calibration
 void setAccelCalibration(const Calib3& cal);
 void setGyroCalibration(const Calib3& cal);
 void setMagCalibration(const MagCalib& cal);
+
+// Read back the mag calibration currently in effect. Needed by the axis_test
+// frame capture, whose fixture has to record the exact bias/soft-iron the
+// captured counts were taken under -- a fixture that silently depends on
+// whatever calibration happens to be installed later is not ground truth.
+void getMagCalibration(MagCalib& out);
 
 // --- Calibration routines (blocking) ---
 // Each writes result to `out` AND updates the internal calibration state,
@@ -117,19 +124,55 @@ void   magCalNBGetProgress(uint32_t& elapsed_ms, uint32_t& remaining_ms,
 //   Mounted — COLLECT only, unchanged: the familiar grid, auto-completes
 //     when all bins are green. Its narrower ±30° range mostly sidesteps the
 //     pole problem that forced baseline off this design.
+//   Gap-fill — GAP_FILL: a *second* baseline pass that patches the cells the
+//     server flagged thin or empty. It gets the live grid baseline can't have,
+//     because it runs only with a good baseline cal already installed: bins
+//     are assigned algebraically per sample by util/mag_cal_orient.h (a
+//     verbatim port of the server's own math -- no Mahony, no filter lag, no
+//     pole singularity), so the highlighted cell is the same cell the website
+//     drew. Read mag_cal_orient.h before touching this path; the axis
+//     convention is the trap.
 //
 // Usage:
-//   magBinCalBegin(isMounted);           // start collection (baseline -> ROUGH_SCAN; mounted -> COLLECT)
+//   magBinCalBegin(BinCalMode::BASELINE);              // -> ROUGH_SCAN
+//   magBinCalBegin(BinCalMode::MOUNTED);               // -> COLLECT
+//   magBinCalBegin(BinCalMode::GAP_FILL, targets60);   // -> GAP_FILL (targets required)
 //   // in main loop:
 //   magBinCalTick(pitch_deg, heading_deg, rawMag, accelCal, gyroCal);  // add one sample
-//   magBinCalFinishBaseline();           // baseline only: diver declares "done", uploads for grading
-//   if (magBinCalIsComplete()) { ... }   // mounted: all bins green; baseline: finish requested
+//   magBinCalFinishBaseline();           // baseline/gap-fill: diver declares "done", uploads for grading
+//   if (magBinCalIsComplete()) { ... }   // mounted: all bins green; gap-fill: every target satisfied
+//                                        // (or diver finished); baseline: finish requested
 //   // retrieve:
 //   magBinCalGetProgress(pkt);           // fill CalProgressPacket
 //   magBinCalDumpCSV(file);              // write samples to open LittleFS File
 //   magBinCalEnd();                      // clean up
 
-void   magBinCalBegin(bool isMounted);
+enum class BinCalMode : uint8_t { BASELINE = 0, MOUNTED = 1, GAP_FILL = 2 };
+
+// Start a collection session. Returns false (and starts nothing) if the mode's
+// preconditions aren't met, so the caller can put a real message on screen
+// instead of silently collecting garbage.
+//
+// `targets60` is required for GAP_FILL and ignored otherwise: 60 per-cell
+// status codes (0=ok, 1=thin, 2=empty, 3=over) in elev-major order, exactly as
+// GET /api/device/calibrations/targets returned them. GAP_FILL refuses to
+// start without them -- a gap-fill session with no idea which cells are gaps
+// is just an unguided baseline collection wearing a guided UI, which is worse
+// than refusing, because the diver would trust it.
+//
+// `rollTargets60x4`/`hasRollTargets` are optional and GAP_FILL-only: the same
+// statuses one axis finer (MAG_CAL_ROLL_SECTORS entries per cell), from
+// cal_sync::loadRollTargets(). When present, a roll sector the *server*
+// already considers ok/over is treated as satisfied from the start of the
+// session -- the persistent widget doesn't make the diver re-collect roll
+// coverage a prior accepted upload already has. Absent (nullptr or
+// hasRollTargets=false) is a normal, supported case (older server, or a
+// calibration predating roll coverage): the widget then falls back to
+// session-local-only tracking, exactly as gap-fill behaved before roll
+// existed.
+bool   magBinCalBegin(BinCalMode mode, const uint8_t* targets60 = nullptr,
+                       const uint8_t (*rollTargets60x4)[MAG_CAL_ROLL_SECTORS] = nullptr,
+                       bool hasRollTargets = false);
 // Add one sample; pitch_deg from AHRS, heading_deg from AHRS, rawMag in logical frame (post-axis-map).
 // rawMagLogical must be the output of readMagRaw() — NOT readMagRaw_SensorFrame().  The calibration
 // JSON is applied in logical frame at runtime, so samples stored here must also be in logical frame.
@@ -144,11 +187,21 @@ bool   magBinCalTick(float pitch_deg, float heading_deg, const Vec3i16& rawMagLo
 bool   magBinCalIsActive();
 // Mounted: true when all bins green. Baseline: true once the diver has called
 // magBinCalFinishBaseline() (no bin/grid concept applies to baseline anymore).
+// Gap-fill: true when every targeted cell has reached its cap, or the diver
+// called magBinCalFinishBaseline() -- whichever comes first. Auto-completion
+// matters here in a way it doesn't for baseline: the diver is working a
+// finite, known list of cells, so "you're done" is a fact the device can
+// actually establish rather than a guess.
 bool   magBinCalIsComplete();
-// Baseline only: diver declares "good enough" and ends collection (no phase change --
-// baseline never leaves ROUGH_SCAN). No-op (returns false) if too few samples have been
-// collected yet, or if called for mounted cal.
+// Baseline and gap-fill: diver declares "good enough" and ends collection (no
+// phase change -- neither mode ever switches phase). No-op (returns false) if
+// too few samples have been collected yet, or if called for mounted cal.
 bool   magBinCalFinishBaseline();
+// Gap-fill only: how many targeted cells are still short of their cap (and how
+// many there were to begin with). Both zero outside GAP_FILL. Drives the
+// on-screen "3 of 11 cells left" line, which is the number the diver is
+// actually working against.
+void   magBinCalGapFillProgress(int& remainingOut, int& totalOut);
 // Fill CalProgressPacket with current bin state
 void   magBinCalGetProgress(struct CalProgressPacket& pkt);
 // Write raw samples as CSV to an already-open File object

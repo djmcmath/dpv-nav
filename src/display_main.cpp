@@ -131,6 +131,11 @@ static CloudCalUiPhase   gCloudCalPhase          = CloudCalUiPhase::NONE;
 static uint32_t          gCloudCalWaitStartMs    = 0;
 static constexpr uint32_t CLOUD_CAL_WAIT_TIMEOUT_MS = 40000;  // > nav's ~30s worst case
 static uint8_t           gCloudCalChoice         = 0;  // 0=ACCEPT, 1=REJECT
+// False for a gap-fill result: that fit covers only the cells just patched
+// and must never be offered as a standalone install (see nav_main.cpp's
+// ACCEPT_CLOUD_CAL comment). The RESULT screen shows no ACCEPT/REJECT toggle
+// when this is false -- just an acknowledgement.
+static bool              gCloudCalInstallable    = true;
 static uint8_t           gCloudCalQuality        = 0;
 static uint8_t           gCloudCalType           = 0;  // CalType enum -- selects % vs deg label
 static float             gCloudCalRmsPct         = 0.0f;
@@ -232,6 +237,22 @@ static void sendSpeedCalStart(uint16_t dist_ft);
 static void sendWaypointSelectCmd(uint8_t idx);
 static void sendWaypointArriveCmd(uint8_t idx);
 static void renderWaypointUi();
+
+// One place decides which cal screen a CalProgressPacket gets. There are two
+// call sites (live progress, and the post-completion DONE hold) and they must
+// agree -- a completion screen that switches renderers mid-session is how you
+// end up staring at a blank grid wondering whether the cal worked.
+static void renderCalProgress(const CalProgressPacket& pkt) {
+    if (pkt.phase == (uint8_t)CalPhase::ROUGH_SCAN) {
+        display::showBaselineRoughScan(pkt);   // baseline: no grid, honestly
+    } else if (pkt.phase == (uint8_t)CalPhase::GAP_FILL) {
+        display::showCalGrid(pkt, "FILL GAPS");
+    } else {
+        display::showCalGrid(pkt, pkt.cal_type == (uint8_t)CalType::MOUNTED
+                                      ? "MOUNTED CAL" : "BASELINE CAL");
+    }
+}
+
 static void updateButton(ButtonState& b);
 static void handleButtons();
 
@@ -530,13 +551,7 @@ void loop() {
             // Bin cal complete: hold DONE screen for CAL_COMPLETE_HOLD_MS then return.
             // Baseline never leaves ROUGH_SCAN (no grid to show); mounted uses the grid.
             if (calCompleteHolding) {
-                if (lastCalProgress.phase == (uint8_t)CalPhase::ROUGH_SCAN) {
-                    display::showBaselineRoughScan(lastCalProgress);
-                } else {
-                    display::showCalGrid(lastCalProgress,
-                                         lastCalProgress.cal_type == (uint8_t)CalType::MOUNTED
-                                             ? "MOUNTED CAL" : "BASELINE CAL");
-                }
+                renderCalProgress(lastCalProgress);
                 if (now - calCompleteShownMs >= CAL_COMPLETE_HOLD_MS) {
                     calCompleteHolding = false;
                     calProgressValid   = false;
@@ -571,9 +586,21 @@ void loop() {
                         display::showCloudCalFailed(gCloudCalError);
                         break;
                     case CloudCalUiPhase::RESULT:
-                        display::showCloudCalResult(gCloudCalQuality, gCloudCalRmsPct,
-                                                    gCloudCalRecommendation, gCloudCalCoverageGaps,
-                                                    gCloudCalChoice, gCloudCalType);
+                        if (gCloudCalInstallable) {
+                            display::showCloudCalResult(gCloudCalQuality, gCloudCalRmsPct,
+                                                        gCloudCalRecommendation, gCloudCalCoverageGaps,
+                                                        gCloudCalChoice, gCloudCalType);
+                        } else {
+                            // Gap-fill: informational only, no accept/reject
+                            // choice to make on-device -- this fit is a merge
+                            // candidate, not a thing to install. Reject/discard
+                            // isn't offered either: leaving the row at
+                            // accepted=null is exactly its correct resting
+                            // state until the diver resolves it on the website
+                            // (by merging it in, or ignoring it).
+                            display::showGapFillUploaded(gCloudCalRmsPct, gCloudCalRecommendation,
+                                                         gCloudCalCoverageGaps);
+                        }
                         break;
                     default:
                         break;
@@ -625,15 +652,9 @@ void loop() {
 
             // Active bin cal progress — takes priority over all other rendering.
             // Baseline (always ROUGH_SCAN) gets its own screen, no grid;
-            // mounted (always COLLECT) uses the familiar grid.
+            // mounted (COLLECT) and gap-fill (GAP_FILL) use the grid.
             if (calProgressValid) {
-                if (lastCalProgress.phase == (uint8_t)CalPhase::ROUGH_SCAN) {
-                    display::showBaselineRoughScan(lastCalProgress);
-                } else {
-                    display::showCalGrid(lastCalProgress,
-                                         lastCalProgress.cal_type == (uint8_t)CalType::MOUNTED
-                                             ? "MOUNTED CAL" : "BASELINE CAL");
-                }
+                renderCalProgress(lastCalProgress);
                 return;
             }
 
@@ -808,6 +829,7 @@ static void processNavLine() {
                 gCloudCalType    = pkt.cal_type;
                 gCloudCalRmsPct  = pkt.rms_pct;
                 gCloudCalCoverageGaps = pkt.coverage_gaps;
+                gCloudCalInstallable  = pkt.installable;
                 gCloudCalChoice  = 0;
                 strncpy(gCloudCalRecommendation, pkt.recommendation, sizeof(gCloudCalRecommendation) - 1);
                 gCloudCalRecommendation[sizeof(gCloudCalRecommendation) - 1] = '\0';
@@ -996,8 +1018,15 @@ static void handleButtons() {
         }
     }
 
-    // --- Baseline ROUGH_SCAN: BTN2 declares collection done, ends the session ---
-    if (calProgressValid && lastCalProgress.phase == (uint8_t)CalPhase::ROUGH_SCAN) {
+    // --- Baseline / gap-fill: BTN2 declares collection done, ends the session ---
+    // Gap-fill needs this as much as baseline does: a targeted cell can simply
+    // be unreachable in the water (a ceiling, a wall, a scooter you can't
+    // invert), and without a manual finish the session would never end. It also
+    // auto-completes when every target is satisfied -- this is the escape
+    // hatch, not the only exit.
+    if (calProgressValid &&
+        (lastCalProgress.phase == (uint8_t)CalPhase::ROUGH_SCAN ||
+         lastCalProgress.phase == (uint8_t)CalPhase::GAP_FILL)) {
         if (gBaselineFinishPending) {
             // Already requested -- ignore repeat presses until nav confirms
             // (complete=true) or the pending screen times out.
@@ -1115,6 +1144,17 @@ static void handleButtons() {
         return;
     }
     if (gCloudCalPhase == CloudCalUiPhase::RESULT) {
+        if (!gCloudCalInstallable) {
+            // Gap-fill: single dismiss, no ACCEPT/REJECT command ever sent.
+            // The uploaded fit stays parked at accepted=null on the server --
+            // its correct resting state until the website resolves it.
+            if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
+                btn2.fired = true;
+                gCloudCalPhase = CloudCalUiPhase::NONE;
+                display::clear();
+            }
+            return;
+        }
         // BTN1: cycle ACCEPT/REJECT
         if (!btn1.pressed && !btn1.fired && btn1.pressStartMs > 0) {
             btn1.fired = true;

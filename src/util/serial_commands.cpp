@@ -27,7 +27,7 @@ void printHelp() {
   Serial.println("  accel_stability      - Accelerometer stability test (100 samples at rest)");
   Serial.println("  sensor_orientation   - Show RAW sensor frames (no axis mapping)");
   Serial.println("  debug_axes           - End-to-end axis analysis (trace data)");
-  Serial.println("  axis_test            - Test sensor axes to find correct orientation");
+  Serial.println("  axis_test            - Guided capture at known attitudes; verdict + repo fixture");
   Serial.println("  accel_orient         - Which accel-cal orientation matches as you rotate?");
   Serial.println("  help                 - Show this message");
   Serial.println("=====================\n");
@@ -253,66 +253,369 @@ static void cmdDebugAxes(MahonyState& ahrs) {
   Serial.println("========================================================================\n");
 }
 
-static void cmdAxisTest() {
-  Serial.println("\n=== AXIS ORIENTATION TEST ===");
-  Serial.println("This test helps identify which sensor axes point in which physical directions.");
-  Serial.println("Hold device LEVEL and point it in different directions.\n");
+// ---------------------------------------------------------------------------
+// axis_test -- guided sensor-frame capture at KNOWN physical attitudes
+// ---------------------------------------------------------------------------
+// Walks the operator through a fixed set of known attitudes, records averaged
+// sensor readings at each, prints an immediate frame-consistency verdict, and
+// emits a paste-ready CSV that gets checked into the repo as the ground-truth
+// fixture for the orientation math.
+//
+// WHY IT LOOKS LIKE THIS NOW. The previous version sampled four LEVEL headings
+// and printed the numbers with no verdict. Every other instrument we had was
+// equally blind to tilt: the archived nav logs never exceed +-5 deg of
+// pitch/roll, and tools/orient_equivalence.py plus tests/test_coverage.py are
+// fully synthetic -- they build their samples from the same convention the
+// code under test assumes, so they can only ever prove self-consistency. A
+// real axis-convention error (mag delivered Y-mirrored, consumed alongside
+// right-handed accel -- see CLAUDE.md's "Magnetometer Coordinate Frame")
+// therefore survived every test we had, and only surfaced when a diver held
+// the unit at 45 deg on a real bench and watched the highlighted cell jump to
+// the opposite side of the compass. A fixture captured from real hardware at
+// known attitudes is the only instrument that can catch that class of bug,
+// because it is the only one whose ground truth does not come from the code.
+//
+// THE HEADLINE METRIC IS MAGNETIC DIP CONSISTENCY. The angle between the
+// magnetic field vector and gravity-down is a property of your physical
+// location: it must read the SAME at every attitude, and it is independent of
+// heading, of declination, and of which hemisphere you are in. If mag and
+// accel are expressed in frames of opposite handedness, that angle instead
+// swings between attitudes -- most violently with the unit on its side, where
+// gravity lies along the mirrored axis. One number, no ground-truth heading
+// required, and it fails loudly for exactly the bug that got us.
 
-  for (int test = 0; test < 4; test++) {
-    const char* direction = "";
-    switch(test) {
-      case 0: direction = "NORTH (forward)"; break;
-      case 1: direction = "EAST (right)"; break;
-      case 2: direction = "SOUTH (backward)"; break;
-      case 3: direction = "WEST (left)"; break;
+namespace {
+
+struct FramePose {
+  const char* slug;      // stable identifier -- becomes the fixture's first column
+  const char* prompt;    // what the operator should physically do
+  int8_t accelOrient;    // expected classifyAccelOrientation() index, -1 = hand-held
+  float  hdgDeg;         // MAGNETIC heading of the nose (NAN = undefined here)
+  float  pitchDeg;       // nose elevation, + = up
+  float  rollDeg;        // bank, + = right side down (NAN = undefined here)
+};
+
+// Two tiers, deliberately:
+//
+//  * Gravity-snapped poses (accelOrient >= 0) can be held EXACTLY -- rest the
+//    unit on a flat surface or against a table edge -- and
+//    classifyAccelOrientation() verifies the operator actually held the one
+//    that was asked for instead of trusting them. These pin the sign of every
+//    accel axis, and of every mag axis at level/inverted/on-side.
+//  * Hand-held poses (accelOrient == -1) are approximate (+-10 deg is normal)
+//    and exist to exercise the COMBINED tilt+roll path -- the one that
+//    actually broke. Assertions against them have to stay at bin granularity
+//    (30 deg sectors, 30 deg bands), so aim at the middle of a cell.
+//
+// Headings are MAGNETIC, not true: everything downstream works in the magnetic
+// frame, and declination would only add another way to be wrong. Read them off
+// a phone compass -- the tolerance is +-15 deg.
+//
+// The bearings are 015/105/195/285 rather than the obvious N/E/S/W because the
+// heading sectors these samples get binned into are 30 deg wide starting at 0,
+// so due north sits exactly ON the sector 11 / sector 0 boundary and ANY aiming
+// error lands in a different cell than intended. Aiming at sector centres
+// instead buys the full +-15 deg before a pose changes cell. Pitch (+-45, mid
+// band) and roll (0/90/180/270, all sector centres) are already centred.
+const FramePose kFramePoses[] = {
+  // -- gravity-snapped, exactly holdable, pose verified -----------------------
+  { "level_015",     "LEVEL and upright, nose on compass bearing 015",           5,   15.0f,   0.0f,   0.0f },
+  { "level_105",     "LEVEL and upright, nose on compass bearing 105",           5,  105.0f,   0.0f,   0.0f },
+  { "level_195",     "LEVEL and upright, nose on compass bearing 195",           5,  195.0f,   0.0f,   0.0f },
+  { "level_285",     "LEVEL and upright, nose on compass bearing 285",           5,  285.0f,   0.0f,   0.0f },
+  { "inverted_015",  "UPSIDE DOWN and level, nose on bearing 015",               4,   15.0f,   0.0f, 180.0f },
+  { "right_side_015","Resting on its RIGHT side (LEFT side up), nose on 015",    3,   15.0f,   0.0f,  90.0f },
+  { "left_side_015", "Resting on its LEFT side (RIGHT side up), nose on 015",    2,   15.0f,   0.0f, -90.0f },
+  { "nose_up_90",    "Nose pointing STRAIGHT UP (bearing does not matter)",      0,    NAN,   90.0f,   NAN  },
+  { "nose_down_90",  "Nose pointing STRAIGHT DOWN (bearing does not matter)",    1,    NAN,  -90.0f,   NAN  },
+  // -- hand-held, combined tilt + roll: the path that actually failed ---------
+  { "up45_015",      "Nose UP about 45 deg, upright, nose on bearing 015",      -1,   15.0f,  45.0f,   0.0f },
+  { "up45_rollr_015","Nose UP about 45 deg, rolled RIGHT 90 deg, bearing 015",  -1,   15.0f,  45.0f,  90.0f },
+  { "down45_105",    "Nose DOWN about 45 deg, upright, nose on bearing 105",    -1,  105.0f, -45.0f,   0.0f },
+  { "up45_rolll_195","Nose UP about 45 deg, rolled LEFT 90 deg, bearing 195",   -1,  195.0f,  45.0f, -90.0f },
+};
+constexpr int kFramePoseCount = sizeof(kFramePoses) / sizeof(kFramePoses[0]);
+
+struct PoseCapture {
+  float mx, my, mz;   // raw logical-frame mag counts, averaged (what the CSV wants)
+  float ax, ay, az;   // calibrated accel, g
+  float gx, gy, gz;   // calibrated gyro, rad/s
+  float cmx, cmy, cmz;  // mag with the installed MagCalib applied, for the dip check
+  float dipDeg;       // angle between the field and gravity-down, at this pose
+  bool  verified;     // pose confirmed by classifyAccelOrientation (or N/A)
+  bool  still;        // accel magnitude held steady through the capture
+};
+
+PoseCapture g_poseCaps[kFramePoseCount];
+
+// Averages a burst of reads at the current attitude. Returns false only if the
+// sensors would not read at all.
+bool captureFramePose(int idx, const MagCalib& magCal) {
+  const FramePose& p = kFramePoses[idx];
+  PoseCapture& c = g_poseCaps[idx];
+
+  constexpr int kReads = 40;
+  double smx = 0, smy = 0, smz = 0;
+  double sax = 0, say = 0, saz = 0;
+  double sgx = 0, sgy = 0, sgz = 0;
+  float amagMin = 1e9f, amagMax = -1e9f;
+  int votes[7] = {0};   // index 6 == "matched no orientation"
+  int n = 0;
+
+  for (int i = 0; i < kReads; i++) {
+    imu::Vec3i16 magRaw, accelRaw;
+    imu::Vec3f accelRawG, accelCal, gyroRawV, gyroCal;
+    if (imu::readMagRaw(magRaw) == imu::ImuStatus::Ok &&
+        imu::readAccelRaw(accelRaw) == imu::ImuStatus::Ok &&
+        imu::readAccel_g_raw_cal(accelRawG, accelCal) == imu::ImuStatus::Ok &&
+        imu::readGyro_rad_s_raw_cal(gyroRawV, gyroCal) == imu::ImuStatus::Ok) {
+      smx += magRaw.x;   smy += magRaw.y;   smz += magRaw.z;
+      sax += accelCal.x; say += accelCal.y; saz += accelCal.z;
+      sgx += gyroCal.x;  sgy += gyroCal.y;  sgz += gyroCal.z;
+
+      const float amag = sqrtf(accelCal.x * accelCal.x +
+                               accelCal.y * accelCal.y +
+                               accelCal.z * accelCal.z);
+      if (amag < amagMin) amagMin = amag;
+      if (amag > amagMax) amagMax = amag;
+
+      const int oi = imu::classifyAccelOrientation(accelRaw);
+      votes[(oi >= 0 && oi < 6) ? oi : 6]++;
+      n++;
     }
+    delay(15);
+  }
+  if (n == 0) return false;
 
-    Serial.print("\nPoint device "); Serial.print(direction);
-    Serial.println(" and press Enter...");
-    while (!Serial.available()) { delay(10); }
-    Serial.readStringUntil('\n');
+  c.mx = (float)(smx / n); c.my = (float)(smy / n); c.mz = (float)(smz / n);
+  c.ax = (float)(sax / n); c.ay = (float)(say / n); c.az = (float)(saz / n);
+  c.gx = (float)(sgx / n); c.gy = (float)(sgy / n); c.gz = (float)(sgz / n);
 
-    imu::Vec3f mag, accel;
-    delay(200);  // Settle
+  // Same calibration application the gap-fill path uses: softIron * (raw - bias).
+  const float xc = c.mx - magCal.bias.x;
+  const float yc = c.my - magCal.bias.y;
+  const float zc = c.mz - magCal.bias.z;
+  c.cmx = magCal.softIron[0][0]*xc + magCal.softIron[0][1]*yc + magCal.softIron[0][2]*zc;
+  c.cmy = magCal.softIron[1][0]*xc + magCal.softIron[1][1]*yc + magCal.softIron[1][2]*zc;
+  c.cmz = magCal.softIron[2][0]*xc + magCal.softIron[2][1]*yc + magCal.softIron[2][2]*zc;
 
-    // Average 10 samples
-    float mx = 0, my = 0, mz = 0;
-    float ax = 0, ay = 0, az = 0;
-    for (int i = 0; i < 10; i++) {
-      if (imu::readMag_uT(mag) == imu::ImuStatus::Ok) {
-        mx += mag.x; my += mag.y; mz += mag.z;
-      }
-      if (imu::readAccel_g(accel) == imu::ImuStatus::Ok) {
-        ax += accel.x; ay += accel.y; az += accel.z;
-      }
-      delay(10);
-    }
-    mx /= 10; my /= 10; mz /= 10;
-    ax /= 10; ay /= 10; az /= 10;
-
-    Serial.print("  Mag: [");
-    Serial.print(mx, 2); Serial.print(", ");
-    Serial.print(my, 2); Serial.print(", ");
-    Serial.print(mz, 2); Serial.println("] µT");
-
-    Serial.print("  Accel: [");
-    Serial.print(ax, 3); Serial.print(", ");
-    Serial.print(ay, 3); Serial.print(", ");
-    Serial.print(az, 3); Serial.println("] g");
+  // Dip: angle of the field below the horizontal plane, i.e. its component
+  // along gravity-down. Taking down as -accel (the specific-force convention
+  // this board reads in) only fixes the SIGN of dip; it is the same at every
+  // pose either way, so the spread -- the thing being tested -- is unaffected.
+  const float an = sqrtf(c.ax*c.ax + c.ay*c.ay + c.az*c.az);
+  const float mn = sqrtf(c.cmx*c.cmx + c.cmy*c.cmy + c.cmz*c.cmz);
+  if (an > 1e-6f && mn > 1e-6f) {
+    float d = (c.cmx * -c.ax + c.cmy * -c.ay + c.cmz * -c.az) / (an * mn);
+    if (d > 1.0f) d = 1.0f;
+    if (d < -1.0f) d = -1.0f;
+    c.dipDeg = asinf(d) * 57.2957795f;
+  } else {
+    c.dipDeg = NAN;
   }
 
-  Serial.println("\n=== ANALYSIS ===");
-  Serial.println("Compare the magnetometer readings:");
-  Serial.println("- The axis with LARGEST change between North/South is the FORWARD axis");
-  Serial.println("- The axis with LARGEST change between East/West is the RIGHT axis");
-  Serial.println("- If forward axis shows negative values for North, it's pointing backwards");
-  Serial.println("\nExpected for NED frame:");
-  Serial.println("  North: Mag X > 0 (large positive)");
-  Serial.println("  East:  Mag Y > 0 (large positive)");
-  Serial.println("  South: Mag X < 0 (large negative)");
-  Serial.println("  West:  Mag Y < 0 (large negative)");
-  Serial.println("  All:   Accel Z ≈ 1g (down), X/Y ≈ 0 (level)");
-  Serial.println("=====================================\n");
+  c.still = (amagMax - amagMin) < 0.08f;
+  if (p.accelOrient < 0) {
+    c.verified = true;    // hand-held pose: nothing to verify against
+  } else {
+    // Majority of reads must agree with the pose that was asked for.
+    c.verified = votes[p.accelOrient] > (n / 2);
+  }
+  return true;
+}
+
+}  // namespace
+
+static void cmdAxisTest() {
+  Serial.println("\n========================================================================");
+  Serial.println("SENSOR FRAME CAPTURE -- ground truth for the orientation math");
+  Serial.println("========================================================================");
+  Serial.print("You will be walked through ");
+  Serial.print(kFramePoseCount);
+  Serial.println(" known attitudes. For each one:");
+  Serial.println("  - put the unit in the attitude described");
+  Serial.println("  - hold it STILL, then press Enter");
+  Serial.println("  - a burst of readings is averaged (about 1 second)");
+  Serial.println();
+  Serial.println("Poses that rest on a surface can be held exactly -- do that where you");
+  Serial.println("can. Hand-held tilted poses only need to be within about 10 degrees.");
+  Serial.println("Bearings are MAGNETIC, read off a phone compass; +-15 deg is fine.");
+  Serial.println("Do this away from steel furniture, speakers, and laptops.");
+
+  MagCalib magCal{};
+  imu::getMagCalibration(magCal);
+  const bool calLooksIdentity =
+      fabsf(magCal.bias.x) < 1e-6f && fabsf(magCal.bias.y) < 1e-6f &&
+      fabsf(magCal.bias.z) < 1e-6f && fabsf(magCal.softIron[0][0] - 1.0f) < 1e-6f;
+  if (calLooksIdentity) {
+    Serial.println("\n  [!] No magnetometer calibration appears to be installed. The capture");
+    Serial.println("      still works, but the dip-consistency verdict below will be");
+    Serial.println("      meaningless -- hard iron alone can move it tens of degrees.");
+    Serial.println("      Run a baseline cal first if you want the verdict to mean anything.");
+  }
+
+  Serial.println("\nPress Enter to begin...");
+  while (!Serial.available()) { delay(10); }
+  Serial.readStringUntil('\n');
+
+  for (int i = 0; i < kFramePoseCount; i++) {
+    const FramePose& p = kFramePoses[i];
+
+    while (true) {
+      Serial.println();
+      Serial.print("--- Pose "); Serial.print(i + 1);
+      Serial.print(" of "); Serial.print(kFramePoseCount);
+      Serial.print("  ["); Serial.print(p.slug); Serial.println("]");
+      Serial.print("    "); Serial.println(p.prompt);
+      if (p.accelOrient >= 0) {
+        Serial.print("    (rest it on a surface if you can -- expecting: ");
+        Serial.print(imu::kAccelOrientationNames[p.accelOrient]);
+        Serial.println(")");
+      }
+      Serial.print("    Hold still, then press Enter...");
+      while (!Serial.available()) { delay(10); }
+      Serial.readStringUntil('\n');
+      Serial.println(" sampling");
+
+      if (!captureFramePose(i, magCal)) {
+        Serial.println("    [!] Sensors would not read. Check I2C, then press Enter to retry.");
+        while (!Serial.available()) { delay(10); }
+        Serial.readStringUntil('\n');
+        continue;
+      }
+
+      const PoseCapture& c = g_poseCaps[i];
+      Serial.printf("    mag(raw counts) [%9.1f, %9.1f, %9.1f]\n", c.mx, c.my, c.mz);
+      Serial.printf("    accel(g)        [%9.3f, %9.3f, %9.3f]\n", c.ax, c.ay, c.az);
+      Serial.printf("    dip at this pose: %+.1f deg\n", c.dipDeg);
+
+      bool problem = false;
+      if (!c.still) {
+        Serial.println("    [!] The unit was moving during the capture.");
+        problem = true;
+      }
+      if (!c.verified) {
+        Serial.println("    [!] That is not the attitude that was asked for.");
+        problem = true;
+      }
+      if (!problem) break;
+
+      Serial.print("    Press Enter to retry, or type 'keep' + Enter to accept it anyway: ");
+      String resp = Serial.readStringUntil('\n');
+      resp.trim();
+      if (resp.startsWith("keep")) {
+        Serial.println("keeping");
+        break;
+      }
+    }
+  }
+
+  // ------------------------------------------------------------------ verdicts
+  Serial.println("\n\n========================================================================");
+  Serial.println("VERDICT 1 -- dip consistency (are mag and accel in the same frame?)");
+  Serial.println("========================================================================");
+  float dipMin = 1e9f, dipMax = -1e9f;
+  const char* dipMinPose = "";
+  const char* dipMaxPose = "";
+  for (int i = 0; i < kFramePoseCount; i++) {
+    const float d = g_poseCaps[i].dipDeg;
+    if (isnan(d)) continue;
+    if (d < dipMin) { dipMin = d; dipMinPose = kFramePoses[i].slug; }
+    if (d > dipMax) { dipMax = d; dipMaxPose = kFramePoses[i].slug; }
+  }
+  const float dipSpread = dipMax - dipMin;
+  Serial.printf("  lowest  %+7.1f deg  at %s\n", dipMin, dipMinPose);
+  Serial.printf("  highest %+7.1f deg  at %s\n", dipMax, dipMaxPose);
+  Serial.printf("  SPREAD  %7.1f deg\n\n", dipSpread);
+  if (dipSpread < 8.0f) {
+    Serial.println("  PASS -- dip holds steady across every attitude, so mag and accel");
+    Serial.println("  agree about handedness. Residual spread is cal quality plus how");
+    Serial.println("  precisely the hand-held poses were held.");
+  } else {
+    Serial.println("  FAIL -- dip is supposed to be a property of your location, so it");
+    Serial.println("  cannot change with how you hold the unit. A spread this large means");
+    Serial.println("  the mag and accel vectors are NOT in the same frame. Look first at");
+    Serial.println("  which poses are the extremes: if they are the on-side ones, the");
+    Serial.println("  disagreement is on the Y axis (see magMap in nav_main.cpp and the");
+    Serial.println("  magNED negation the Mahony path applies but the cal path does not).");
+  }
+
+  Serial.println("\n========================================================================");
+  Serial.println("VERDICT 2 -- individual axis directions");
+  Serial.println("========================================================================");
+  const PoseCapture& lvl015 = g_poseCaps[0];
+  const PoseCapture& lvl105 = g_poseCaps[1];
+  const PoseCapture& lvl195 = g_poseCaps[2];
+  const PoseCapture& lvl285 = g_poseCaps[3];
+  const PoseCapture& inv  = g_poseCaps[4];
+  const PoseCapture& rgt  = g_poseCaps[5];
+  const PoseCapture& up90 = g_poseCaps[7];
+  const PoseCapture& dn90 = g_poseCaps[8];
+
+  Serial.printf("  accel az level        %+7.3f g   -> %s\n", lvl015.az,
+                lvl015.az < -0.5f ? "specific force; gravity-down = MINUS accel  [as assumed]"
+                                  : "!! level reads +1g; gravity-down = PLUS accel");
+  Serial.printf("  accel ax nose-up      %+7.3f g   -> %s\n", up90.ax,
+                up90.ax > 0.5f ? "+X is the nose  [as assumed]"
+                               : "!! +X points AFT, not forward");
+  Serial.printf("  accel ax nose-down    %+7.3f g   -> %s\n", dn90.ax,
+                dn90.ax < -0.5f ? "consistent with nose-up" : "!! inconsistent with nose-up");
+  Serial.printf("  accel ay right-down   %+7.3f g   -> %s\n", rgt.ay,
+                rgt.ay < -0.5f ? "+Y is the RIGHT side  [as assumed]"
+                               : "!! +Y points LEFT");
+  Serial.printf("  accel az inverted     %+7.3f g   -> %s\n", inv.az,
+                inv.az > 0.5f ? "consistent with level" : "!! inconsistent with level");
+  Serial.printf("  mag mx  015 / 195   %+9.1f / %+9.1f -> %s\n", lvl015.cmx, lvl195.cmx,
+                lvl015.cmx > lvl195.cmx ? "mag +X agrees with the nose  [as assumed]"
+                                        : "!! mag +X points AFT");
+  Serial.printf("  mag mz  level/inv   %+9.1f / %+9.1f -> %s\n", lvl015.cmz, inv.cmz,
+                (lvl015.cmz * inv.cmz) < 0.0f ? "mag +Z agrees with accel +Z  [as assumed]"
+                                              : "!! mag Z does not flip when the unit does");
+
+  // The one that matters. Pointing east in a genuinely right-handed NED body
+  // frame, the field's northward component lies to the device's LEFT, so my
+  // must read NEGATIVE. A positive reading means the delivered mag frame is
+  // mirrored in Y relative to accel -- which is invisible at level (the mirror
+  // cancels against the atan2(my,mx) heading formula) and corrupts everything
+  // the moment a rotation derived from accel gets applied to the mag vector.
+  Serial.printf("\n  mag my bearing 105  %+9.1f          -> %s\n", lvl105.cmy,
+                lvl105.cmy > 0.0f
+                  ? "MIRRORED: mag Y is left-handed vs accel Y"
+                  : "mag Y is right-handed, matching accel Y");
+  Serial.printf("  mag my bearing 285  %+9.1f          (should be the opposite sign)\n", lvl285.cmy);
+
+  // -------------------------------------------------------------------- fixture
+  Serial.println("\n========================================================================");
+  Serial.println("FIXTURE -- save everything below as a file in dpv-nav/tools/fixtures/");
+  Serial.println("========================================================================");
+  Serial.println("---8<--- frame_fixture.csv ---8<---");
+  Serial.println("pose,true_hdg_deg,true_pitch_deg,true_roll_deg,mx,my,mz,ax,ay,az,gx,gy,gz,verified,still");
+  for (int i = 0; i < kFramePoseCount; i++) {
+    const FramePose& p = kFramePoses[i];
+    const PoseCapture& c = g_poseCaps[i];
+    Serial.printf("%s,", p.slug);
+    if (isnan(p.hdgDeg)) Serial.print("nan,"); else Serial.printf("%.1f,", p.hdgDeg);
+    Serial.printf("%.1f,", p.pitchDeg);
+    if (isnan(p.rollDeg)) Serial.print("nan,"); else Serial.printf("%.1f,", p.rollDeg);
+    Serial.printf("%.1f,%.1f,%.1f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%d,%d\n",
+                  c.mx, c.my, c.mz,
+                  (double)c.ax, (double)c.ay, (double)c.az,
+                  (double)c.gx, (double)c.gy, (double)c.gz,
+                  c.verified ? 1 : 0, c.still ? 1 : 0);
+  }
+  Serial.println("---8<--- end ---8<---");
+
+  // The counts above are meaningless without the calibration they were taken
+  // under -- a fixture that silently picks up whatever cal happens to be
+  // installed when it is replayed is not ground truth.
+  Serial.println("\n---8<--- frame_fixture_cal.json ---8<---");
+  Serial.printf("{\"bias\":[%.6f,%.6f,%.6f],\"soft_iron\":[[%.6f,%.6f,%.6f],[%.6f,%.6f,%.6f],[%.6f,%.6f,%.6f]]}\n",
+                (double)magCal.bias.x, (double)magCal.bias.y, (double)magCal.bias.z,
+                (double)magCal.softIron[0][0], (double)magCal.softIron[0][1], (double)magCal.softIron[0][2],
+                (double)magCal.softIron[1][0], (double)magCal.softIron[1][1], (double)magCal.softIron[1][2],
+                (double)magCal.softIron[2][0], (double)magCal.softIron[2][1], (double)magCal.softIron[2][2]);
+  Serial.println("---8<--- end ---8<---");
+  Serial.println("\n========================================================================\n");
 }
 
 static void cmdAccelOrientTest() {

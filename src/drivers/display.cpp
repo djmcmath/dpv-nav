@@ -1390,7 +1390,7 @@ void showCloudCalFailed(const char* message) {
     tft.setCursor(4, 132);
     tft.print("Raw samples are saved --");
     tft.setCursor(4, 146);
-    tft.print("retry from the CAL menu.");
+    tft.print("retry from tern.local.");
 
     tft.drawFastHLine(0, 168, SCREEN_WIDTH, COLOR_CYAN);
     tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
@@ -1474,6 +1474,61 @@ void showCloudCalResult(uint8_t quality, float rmsPct, const char* recommendatio
     tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
     tft.setCursor(4, 200);
     tft.print("BTN1:cycle  BTN2:confirm");
+}
+
+// Gap-fill's upload result: informational only, no ACCEPT/REJECT. That fit
+// covers only the cells just patched -- a handful out of 60 -- and its only
+// useful destiny is as a merge candidate on the website. Offering to install
+// it standalone (showCloudCalResult's ACCEPT/REJECT, defaulting to ACCEPT)
+// would let a diver who presses BTN2 without reading closely silently
+// overwrite a good full-sphere baseline with a partial one. See
+// divemap/docs/architecture/baseline-cal-coverage-feedback-plan.md.
+void showGapFillUploaded(float rmsPct, const char* recommendation, int16_t coverageGaps) {
+    if (!tftReady) return;
+    invalidateNavCache();
+    tft.fillScreen(COLOR_BLACK);
+
+    tft.setTextSize(2);
+    tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
+    tft.setCursor(4, 4);
+    tft.print("GAP-FILL UPLOADED");
+
+    char buf[28];
+    snprintf(buf, sizeof(buf), "%.0f%% RMS (this patch)", (double)rmsPct);
+    tft.setTextSize(1);
+    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+    tft.setCursor(4, 30);
+    tft.print(buf);
+
+    tft.drawFastHLine(0, 44, SCREEN_WIDTH, COLOR_CYAN);
+
+    // Same recommendation text calibration-processor would give a solo
+    // baseline -- shown as context, not as a verdict on this patch alone.
+    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+    printWrapped(4, 52, recommendation ? recommendation : "", 50, 10, 3);
+
+    if (coverageGaps >= 0) {
+        char covBuf[48];
+        snprintf(covBuf, sizeof(covBuf), "%d cell%s remain thin/empty",
+                  coverageGaps, coverageGaps == 1 ? "" : "s");
+        tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+        tft.setCursor(4, 90);
+        tft.print(covBuf);
+    }
+
+    tft.drawFastHLine(0, 104, SCREEN_WIDTH, COLOR_CYAN);
+
+    tft.setTextSize(2);
+    tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
+    tft.setCursor(4, 116);
+    tft.print("Go to the website");
+    tft.setCursor(4, 138);
+    tft.print("to merge & accept.");
+
+    tft.setTextSize(1);
+    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+    tft.setCursor(4, 200);
+    tft.print("BTN2: OK");
 }
 
 void showCloudLinkWaiting(const char* userCode, uint32_t secondsWaiting) {
@@ -1642,6 +1697,11 @@ void showCloudLinkDone() {
 // ---------------------------------------------------------------------------
 void showCalGrid(const CalProgressPacket& pkt, const char* title) {
     const bool isMounted = (pkt.cal_type == (uint8_t)CalType::MOUNTED);
+    // Gap-fill shares this screen deliberately rather than getting its own.
+    // Its whole promise is that the cell it highlights is the cell the website
+    // flagged, and the fastest way to break that is two grid renderers with
+    // subtly different geometry. One function, one cell layout, one ordering.
+    const bool isGapFill = (pkt.phase == (uint8_t)CalPhase::GAP_FILL);
     const int HDG_COLS   = 12;
     const int ELEV_ROWS  = isMounted ? 3 : 5;
     const int GRID_X     = 28;
@@ -1707,17 +1767,39 @@ void showCalGrid(const CalProgressPacket& pkt, const char* title) {
             uint8_t cnt = (binIdx < pkt.bins_total) ? pkt.bin_counts[binIdx] : 0;
 
             uint16_t color;
-            if (cnt >= MAG_CAL_BIN_GREEN_THRESHOLD)       color = COLOR_GREEN;
-            else if (cnt >= MAG_CAL_BIN_YELLOW_THRESHOLD) color = COLOR_YELLOW;
-            else if (cnt > 0)                              color = COLOR_RED;
-            else                                           color = 0x1082;  // very dark gray
+            uint8_t  doneAt;   // count at which this cell stops wanting samples
+            if (isGapFill) {
+                // Colour by the job, not by raw density. An untargeted cell is
+                // not "empty and bad", it's "not your problem" -- painting it
+                // red would send the diver chasing cells the server is happy
+                // with, which is how the over-weighted bins this whole feature
+                // exists to fix get made.
+                const uint8_t st = pkt.has_targets ? pkt.targets[binIdx] : 0;
+                const bool targeted = (st == 1 || st == 2);  // thin or empty
+                doneAt = targeted ? MAG_CAL_GAPFILL_TARGET_CAP
+                                  : MAG_CAL_GAPFILL_UNTARGETED_CAP;
+                if (!targeted)              color = 0x1082;       // very dark gray
+                else if (cnt >= doneAt)     color = COLOR_GREEN;
+                else if (cnt > 0)           color = COLOR_YELLOW;
+                else                        color = COLOR_RED;
+            } else {
+                doneAt = MAG_CAL_BIN_GREEN_THRESHOLD;
+                if (cnt >= MAG_CAL_BIN_GREEN_THRESHOLD)       color = COLOR_GREEN;
+                else if (cnt >= MAG_CAL_BIN_YELLOW_THRESHOLD) color = COLOR_YELLOW;
+                else if (cnt > 0)                              color = COLOR_RED;
+                else                                           color = 0x1082;  // very dark gray
+            }
 
             int cx = GRID_X + c * COL_W;
             int cy = GRID_Y + r * ROW_H;
             tft.fillRect(cx, cy, COL_W, ROW_H, color);  // full cell — erases old border
 
-            // Sample count in non-green cells (drawn inside cell, away from border)
-            if (cnt > 0 && cnt < MAG_CAL_BIN_GREEN_THRESHOLD) {
+            // Sample count in cells still wanting samples (drawn inside cell,
+            // away from border). Suppressed on the dark untargeted cells in
+            // gap-fill: a number there reads as a task, and it isn't one.
+            if (isGapFill && color == 0x1082) {
+                // nothing to draw
+            } else if (cnt > 0 && cnt < doneAt) {
                 tft.setTextSize(1);
                 tft.setTextColor(COLOR_BLACK, color);
                 tft.setCursor(cx + 4, cy + ROW_H / 2 - 4);
@@ -1744,10 +1826,25 @@ void showCalGrid(const CalProgressPacket& pkt, const char* title) {
         tft.setCursor(4, STATUS_Y);
         tft.print("DONE - Saving CSV...");
     } else {
-        // Line 1: bin count (left), completion is row-weighted so may finish before all bins green
+        // Line 1: progress. In gap-fill the denominator is the TARGET LIST, not
+        // the grid -- pkt.bins_total is 60 there because it sizes the wire
+        // array and the cell loop, so the display counts targets itself from
+        // the map it already has. "3/48 bins" during a session whose whole job
+        // is eleven cells would be actively misleading.
         tft.setTextSize(2);
-        char sbuf[16];
-        snprintf(sbuf, sizeof(sbuf), "%d/%d bins", pkt.bins_green, pkt.bins_total);
+        char sbuf[20];
+        if (isGapFill) {
+            int targetTotal = 0;
+            if (pkt.has_targets) {
+                for (int i = 0; i < pkt.bins_total && i < 60; i++) {
+                    if (pkt.targets[i] == 1 || pkt.targets[i] == 2) targetTotal++;
+                }
+            }
+            snprintf(sbuf, sizeof(sbuf), "%d/%d cells", pkt.bins_green, targetTotal);
+        } else {
+            // completion is row-weighted so may finish before all bins green
+            snprintf(sbuf, sizeof(sbuf), "%d/%d bins", pkt.bins_green, pkt.bins_total);
+        }
         tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
         tft.setCursor(4, STATUS_Y);
         tft.print(sbuf);
@@ -1755,7 +1852,89 @@ void showCalGrid(const CalProgressPacket& pkt, const char* title) {
         // Line 2: fit quality when available, orientation otherwise.
         // Once fit_valid, the heading error estimate is more actionable than
         // the raw orientation readout (which the bin grid already shows visually).
-        if (pkt.fit_valid) {
+        if (isGapFill) {
+            // Orientation, always -- in gap-fill the diver is steering toward a
+            // specific cell, so where they're pointing beats a fit statistic.
+            // This pitch/heading pair comes from the same algebraic
+            // reconstruction that chose the highlighted cell (see
+            // util/mag_cal_orient.h), not from the AHRS, so the readout and the
+            // highlight can never disagree.
+            float hdg   = pkt.cur_hdg_deg;
+            float pitch = pkt.cur_pitch_deg;
+            if (hdg < 0.0f) hdg += 360.0f;
+            if (hdg >= 360.0f) hdg -= 360.0f;
+            static const char* gdirs[8] = { "N","NE","E","SE","S","SW","W","NW" };
+            int gdidx = (int)((hdg + 22.5f) / 45.0f) % 8;
+            char gbuf[14];
+            snprintf(gbuf, sizeof(gbuf), "%s %+.0f\xB0", gdirs[gdidx], pitch);
+            tft.setTextSize(2);
+            tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
+            tft.setCursor(4, STATUS_Y + 20);
+            tft.print(gbuf);
+
+            // --- Persistent roll widget: always-visible breakdown of the
+            // roll-sector coverage for whichever cell current_bin is
+            // pointing at (CalProgressPacket::current_bin_roll_counts/
+            // _targeted, populated only in gap-fill -- see config.h's
+            // "Roll coverage" block). A small square split into 4 triangles
+            // by its diagonals -- top=upright, right=right-side,
+            // bottom=upside-down, left=left-side, matching
+            // mag_orient::rollSector()'s ordering -- each colored the same
+            // green/yellow/red convention as a grid cell, with a white
+            // outline on whichever triangle matches the device's LIVE roll
+            // (current_roll_sector). Filled whole every frame, same
+            // no-flicker trick the grid cells above use, so there's no
+            // separate "last drawn sector" to track. Deliberately not a
+            // mode swap with the main grid -- rejected in the gap-fill
+            // orientation UX plan as visually confusing -- it just sits
+            // here, always current, as the diver moves between cells.
+            {
+                const int WS  = 44;                // widget square side, px
+                const int WX  = 320 - WS - 8;       // right-aligned, 8px margin
+                const int WY  = STATUS_Y;
+                const int cxm = WX + WS / 2;
+                const int cym = WY + WS / 2;
+                const uint16_t kUnknownColor = 0x1082;  // very dark gray, matches untargeted cells
+
+                for (int k = 0; k < MAG_CAL_ROLL_SECTORS; k++) {
+                    uint16_t color;
+                    if (pkt.current_bin < 0) {
+                        // No live orientation to report -- unknown, not a
+                        // false "all satisfied" green.
+                        color = kUnknownColor;
+                    } else {
+                        switch (pkt.current_bin_roll_targeted[k]) {
+                            case 0:  color = COLOR_GREEN;  break;  // satisfied
+                            case 1:  color = COLOR_YELLOW; break;  // some, under cap
+                            default: color = COLOR_RED;    break;  // none yet
+                        }
+                    }
+                    switch (k) {
+                        case 0:  tft.fillTriangle(WX, WY, WX + WS, WY, cxm, cym, color); break;              // upright: top
+                        case 1:  tft.fillTriangle(WX + WS, WY, WX + WS, WY + WS, cxm, cym, color); break;    // right-side: right
+                        case 2:  tft.fillTriangle(WX + WS, WY + WS, WX, WY + WS, cxm, cym, color); break;    // upside-down: bottom
+                        default: tft.fillTriangle(WX, WY + WS, WX, WY, cxm, cym, color); break;              // left-side: left
+                    }
+                }
+
+                // Live-roll outline on the triangle matching the device's
+                // current attitude -- skipped when roll is unmappable
+                // (device pointing straight up/down, current_roll_sector
+                // stays -1; see mag_orient::reconstructRoll).
+                if (pkt.current_roll_sector >= 0 && pkt.current_roll_sector < MAG_CAL_ROLL_SECTORS) {
+                    int ox0, oy0, ox1, oy1;
+                    switch (pkt.current_roll_sector) {
+                        case 0:  ox0 = WX;      oy0 = WY;      ox1 = WX + WS; oy1 = WY;      break;
+                        case 1:  ox0 = WX + WS; oy0 = WY;      ox1 = WX + WS; oy1 = WY + WS; break;
+                        case 2:  ox0 = WX + WS; oy0 = WY + WS; ox1 = WX;      oy1 = WY + WS; break;
+                        default: ox0 = WX;      oy0 = WY + WS; ox1 = WX;      oy1 = WY;      break;
+                    }
+                    tft.drawLine(ox0, oy0, ox1, oy1, COLOR_WHITE);
+                    tft.drawLine(ox0, oy0, cxm, cym, COLOR_WHITE);
+                    tft.drawLine(ox1, oy1, cxm, cym, COLOR_WHITE);
+                }
+            }
+        } else if (pkt.fit_valid) {
             // Colour-code by estimated heading error
             uint16_t fcol = (pkt.fit_hdg_err_deg < 3.0f) ? COLOR_GREEN
                           : (pkt.fit_hdg_err_deg < 7.0f) ? COLOR_YELLOW
@@ -1886,7 +2065,13 @@ void showBaselineRoughScan(const CalProgressPacket& pkt) {
     if (pkt.complete) {
         tft.setTextColor(COLOR_GREEN, COLOR_BLACK);
         tft.setCursor(4, 210);
-        tft.print("Done -- uploading for grading...");
+        if (pkt.max_samples_reached) {
+            tft.print("Max samples reached,");
+            tft.setCursor(4, 222);
+            tft.print("uploading now.");
+        } else {
+            tft.print("Done -- uploading for grading...");
+        }
     } else if (pkt.sample_count >= MAG_CAL_ROUGH_SCAN_MIN_SAMPLES) {
         tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
         tft.setCursor(4, 210);

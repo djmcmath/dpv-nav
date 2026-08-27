@@ -2,12 +2,15 @@
 #include <Wire.h>
 #include "lis3mdl.h"
 
-// Helper: write a single register
-void magWrite(uint8_t reg, uint8_t value) {
+// Helper: write a single register.
+// Returns false if the device did not ACK -- initMag() needs to know, because
+// a silently-failed config leaves the LIS3MDL in a default state while the
+// caller believes it is configured.
+bool magWrite(uint8_t reg, uint8_t value) {
   Wire.beginTransmission(LIS3MDL_ADDR);
   Wire.write(reg);
   Wire.write(value);
-  Wire.endTransmission();
+  return Wire.endTransmission() == 0;
 }
 
 // Helper: read multiple bytes starting at reg

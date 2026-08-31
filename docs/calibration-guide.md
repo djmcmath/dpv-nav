@@ -504,6 +504,58 @@ cross-section of the DPV inlet. For a 50 mm diameter tube: π × (0.025)² ≈ 0
 | **RESET+ACCEPT** | DPV serviced, impeller changed, or first cal on a new installation — clears history so old measurements from different hardware don't pollute the average |
 | **REJECT** | Run was suspect (aborted early, DPV speed changed mid-run, etc.) |
 
+### Deriving k from a corrected dive
+
+A dive corrected in Dive Map against GPS fixes and waypoint snaps reports a speed
+factor (called `k` there too, unrelated to this one) defined as
+
+```
+true_speed = s x logged_speed
+```
+
+Reported speed is proportional to `1/k_factor`, so scaling speed by `s` means:
+
+```
+k_new = k_old / s
+```
+
+Sign check, worth doing every time: `s < 1` means the unit read fast, so `k` goes **up**.
+
+Two things to get right:
+
+- **`k_old` must be what the unit was actually running on that dive** — its NVS history
+  via `speed_cal::averageK()`, not `baseline cal jsons/speed_cal.json`, which is only the
+  seed file. If those differ, the composition is wrong.
+- **Use one joint least-squares solve over the legs you trust.** Do not average per-leg
+  `s` values (each has absorbed its own leg's heading error), and do not average several
+  whole-dive solves that share data — both double-count, and both drag the answer back
+  toward whichever legs you were trying to exclude.
+
+Feeding the result back in: this is a derived measurement, not a timed run, so it does not
+belong in the rolling average alongside them. Set `/speed_cal.json` to `{"n":1,"k":[k_new]}`
+— the equivalent of **RESET+ACCEPT** — and note what it came from.
+
+#### Worked example — 2026-08-29, Dawn
+
+Five legs, anchored by two GPS fixes and three waypoint positions. Legs 1–3 (surface swim
+out, then both deep DPV legs) were judged trustworthy; legs 4–5 were shallow with
+intermittent scooting and swimming, so one speed factor cannot hold across them.
+
+```
+joint solve, legs 1-3   s = 0.9029    k_new = 0.1686 / 0.9029 = 0.1867
+joint solve, legs 2-3   s = 0.8728    k_new = 0.1686 / 0.8728 = 0.1932
+joint solve, all 5      s = 0.8657    k_new = 0.1686 / 0.8657 = 0.1947
+```
+
+**Do not chase the last digit.** Re-solving with the three waypoint positions perturbed by
+±10 m (1σ) — realistic, since one is sidescan-derived — gives `s = 0.906 ± 0.034`, so
+`k_new` lands anywhere in 0.179–0.193. Which legs you include moves the answer less than
+the anchor uncertainty does. Take it to three decimals, record what it was derived from,
+and expect to refine it.
+
+The heading offset from the same solve (+11.6°) barely moves under that perturbation. That
+one is worth acting on with confidence; this one is a better guess than what it replaces.
+
 ### Setting FLOW_CROSS_SECTION_M2
 
 `FLOW_CROSS_SECTION_M2` in `config.h` must be set to the physical intake cross-section of the DPV inlet before speed cal can give sensible k-factor values. Measure the inner diameter of the flow sensor mounting tube:

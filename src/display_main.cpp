@@ -254,6 +254,7 @@ static void renderCalProgress(const CalProgressPacket& pkt) {
 }
 
 static void updateButton(ButtonState& b);
+static bool handleModalButtons();
 static void handleButtons();
 
 // ===========================================================================
@@ -1015,7 +1016,20 @@ static void updateButton(ButtonState& b) {
 //   BTN1 short press      → open menu / cycle to next item
 //   BTN2 short press      → select menu item
 // ---------------------------------------------------------------------------
-static void handleButtons() {
+// Swallow any short-press release that is still pending. Every modal screen
+// below returns early, and most of them only ever consume the one button they
+// care about -- the other button's release then sits with fired == false and
+// fires into the menu the instant the modal exits, opening the menu or
+// advancing an item the diver never pressed for. Anything that claims a pass
+// must claim both buttons.
+static void consumePendingReleases() {
+    if (!btn1.pressed && btn1.pressStartMs > 0) btn1.fired = true;
+    if (!btn2.pressed && btn2.pressStartMs > 0) btn2.fired = true;
+}
+
+// Full-screen modes that own the buttons. Returns true if one of them handled
+// (or deliberately ignored) this pass, in which case the menu must not see it.
+static bool handleModalButtons() {
     uint32_t now = millis();
 
     // --- Both buttons held 2s → reset display --------------------------------
@@ -1028,7 +1042,7 @@ static void handleButtons() {
             display::reinit();
             btn1.fired = true;
             btn2.fired = true;
-            return;
+            return true;
         }
     }
 
@@ -1044,7 +1058,7 @@ static void handleButtons() {
         if (gBaselineFinishPending) {
             // Already requested -- ignore repeat presses until nav confirms
             // (complete=true) or the pending screen times out.
-            return;
+            return true;
         }
         if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
             btn2.fired = true;
@@ -1056,7 +1070,7 @@ static void handleButtons() {
             display::clear();
             Serial.println("[BIN_CAL] BTN2: requested finish baseline collection");
         }
-        return;
+        return true;
     }
 
     // --- Fourier heading calibration -----------------------------------------
@@ -1084,7 +1098,7 @@ static void handleButtons() {
                 display::clear();
             }
         }
-        return;
+        return true;
     }
 
     // --- Speed cal: distance selection mode ----------------------------------
@@ -1102,7 +1116,7 @@ static void handleButtons() {
             sendSpeedCalStart(gSpeedCalDist_ft);
             gSpeedCalPhase = SpeedCalPhase::WAITING;
         }
-        return;
+        return true;
     }
 
     // --- Speed cal: waiting for flow (or manual countdown) --------------------
@@ -1118,7 +1132,7 @@ static void handleButtons() {
                 Serial.println("[SPEED_CAL] Long-press BTN2: starting manual countdown");
             }
         }
-        return;
+        return true;
     }
 
     // --- Speed cal: accept/reject result mode --------------------------------
@@ -1144,7 +1158,7 @@ static void handleButtons() {
             gSpeedCalPhase = SpeedCalPhase::NONE;
             display::clear();
         }
-        return;
+        return true;
     }
 
     // --- Cloud calibration result UI -----------------------------------------
@@ -1155,7 +1169,7 @@ static void handleButtons() {
             gCloudCalPhase = CloudCalUiPhase::NONE;
             display::clear();
         }
-        return;
+        return true;
     }
     if (gCloudCalPhase == CloudCalUiPhase::RESULT) {
         if (!gCloudCalInstallable) {
@@ -1167,7 +1181,7 @@ static void handleButtons() {
                 gCloudCalPhase = CloudCalUiPhase::NONE;
                 display::clear();
             }
-            return;
+            return true;
         }
         // BTN1: cycle ACCEPT/REJECT
         if (!btn1.pressed && !btn1.fired && btn1.pressStartMs > 0) {
@@ -1184,12 +1198,12 @@ static void handleButtons() {
             gCloudCalPhase = CloudCalUiPhase::NONE;
             display::clear();
         }
-        return;
+        return true;
     }
     // WAITING: no button action -- the nav device is mid-upload and won't see
     // anything sent right now anyway (it's blocked on the network call).
     if (gCloudCalPhase == CloudCalUiPhase::WAITING) {
-        return;
+        return true;
     }
 
     // --- Cloud account-link UI ------------------------------------------------
@@ -1201,7 +1215,7 @@ static void handleButtons() {
             gCloudLinkPhase = CloudLinkUiPhase::NONE;
             display::clear();
         }
-        return;
+        return true;
     }
     // STARTING/WAITING: BTN2 cancels. The nav-side poll is a non-blocking
     // state machine (see cloud_client.h), so CANCEL_LINK reaches it and
@@ -1213,7 +1227,7 @@ static void handleButtons() {
             gCloudLinkPhase = CloudLinkUiPhase::NONE;
             display::clear();
         }
-        return;
+        return true;
     }
 
     // --- Waypoint UI ---------------------------------------------------------
@@ -1243,8 +1257,24 @@ static void handleButtons() {
             gWaypointUiPhase = WaypointUiPhase::NONE;
             display::clear();
         }
+        return true;
+    }
+
+    return false;  // no modal active — the menu gets this pass
+}
+
+static void handleButtons() {
+    if (handleModalButtons()) {
+        consumePendingReleases();
         return;
     }
+
+    // Snapshot before BTN1 runs: BTN1 may open the menu in this very pass, and
+    // BTN2 must not be allowed to select whatever item that lands on. A quick
+    // two-button tap (the same gesture that wakes the unit) released both
+    // buttons inside one debounce window, so BTN1's open and BTN2's select ran
+    // back to back and fired root item 0 sight-unseen.
+    const bool menuWasOpenOnEntry = menu::isOpen();
 
     // --- Normal menu handling ------------------------------------------------
     // BTN1: short press on release
@@ -1261,9 +1291,10 @@ static void handleButtons() {
     // BTN2: short press on release
     if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
         btn2.fired = true;
-        if (menu::isOpen()) {
+        if (menuWasOpenOnEntry && menu::isOpen()) {
             menu::select();
         }
-        // When menu is closed, BTN2 has no action
+        // When the menu is closed — or was only just opened by BTN1 above —
+        // BTN2 has no action.
     }
 }

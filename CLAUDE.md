@@ -290,19 +290,49 @@ The display device includes a hierarchical menu system ([src/menu/menu.h](src/me
 - **BTN1 short press**: Open menu (when closed) or cycle to next item (when open)
 - **BTN2 short press**: Select highlighted item (enter submenu, execute action, or go back)
 - **BTN1 + BTN2 held 2s**: Reset display device (sends `DisplayCmd::RESET`)
-- **15-second idle timeout**: Menu auto-closes
+- **45-second idle timeout**: Menu auto-closes; reopening within `MENU_RESUME_WINDOW_MS` (2 min) resumes at the same item rather than at the root
 
 ### Menu Structure
 ```
 MENU (root)
-├── OFF      — power off nav device
-├── NAV:     Outbound, Home, Mark, Op Mode
-├── CAL:     Baseline, Fill gaps, Mounted, Hdg cal, Speed cal
-├── INPUT:   GPS Pos, GPS Spd, WiFi, Logging
-└── DISPLAY: Mode, Spd/ETA, Units, Heading
+├── Nav:     Select WP, Arrive WP, Mark, Op Mode
+├── Cal:     Baseline, Fill gaps, Mounted, Hdg cal, Speed cal
+├── Config:  GPS, WiFi, Log, Water, Link acct
+├── Display: Mode, Spd/ETA, Units, Heading
+├── OFF      — power off nav device (two presses; see below)
+└── Close    — auto-generated, leaves the menu
 ```
 
-Each submenu has an auto-generated ".." (back) item. Toggle items (GPS Pos, Units, Mode, Op Mode, etc.) show current state inline and stay open after toggle.
+Each submenu has an auto-generated ".." back item; the root gets "Close". Both
+carry `Action::BACK` — do not go back to identifying them by label, the old
+`strcmp(label, "..")` test is precisely why the root could not have its own
+exit. Toggle items (GPS, Units, Mode, Op Mode, etc.) show current state inline
+and stay open after toggle.
+
+### Menu Safety Invariants (do not regress these)
+
+Three defects here cost a real dive in August 2026: the diver could not find
+`Config > Log` underwater and shut the unit down by hand to stop logging, and
+separately powered it off while trying to select `Display`. The fixes are
+load-bearing, not cosmetic.
+
+1. **`OFF` is never index 0, and never adjacent-by-wraparound to a real action.**
+   It used to be root item 0, which made it both the item the menu opened on and
+   the item `Display` wrapped onto. It now sits second-to-last with the no-op
+   `Close` behind it, so overshooting the end of the list is harmless.
+2. **`POWER_OFF` takes two presses.** The first BTN2 arms it (`gPowerOffArmed`,
+   item repaints as `OFF:SURE?`), the second fires. `next()`, `close()` and
+   `open()` all disarm.
+3. **BTN2 cannot act on a menu that BTN1 opened in the same pass.**
+   `handleButtons()` snapshots `menu::isOpen()` before running the BTN1 branch.
+   Without that snapshot, a two-button tap — the same gesture that wakes the
+   unit — released both buttons inside one 50 ms debounce window and ran
+   open-then-select back to back, firing root item 0 sight-unseen.
+4. **A modal screen that claims a button pass must claim both buttons.**
+   `handleModalButtons()` returns true when a full-screen mode owned the pass and
+   `handleButtons()` then calls `consumePendingReleases()`. Modals only ever
+   handle the one button they care about; the other one's release used to sit
+   with `fired == false` and fire into the menu the instant the modal exited.
 
 **Speed cal** uses a multi-phase UI that takes over the display outside the menu system:
 1. Menu closes → display enters distance-selection mode (`SpeedCalPhase::DIST_SELECT` in display_main.cpp)

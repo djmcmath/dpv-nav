@@ -11,11 +11,17 @@ namespace menu {
 // Menu geometry
 // ---------------------------------------------------------------------------
 constexpr int MAX_SUBMENUS    = 8;    // max number of submenus (including root)
-constexpr int MAX_ITEMS       = 6;    // max items per submenu (including auto "..")
+constexpr int MAX_ITEMS       = 8;    // max items per submenu (including auto back item)
 constexpr int MAX_MENU_DEPTH  = 3;    // max nesting depth (root + 2 levels)
 constexpr int MENU_LABEL_LEN  = 12;   // max chars for item label
 
-constexpr uint32_t MENU_TIMEOUT_MS = 15000;  // auto-close after 15 s idle
+constexpr uint32_t MENU_TIMEOUT_MS = 45000;  // auto-close after 45 s idle
+
+// After an idle timeout, reopening the menu within this window resumes at the
+// item the diver was last on instead of dumping them back at the root. Hunting
+// seven items deep for Log with gloves on, twice, is how the old 15 s timeout
+// lost people mid-dive.
+constexpr uint32_t MENU_RESUME_WINDOW_MS = 120000;
 
 // ---------------------------------------------------------------------------
 // Menu actions — what happens when a leaf item is selected
@@ -47,6 +53,7 @@ enum class Action : uint8_t {
     CLOUD_LINK           = 21,  // begin device-auth cloud account link (RFC 8628)
     INPUT_WATER          = 22,  // toggle salt/fresh water density (depth calc)
     CAL_GAPFILL          = 23,  // guided gap-fill pass over the cells the server flagged
+    BACK                 = 24,  // leave submenu, or close the menu at root
 };
 
 // ---------------------------------------------------------------------------
@@ -90,7 +97,8 @@ void init(SendCmdFn sendFn);
 // Returns true if the menu is currently visible.
 bool isOpen();
 
-// Open menu (top-level, first item selected).
+// Open menu. Resumes the last position if the menu idle-timed-out within
+// MENU_RESUME_WINDOW_MS, otherwise opens at the root's first item.
 void open();
 
 // Close menu and return to normal nav display.

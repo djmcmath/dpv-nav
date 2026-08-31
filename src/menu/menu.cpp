@@ -31,6 +31,18 @@ static bool gWaypointSelectPending  = false;
 static bool gWaypointArrivePending  = false;
 static bool gCloudLinkPending       = false;
 
+// POWER_OFF is the one menu action that cannot be undone underwater, so it
+// takes two BTN2 presses: the first arms it and relabels the item, the second
+// fires. Any other navigation disarms it.
+static bool gPowerOffArmed = false;
+
+// Idle-timeout resume point. tick() stashes the position it closed from so a
+// diver who paused to think reopens where they were instead of at the root.
+static int8_t  savedStack[MAX_MENU_DEPTH];
+static uint8_t savedDepth = 0;   // 0 = nothing saved
+static uint8_t savedItem  = 0;
+static uint32_t savedAtMs = 0;
+
 // Nav-device toggle states (updated from NavPacket flags)
 static bool gGpsEnabled  = true;
 static bool gWifiEnabled = true;
@@ -87,19 +99,28 @@ static void loadDefaults() {
     submenuCount = 5;
 
     // Root menu (index 0)
+    //
+    // Item order here is a safety property, not a preference. OFF used to sit
+    // at index 0, which made it both the item the menu opened on AND the item
+    // Display wrapped onto -- two separate ways to shut the unit down by
+    // pressing BTN2 one beat too early. It now sits second-to-last behind a
+    // confirm (see gPowerOffArmed), with the harmless "Close" after it so that
+    // overshooting OFF lands on a no-op instead of on the next real action.
     auto& root = submenus[0];
     strncpy(root.title, "MENU", MENU_LABEL_LEN);
-    root.count = 5;
-    strncpy(root.items[0].label, "OFF", MENU_LABEL_LEN);
-    root.items[0].action = Action::POWER_OFF; root.items[0].submenuIdx = -1;
-    strncpy(root.items[1].label, "Nav", MENU_LABEL_LEN);
-    root.items[1].action = Action::SUBMENU; root.items[1].submenuIdx = 1;
-    strncpy(root.items[2].label, "Cal", MENU_LABEL_LEN);
-    root.items[2].action = Action::SUBMENU; root.items[2].submenuIdx = 2;
-    strncpy(root.items[3].label, "Config", MENU_LABEL_LEN);
-    root.items[3].action = Action::SUBMENU; root.items[3].submenuIdx = 3;
-    strncpy(root.items[4].label, "Display", MENU_LABEL_LEN);
-    root.items[4].action = Action::SUBMENU; root.items[4].submenuIdx = 4;
+    root.count = 6;
+    strncpy(root.items[0].label, "Nav", MENU_LABEL_LEN);
+    root.items[0].action = Action::SUBMENU; root.items[0].submenuIdx = 1;
+    strncpy(root.items[1].label, "Cal", MENU_LABEL_LEN);
+    root.items[1].action = Action::SUBMENU; root.items[1].submenuIdx = 2;
+    strncpy(root.items[2].label, "Config", MENU_LABEL_LEN);
+    root.items[2].action = Action::SUBMENU; root.items[2].submenuIdx = 3;
+    strncpy(root.items[3].label, "Display", MENU_LABEL_LEN);
+    root.items[3].action = Action::SUBMENU; root.items[3].submenuIdx = 4;
+    strncpy(root.items[4].label, "OFF", MENU_LABEL_LEN);
+    root.items[4].action = Action::POWER_OFF; root.items[4].submenuIdx = -1;
+    strncpy(root.items[5].label, "Close", MENU_LABEL_LEN);
+    root.items[5].action = Action::BACK; root.items[5].submenuIdx = -1;
 
     // NAV submenu (index 1)
     auto& nav = submenus[1];
@@ -114,12 +135,12 @@ static void loadDefaults() {
     strncpy(nav.items[3].label, "Op Mode", MENU_LABEL_LEN);
     nav.items[3].action = Action::NAV_OP_MODE; nav.items[3].submenuIdx = -1;
     strncpy(nav.items[4].label, "..", MENU_LABEL_LEN);
-    nav.items[4].action = Action::NONE; nav.items[4].submenuIdx = -1;
+    nav.items[4].action = Action::BACK; nav.items[4].submenuIdx = -1;
 
     // CAL submenu (index 2)
     auto& cal = submenus[2];
     strncpy(cal.title, "Cal", MENU_LABEL_LEN);
-    cal.count = 6;  // 5 actions + ".."  (MAX_ITEMS is 6 -- this submenu is now full)
+    cal.count = 6;  // 5 actions + ".."
     strncpy(cal.items[0].label, "Baseline", MENU_LABEL_LEN);
     cal.items[0].action = Action::CAL_BASELINE; cal.items[0].submenuIdx = -1;
     // Directly under Baseline: gap-fill is the second half of that job, and
@@ -135,7 +156,7 @@ static void loadDefaults() {
     strncpy(cal.items[4].label, "Speed cal", MENU_LABEL_LEN);
     cal.items[4].action = Action::CAL_SPEED; cal.items[4].submenuIdx = -1;
     strncpy(cal.items[5].label, "..", MENU_LABEL_LEN);
-    cal.items[5].action = Action::NONE; cal.items[5].submenuIdx = -1;
+    cal.items[5].action = Action::BACK; cal.items[5].submenuIdx = -1;
 
     // CONFIG submenu (index 3)
     auto& inp = submenus[3];
@@ -152,7 +173,7 @@ static void loadDefaults() {
     strncpy(inp.items[4].label, "Link acct", MENU_LABEL_LEN);
     inp.items[4].action = Action::CLOUD_LINK; inp.items[4].submenuIdx = -1;
     strncpy(inp.items[5].label, "..", MENU_LABEL_LEN);
-    inp.items[5].action = Action::NONE; inp.items[5].submenuIdx = -1;
+    inp.items[5].action = Action::BACK; inp.items[5].submenuIdx = -1;
 
     // DISPLAY submenu (index 4)
     auto& dsp = submenus[4];
@@ -167,7 +188,7 @@ static void loadDefaults() {
     strncpy(dsp.items[3].label, "Heading", MENU_LABEL_LEN);
     dsp.items[3].action = Action::DISP_HDG_TYPE; dsp.items[3].submenuIdx = -1;
     strncpy(dsp.items[4].label, "..", MENU_LABEL_LEN);
-    dsp.items[4].action = Action::NONE; dsp.items[4].submenuIdx = -1;
+    dsp.items[4].action = Action::BACK; dsp.items[4].submenuIdx = -1;
 }
 
 // ---------------------------------------------------------------------------
@@ -203,7 +224,7 @@ static bool loadFromJSON() {
         sm.count = 0;
         JsonArray items = menuObj["items"];
         for (JsonObject itemObj : items) {
-            if (sm.count >= MAX_ITEMS - 1) break;  // leave room for ".."
+            if (sm.count >= MAX_ITEMS - 1) break;  // leave room for the back item
             auto& it = sm.items[sm.count];
 
             const char* label = itemObj["label"] | "???";
@@ -220,11 +241,14 @@ static bool loadFromJSON() {
             sm.count++;
         }
 
-        // Add ".." back item for non-root menus
-        if (submenuCount > 0) {
+        // Every menu gets an explicit exit, root included. Without one at the
+        // root the only ways out were the idle timeout or executing something,
+        // which is what made "I just wanted to look" so expensive.
+        if (sm.count < MAX_ITEMS) {
             auto& back = sm.items[sm.count];
-            strncpy(back.label, "..", MENU_LABEL_LEN);
-            back.action = Action::NONE;
+            strncpy(back.label, submenuCount > 0 ? ".." : "Close", MENU_LABEL_LEN);
+            back.label[MENU_LABEL_LEN] = '\0';
+            back.action = Action::BACK;
             back.submenuIdx = -1;
             sm.count++;
         }
@@ -277,6 +301,16 @@ static void getDisplayLabel(const MenuItem& item, char* buf, size_t bufLen) {
             break;
         case Action::NAV_OP_MODE:
             suffix = gDiveMode ? "DIVE" : "SURF";
+            break;
+        case Action::POWER_OFF:
+            // Unarmed, this renders as a plain "OFF" -- the confirm only shows
+            // once the diver has actually pressed BTN2 on it.
+            if (!gPowerOffArmed) {
+                strncpy(buf, item.label, bufLen);
+                buf[bufLen - 1] = '\0';
+                return;
+            }
+            suffix = "SURE?";
             break;
         default:
             strncpy(buf, item.label, bufLen);
@@ -432,16 +466,32 @@ bool isOpen() {
 }
 
 void open() {
-    stackDepth = 1;
-    menuStack[0] = 0;  // root menu
-    selectedItem = 0;
+    // Resume where the diver was if the menu idle-timed-out recently. Past the
+    // window, start clean -- dropping someone into CONFIG > Log twenty minutes
+    // later is its own kind of confusing.
+    if (savedDepth > 0 && (millis() - savedAtMs) < MENU_RESUME_WINDOW_MS) {
+        memcpy(menuStack, savedStack, sizeof(menuStack));
+        stackDepth   = savedDepth;
+        selectedItem = savedItem;
+        Serial.print("[MENU] Opened (resumed at ");
+        Serial.print(currentMenu().title);
+        Serial.println(")");
+    } else {
+        stackDepth   = 1;
+        menuStack[0] = 0;  // root menu
+        selectedItem = 0;
+        Serial.println("[MENU] Opened");
+    }
+    savedDepth     = 0;
+    gPowerOffArmed = false;
     lastActivityMs = millis();
     invalidateMenuCache();
-    Serial.println("[MENU] Opened");
 }
 
 void close() {
-    stackDepth = 0;
+    stackDepth     = 0;
+    savedDepth     = 0;   // an explicit close discards the resume point
+    gPowerOffArmed = false;
     Serial.println("[MENU] Closed");
 }
 
@@ -449,6 +499,13 @@ void next() {
     if (!isOpen()) return;
     auto& sm = currentMenu();
     selectedItem = (selectedItem + 1) % sm.count;
+    // Moving off OFF cancels a pending power-off. Also covers the case where
+    // the diver armed it by accident and just keeps pressing BTN1.
+    if (gPowerOffArmed) {
+        gPowerOffArmed = false;
+        invalidateMenuCache();
+        Serial.println("[MENU] Power-off disarmed");
+    }
     lastActivityMs = millis();
 }
 
@@ -471,7 +528,7 @@ bool select() {
         return false;
     }
 
-    if (item.action == Action::NONE && strcmp(item.label, "..") == 0) {
+    if (item.action == Action::BACK) {
         // Back
         if (stackDepth > 1) {
             stackDepth--;
@@ -483,6 +540,16 @@ bool select() {
             close();
             return true;
         }
+    }
+
+    // POWER_OFF takes two presses: the first arms it and repaints the item as
+    // "OFF:SURE?", the second actually fires. This is the only action a diver
+    // cannot walk back underwater.
+    if (item.action == Action::POWER_OFF && !gPowerOffArmed) {
+        gPowerOffArmed = true;
+        invalidateMenuCache();
+        Serial.println("[MENU] POWER_OFF armed — press BTN2 again to confirm");
+        return false;
     }
 
     // Leaf action — for toggle items, execute but keep menu open
@@ -510,7 +577,16 @@ void tick() {
     if (!isOpen()) return;
     if (millis() - lastActivityMs >= MENU_TIMEOUT_MS) {
         Serial.println("[MENU] Timeout — closing");
+        // Capture before close(), which clears the resume point on purpose.
+        int8_t  stack[MAX_MENU_DEPTH];
+        memcpy(stack, menuStack, sizeof(stack));
+        uint8_t depth = stackDepth;
+        uint8_t item  = selectedItem;
         close();
+        memcpy(savedStack, stack, sizeof(savedStack));
+        savedDepth = depth;
+        savedItem  = item;
+        savedAtMs  = millis();
     }
 }
 

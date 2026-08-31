@@ -27,6 +27,12 @@ constexpr float DR_MIN_FLOW_SPEED_MS = 0.10f;  // ~0.2 kt
 
 // Speed source selection
 constexpr uint32_t GPS_FIX_STALE_MS = 3000;      // Fall back to flowmeter if GPS fix older than this
+
+// Position sentences (RMC/GGA) that must parse WITH a fix after the GPS is
+// re-enabled before its position is trusted. Guards against the module
+// replaying a hot-start cached position on power-up. Both RMC and GGA arrive
+// each second, so 3 discards roughly the first 1.5 s after surfacing.
+constexpr uint16_t GPS_REACQUIRE_MIN_FIXES = 3;
 constexpr float    KNOTS_TO_MS      = 0.514444f;  // knots → m/s conversion factor
 
 // GPS COG (Course Over Ground) coherence filter

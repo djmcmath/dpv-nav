@@ -93,7 +93,8 @@ struct GpsFix {
   uint8_t fix_quality;  // 0=none, 1=GPS, 2=DGPS  (from GGA)
   uint8_t fix_type_3d;  // 1=no fix, 2=2D, 3=3D  (from GSA)
   bool has_fix;         // convenience flag
-  uint32_t fix_age_ms;  // millis() at last valid fix
+  uint32_t fix_age_ms;  // millis() when this position was PARSED, not when it was read.
+                        // Compare against millis() for the true age; see GPS_FIX_STALE_MS.
   // UTC time from GPS (populated from NMEA RMC sentence)
   uint8_t utc_year;     // 2-digit year (e.g. 25 for 2025); 0 if not yet parsed
   uint8_t utc_month;    // 1-12

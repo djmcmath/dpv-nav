@@ -10,6 +10,14 @@ static bool enabled = true;
 static char lastPgtopSentence[80] = {};
 static bool rawNmeaDebug = false;
 
+// --- Fix freshness ---------------------------------------------------------
+// Adafruit_GPS retains its last parsed values indefinitely, and setEnabled(false)
+// cuts power to the module without clearing them. Any read after a power cycle
+// therefore sees the pre-dive position looking perfectly valid. These track when
+// a position was *actually* parsed so a retained one cannot pass as a live fix.
+static uint32_t lastFixMs   = 0;  // millis() when a position sentence last parsed with a fix
+static uint16_t newFixCount = 0;  // such sentences seen since the last enable (saturates)
+
 // GPGSV sentence cache — one group of sentences per 1 Hz update cycle.
 // A group starts when sentence 1-of-N arrives; earlier cached lines are discarded.
 static constexpr int MAX_GSV_LINES = 4;  // covers up to 16 sats (4 per sentence)
@@ -74,6 +82,20 @@ bool init() {
 }
 
 void setEnabled(bool enable) {
+  // On the disabled->enabled edge, discard everything the parser is still
+  // holding from before the module lost power. Without this the first getFix()
+  // after surfacing returns the position from the *previous* surfacing -- which
+  // is what GPS_FIX_STALE_MS is meant to catch and could not, because
+  // fix_age_ms used to be stamped at read time rather than at parse time.
+  if (enable && !enabled) {
+    lastFixMs            = 0;
+    newFixCount          = 0;
+    adaGps.fix           = false;
+    adaGps.fixquality    = 0;
+    adaGps.fixquality_3d = 1;  // 1 = no fix
+    adaGps.satellites    = 0;
+    adaGps.HDOP          = 0.0f;
+  }
   enabled = enable;
   digitalWrite(GPS_ENABLE_PIN, enable ? HIGH : LOW);
   Serial.print("[GPS] "); Serial.println(enabled ? "Enabled" : "Disabled");
@@ -111,7 +133,18 @@ bool update() {
           gsvLineCount++;
         }
       }
-      if (adaGps.parse(sentence)) parsed = true;
+      // Only RMC/GGA carry a position. GSA/GSV parse fine but leave adaGps.fix
+      // untouched, so counting them would let the reacquire guard be satisfied
+      // without a single new position actually having arrived.
+      const bool posSentence = (strstr(sentence, "RMC") != nullptr) ||
+                               (strstr(sentence, "GGA") != nullptr);
+      if (adaGps.parse(sentence)) {
+        parsed = true;
+        if (posSentence && adaGps.fix) {
+          lastFixMs = millis();
+          if (newFixCount < GPS_REACQUIRE_MIN_FIXES) newFixCount++;
+        }
+      }
     }
   }
   return parsed;
@@ -122,12 +155,17 @@ GpsFix getFix() {
 
   if (!initialized || !enabled) return fix;
 
-  fix.has_fix = adaGps.fix;
+  // Position is withheld until the module has produced enough genuinely new
+  // position sentences since the last enable (see setEnabled). Satellite count
+  // and fix quality are passed through unguarded -- they were cleared on enable,
+  // so they already reflect only post-power-up data and are useful for showing
+  // reacquisition progress on the display.
+  fix.has_fix = adaGps.fix && (newFixCount >= GPS_REACQUIRE_MIN_FIXES);
   fix.fix_quality  = adaGps.fixquality;
   fix.fix_type_3d  = adaGps.fixquality_3d;  // 1=no fix, 2=2D, 3=3D (from GSA)
   fix.satellites   = adaGps.satellites;
 
-  if (adaGps.fix) {
+  if (fix.has_fix) {
     // Adafruit_GPS stores latitude/longitude in degrees + minutes format
     // latitudeDegrees/longitudeDegrees are already converted to decimal degrees
     fix.lat = adaGps.latitudeDegrees;
@@ -136,7 +174,7 @@ GpsFix getFix() {
     fix.speed_knots = adaGps.speed;
     fix.course_deg = adaGps.angle;
     fix.hdop = adaGps.HDOP;
-    fix.fix_age_ms = millis();
+    fix.fix_age_ms = lastFixMs;  // when it was parsed, not when it was read
   }
 
   // UTC time is parsed from RMC sentences regardless of position fix status.
@@ -155,7 +193,8 @@ GpsFix getFix() {
 }
 
 bool hasFix() {
-  return initialized && enabled && adaGps.fix;
+  return initialized && enabled && adaGps.fix &&
+         (newFixCount >= GPS_REACQUIRE_MIN_FIXES);
 }
 
 uint8_t computeSignalBars(const GpsFix& fix) {

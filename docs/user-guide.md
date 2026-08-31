@@ -50,12 +50,11 @@ Press **BTN1** to open the on-screen menu. The menu appears in the lower half of
 | BTN1 short press | Open menu / cycle to next item |
 | BTN2 short press | Select item (enter submenu, execute action, or go back) |
 | BTN1 + BTN2 held 2s | Reset display device |
-| No button for 15s | Menu auto-closes |
+| No button for 45s | Menu auto-closes (reopening within 2 min resumes where you were) |
 
 ### Menu Structure
 ```
 MENU
-├── OFF            — enter deep sleep (wake: hold both buttons ~1s)
 ├── NAV
 │   ├── Select WP  — open waypoint selector: navigate TO a named waypoint
 │   ├── Arrive WP  — open waypoint selector: snap current position to a known waypoint
@@ -67,20 +66,24 @@ MENU
 │   ├── Mounted    — bin-aware magnetometer calibration, device on DPV (corrects DPV mag signature), cloud-fit on completion
 │   ├── Hdg cal    — Fourier heading calibration: guided 12-point collection, then cloud-fit on completion
 │   └── Speed cal  — interactive flow-meter k-factor calibration (swim a known distance)
-├── CONFIG (aka INPUT)
+├── CONFIG
 │   ├── GPS        — toggle GPS position + speed on/off (shows current state)
 │   ├── WiFi       — toggle WiFi on/off
 │   ├── Log        — cycle log level: off / low / high
 │   ├── Water      — toggle salt/fresh water density for depth calc (see Depth Sensor below)
 │   └── Link acct  — begin device-auth cloud account link
-└── DISPLAY
-    ├── Mode       — toggle debug vs navigate display
-    ├── Spd/ETA    — toggle speed vs ETA readout
-    ├── Units      — toggle meters vs feet (applies to distance, speed, and depth)
-    └── Heading    — toggle magnetic vs true heading
+├── DISPLAY
+│   ├── Mode       — toggle debug vs navigate display
+│   ├── Spd/ETA    — toggle speed vs ETA readout
+│   ├── Units      — toggle meters vs feet (applies to distance, speed, and depth)
+│   └── Heading    — toggle magnetic vs true heading
+├── OFF            — enter deep sleep (two presses to confirm; wake: hold both buttons ~1s)
+└── Close          — leave the menu, change nothing
 ```
 
 Toggle items show their current state (e.g., "Units: m", "Op Mode: SURF") and stay open after toggling. Non-toggle items (Baseline, Fill gaps, Mounted, Hdg cal, Mark) execute and close the menu. Select WP and Arrive WP open the waypoint selector UI.
+
+**OFF needs two presses.** The first BTN2 on OFF arms it and the item repaints as `OFF:SURE?`; a second BTN2 shuts the unit down. Pressing BTN1 (or letting the menu time out) disarms it. OFF sits second-to-last on purpose, with the harmless **Close** after it, so overshooting the end of the list lands on a no-op rather than on the one action you cannot undo underwater.
 
 ### Waypoint Selector UI (NAV > Select WP and Arrive WP)
 
@@ -361,7 +364,7 @@ Gyro and accel calibrate automatically on first boot if their files are absent.
 | BTN1 short press | Open / cycle menu | Opens menu (if closed) or moves to next item (if open) |
 | BTN2 short press | Select menu item | Enters submenu, executes action, or goes back |
 | BTN1 + BTN2 held 2s | Reset | Resets the display device |
-| No button for 15s | Auto-close | Menu closes, returns to full nav display |
+| No button for 45s | Auto-close | Menu closes, returns to full nav display. Reopening within 2 minutes puts you back on the item you were on. |
 
 ## Configuration
 

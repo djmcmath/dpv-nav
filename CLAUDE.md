@@ -34,9 +34,27 @@ pio device monitor
 ```
 
 ### Upload LittleFS Filesystem
+
+**Know which board you are flashing.** Both environments share the one `data/`
+directory, but only one of them is safe to overwrite:
+
 ```bash
-pio run -e nav -t uploadfs
+pio run -e display -t uploadfs   # SAFE. The display board's FS holds only
+                                 # /menu.json, and nothing on that board ever
+                                 # writes to LittleFS. Nothing is lost.
+
+pio run -e nav -t uploadfs       # DESTRUCTIVE. Erases dive logs, mag_base.json,
+                                 # mag_mount.json, hdg_fourier.json, motor_cal.json,
+                                 # speed_cal.json, cal_targets.json and the cal
+                                 # archives. Pull anything you want off
+                                 # tern.local first.
 ```
+
+`data/menu.json` is read by the **display** board (`loadFromJSON()` in
+[menu.cpp](src/menu/menu.cpp)). The web UI's file upload lives on the **nav**
+board — `net/` is in `[env:nav]` only and the display env has no network stack
+at all — so there is no way to push menu.json over WiFi. It needs
+`-e display -t uploadfs` with that board on USB.
 
 ### Clean Build
 ```bash
@@ -349,7 +367,7 @@ load-bearing, not cosmetic.
 - **y=120–239**: Menu area (separator line, title, up to visible items with scroll)
 
 ### Menu Definition
-Menu structure is loaded from `/menu.json` on LittleFS at boot. If the file is missing, a hardcoded default is used. The JSON maps action IDs to `menu::Action` enum values. To customize the menu, edit [data/menu.json](data/menu.json) and upload with `pio run -e display -t uploadfs`.
+Menu structure is loaded from `/menu.json` on the **display** board's LittleFS at boot. If the file is missing, `loadDefaults()` is used — keep the two in sync, or the menu a given unit shows depends on whether its filesystem was ever flashed. The JSON maps action IDs to `menu::Action` enum values. To customize the menu, edit [data/menu.json](data/menu.json) and upload with `pio run -e display -t uploadfs`.
 
 ### Adding New Menu Actions
 1. Add a new `menu::Action` enum value in [src/menu/menu.h](src/menu/menu.h)

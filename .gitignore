@@ -7,8 +7,8 @@ nul
 *.zip
 *.log
 *.tar.gz
+tools/*.ods
 tools/old csv/*
-*.ods
 .~lock.*#
 *.lock__pycache__/
 

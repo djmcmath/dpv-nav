@@ -5,8 +5,6 @@
 //Compile-time and runtime config defaults
 
 // WiFi configuration
-constexpr const char* WIFI_STA_SSID       = "DansMain";
-constexpr const char* WIFI_STA_PASS       = "Password@99";
 constexpr const char* WIFI_AP_SSID        = "Tern";
 constexpr const char* WIFI_AP_PASS        = "password";
 constexpr uint32_t    WIFI_STA_TIMEOUT_MS = 10000;

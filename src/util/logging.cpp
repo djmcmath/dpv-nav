@@ -1,8 +1,10 @@
 #include "logging.h"
+#include "log_names.h"
 #include "../config.h"
 #include <Arduino.h>
 #include <LittleFS.h>
 #include <cstdio>
+#include <cstring>
 #include <time.h>
 
 namespace logging {
@@ -13,63 +15,87 @@ namespace logging {
 static bool     gReady    = false;   // init() succeeded
 static LogLevel gLevel    = LogLevel::LEVEL_OFF;
 static File     gLogFile;
-static char     gLogPath[32] = "";
-static uint16_t gNextNum  = 1;       // next sequential file number
+static char     gLogPath[LOG_PATH_MAX] = "";
 
 static constexpr size_t FREE_SPACE_THRESHOLD = 32768;  // 32 KB minimum free
 static constexpr const char* LOG_DIR = "/logs";
+
+// An unsynced ESP32 sits near epoch 0; any time >= Nov 2023 came from a real
+// source (GPS or NTP). Used both for the date prefix below and for the
+// local_time column.
+static constexpr time_t CLOCK_VALID_EPOCH = 1700000000L;
+
+// Log files are named /logs/YYYYMMDD-NNN.csv -- see util/log_names.h for the
+// grammar and why it is dated. Sequence numbers are resolved per file at open
+// time from what is on disk (openNextFile), not from a counter, so deleting a
+// log can never hand its name to a later one.
+static constexpr uint16_t LOG_SEQ_MAX = 999;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-// Build path for a given sequence number: /logs/001.csv
-static void buildPath(char* buf, size_t bufLen, uint16_t num) {
-    snprintf(buf, bufLen, "%s/%03u.csv", LOG_DIR, num);
+// Today's date as YYYYMMDD, or "" when no clock has been set yet.
+static void todayPrefix(char* out, size_t len) {
+    time_t now_t = time(nullptr);
+    if (now_t < CLOCK_VALID_EPOCH) {
+        out[0] = '\0';
+        return;
+    }
+    struct tm tm_info{};
+    localtime_r(&now_t, &tm_info);
+    strftime(out, len, "%Y%m%d", &tm_info);
 }
 
-// Scan /logs/ for the highest existing sequence number and set gNextNum.
-// Also returns the lowest number found (for cleanup). Returns 0 if no files.
-static uint16_t scanLogDir(uint16_t& lowestOut) {
-    uint16_t highest = 0;
-    uint16_t lowest  = 0xFFFF;
+// One pass over /logs.
+struct LogScan {
+    char     oldest[LOG_NAME_MAX] = "";  // oldest name by log_names::olderThan ("" = empty dir)
+    char     newestPrefix[log_names::PREFIX_LEN + 1] = "";  // highest date prefix present ("" = no dated logs)
+    uint16_t highestSeq           = 0;   // highest NNN under `seqPrefix` (0 = none)
+};
+
+// `seqPrefix` may be nullptr when the caller only wants oldest/newestPrefix.
+static void scanLogDir(LogScan& out, const char* seqPrefix) {
     File dir = LittleFS.open(LOG_DIR);
-    if (!dir || !dir.isDirectory()) {
-        lowestOut = 0;
-        return 0;
-    }
+    if (!dir || !dir.isDirectory()) return;
+
     File f = dir.openNextFile();
     while (f) {
-        const char* name = f.name();  // e.g. "001.csv"
-        // Parse leading digits
-        uint16_t num = 0;
-        const char* p = name;
-        while (*p >= '0' && *p <= '9') {
-            num = num * 10 + (*p - '0');
-            p++;
+        const char* name = f.name();  // e.g. "20260908-001.csv"
+        if (out.oldest[0] == '\0' || log_names::olderThan(name, out.oldest)) {
+            snprintf(out.oldest, sizeof(out.oldest), "%s", name);
         }
-        if (num > 0) {
-            if (num > highest) highest = num;
-            if (num < lowest)  lowest  = num;
+        char     prefix[log_names::PREFIX_LEN + 1];
+        uint16_t seq;
+        if (log_names::parse(name, prefix, seq)) {
+            if (strcmp(prefix, out.newestPrefix) > 0) strcpy(out.newestPrefix, prefix);
+            if (seqPrefix && strcmp(prefix, seqPrefix) == 0 && seq > out.highestSeq) {
+                out.highestSeq = seq;
+            }
         }
         f.close();
         f = dir.openNextFile();
     }
     dir.close();
-    lowestOut = (lowest == 0xFFFF) ? 0 : lowest;
-    return highest;
 }
 
-// Delete lowest-numbered log files until free space >= threshold.
+// Delete oldest log files until free space >= threshold. "Oldest" is decided
+// by name alone (log_names::olderThan) -- LittleFS timestamps are only as good
+// as the clock was when the file was written, and on this unit that clock is
+// often unset. See util/log_names.h.
 static void cleanupOldLogs() {
     size_t freeBytes = LittleFS.totalBytes() - LittleFS.usedBytes();
     while (freeBytes < FREE_SPACE_THRESHOLD) {
-        uint16_t lowest;
-        uint16_t highest = scanLogDir(lowest);
-        if (lowest == 0 || highest == 0) break;  // no log files left
+        LogScan scan;
+        scanLogDir(scan, nullptr);
+        if (scan.oldest[0] == '\0') break;  // no log files left
 
-        char path[32];
-        buildPath(path, sizeof(path), lowest);
+        char path[LOG_PATH_MAX];
+        snprintf(path, sizeof(path), "%s/%s", LOG_DIR, scan.oldest);
+        // Never prune the file we are actively writing -- it is the one log
+        // that cannot be re-collected, and on a nearly full unit it can be the
+        // only file left to consider.
+        if (strcmp(path, gLogPath) == 0) break;
         if (LittleFS.remove(path)) {
             Serial.printf("[LOG] Deleted old log %s (free space: %u)\n", path,
                           (unsigned)(LittleFS.totalBytes() - LittleFS.usedBytes()));
@@ -101,17 +127,38 @@ static void writeHeader() {
     }
 }
 
-// Open a new log file with the next sequential number.
+// Open a new log file, named for today's date plus the next free sequence
+// number under it (see the naming note at the top of this file).
 static bool openNextFile() {
-    buildPath(gLogPath, sizeof(gLogPath), gNextNum);
+    char prefix[log_names::PREFIX_LEN + 1];
+    todayPrefix(prefix, sizeof(prefix));
+    if (prefix[0] == '\0') {
+        // No clock yet -- GPS hasn't fixed and WiFi hasn't NTP'd. Continue
+        // under the newest date already on disk rather than inventing one, so
+        // this file still sorts after every earlier log; fall back to all
+        // zeros only on a unit that has never had a clock at all.
+        LogScan scan;
+        scanLogDir(scan, nullptr);
+        strcpy(prefix, scan.newestPrefix[0] ? scan.newestPrefix : "00000000");
+    }
+
+    LogScan scan;
+    scanLogDir(scan, prefix);
+    if (scan.highestSeq >= LOG_SEQ_MAX) {
+        Serial.printf("[LOG] Error: %s is full (%u logs today)\n", prefix, LOG_SEQ_MAX);
+        return false;
+    }
+    snprintf(gLogPath, sizeof(gLogPath), "%s/%s-%03u.csv", LOG_DIR, prefix,
+             (unsigned)(scan.highestSeq + 1));
+
     gLogFile = LittleFS.open(gLogPath, FILE_WRITE);
     if (!gLogFile) {
         Serial.printf("[LOG] Error: could not open %s\n", gLogPath);
+        gLogPath[0] = '\0';
         return false;
     }
     Serial.printf("[LOG] Opened %s (level %s)\n", gLogPath,
                   gLevel == LogLevel::LEVEL_LOW ? "LOW" : "HIGH");
-    gNextNum++;
     writeHeader();
     return true;
 }
@@ -137,20 +184,15 @@ bool init() {
     // Ensure /logs directory exists.
     LittleFS.mkdir(LOG_DIR);
 
-    // Determine next file number from existing files.
-    uint16_t lowest;
-    uint16_t highest = scanLogDir(lowest);
-    gNextNum = highest + 1;
-
-    // Clean up old logs if space is low.
+    // Clean up old logs if space is low. Names are resolved per file at
+    // open time now (openNextFile), so there is no counter to seed here.
     cleanupOldLogs();
 
     gLevel = LogLevel::LEVEL_OFF;
     gReady = true;
 
     size_t freeBytes = LittleFS.totalBytes() - LittleFS.usedBytes();
-    Serial.printf("[LOG] Init OK, next file: %s/%03u.csv, free: %u bytes\n",
-                  LOG_DIR, gNextNum, (unsigned)freeBytes);
+    Serial.printf("[LOG] Init OK, free: %u bytes\n", (unsigned)freeBytes);
     return true;
 }
 
@@ -199,6 +241,10 @@ void setLevel(LogLevel level) {
     }
 }
 
+const char* currentPath() {
+    return gLogPath;
+}
+
 bool isLogging() {
     return gReady && gLevel != LogLevel::LEVEL_OFF;
 }
@@ -221,10 +267,9 @@ void log(const LogData& d) {
     }
 
     // Format local time if the system clock has been set (GPS or NTP).
-    // An unsynced ESP32 sits near epoch 0; any time >= Nov 2023 is real.
     char localTimeBuf[24] = "";  // empty = no valid time source
     time_t now_t = time(nullptr);
-    if (now_t >= 1700000000L) {
+    if (now_t >= CLOCK_VALID_EPOCH) {
         struct tm tm_info{};
         localtime_r(&now_t, &tm_info);
         strftime(localTimeBuf, sizeof(localTimeBuf), "%Y-%m-%dT%H:%M:%S", &tm_info);
@@ -284,7 +329,7 @@ void logImmediate(const LogData& d) {
 
     char localTimeBuf[24] = "";
     time_t now_t = time(nullptr);
-    if (now_t >= 1700000000L) {
+    if (now_t >= CLOCK_VALID_EPOCH) {
         struct tm tm_info{};
         localtime_r(&now_t, &tm_info);
         strftime(localTimeBuf, sizeof(localTimeBuf), "%Y-%m-%dT%H:%M:%S", &tm_info);

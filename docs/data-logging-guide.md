@@ -46,13 +46,61 @@ timestamp_ms,mag_x_raw,mag_y_raw,mag_z_raw,accel_x_raw,...,heading_deg,roll_deg,
 
 ## File Storage
 
-Log files are stored on LittleFS at paths like:
+Log files are stored on LittleFS at `/logs/YYYYMMDD-NNN.csv`, where `NNN` is
+sequential within that date:
+
 ```
-/logs/log_0_5.csv       (created at ~5 seconds uptime)
-/logs/log_1_10.csv      (created at ~70 seconds uptime)
+/logs/20260908-001.csv    first log started on 8 Sep 2026
+/logs/20260908-002.csv    second log that day
+/logs/20260909-001.csv    next day, back to 001
 ```
 
-Filenames: `log_<minutes>_<seconds>.csv` based on uptime.
+The date comes from the system clock (GPS or NTP). When neither has set it yet,
+the newest date prefix already on the unit is reused rather than inventing one,
+so filenames stay in order; on a unit that has never had a clock at all, the
+prefix is `00000000`. The sequence number is worked out from the directory each
+time a file is opened, not from a counter, so deleting logs can never hand a
+name to a later file.
+
+Both properties matter beyond tidiness:
+
+- **Name order is age order**, which is how `cleanupOldLogs()` picks what to
+  prune when space runs low (see `log_names::olderThan` for the one case where
+  a plain string compare gets this wrong).
+- **Names are not reused**, which is what lets `net/log_sync.cpp` remember an
+  upload by name. Logs written before this scheme are named `NNN.csv`; they are
+  left alone and always rank as the oldest files present.
+
+## Uploading
+
+Closed logs upload themselves. Once the unit associates with a known network
+and has been linked to a Dive Map account, `net/log_sync.cpp` sends every log
+it has not already sent, one per main-loop tick. The normal post-dive flow is
+just: stop logging, enable WiFi, walk away.
+
+Two things it will not do:
+
+- It never uploads the log currently being written. Half a file would upload
+  now and the finished file again later as different bytes, which the server's
+  content-hash dedupe cannot collapse — so **stop logging before connecting**,
+  or the dive waits for the next pass.
+- It never runs during a calibration, whose own cloud upload is blocking.
+
+Uploads are blocking, so the display shows an "uploading" screen and the unit
+is unresponsive until the pass finishes. A failed upload backs off for five
+minutes; reconnecting retries immediately.
+
+The record of what has been uploaded lives in `/log_uploads.json`, keyed by
+filename *and* size. An entry whose file no longer exists is dropped whenever
+that record is rewritten, so deleting a log clears its uploaded flag — by the
+file manager, by `Delete Selected`, by the low-space prune, or by a
+`-t uploadfs` wipe, without any of those knowing log_sync exists.
+
+`tern.local`'s file manager still has a per-file **Upload to cloud** button as
+the force/retry path, and marks anything it sends so the automatic pass does
+not send it twice. Uploading the same bytes twice is harmless either way — the
+server returns 409 and the device treats that as success — so a lost record
+costs bandwidth, never a duplicate dive.
 
 ### Capacity
 

@@ -47,7 +47,11 @@ pio run -e nav -t uploadfs       # DESTRUCTIVE. Erases dive logs, mag_base.json,
                                  # mag_mount.json, hdg_fourier.json, motor_cal.json,
                                  # speed_cal.json, cal_targets.json and the cal
                                  # archives. Pull anything you want off
-                                 # tern.local first.
+                                 # tern.local first. It also erases
+                                 # /log_uploads.json, so any dive log still on
+                                 # the unit is re-uploaded on the next connect
+                                 # (harmless -- the server dedupes by content
+                                 # hash -- but it costs a stall per file).
 ```
 
 `data/menu.json` is read by the **display** board (`loadFromJSON()` in
@@ -60,6 +64,20 @@ at all — so there is no way to push menu.json over WiFi. It needs
 ```bash
 pio run -t clean
 ```
+
+### Host-Side Tests
+
+Logic that is pure C++ is factored so it can be compiled and run on the host,
+without hardware:
+
+```bash
+tools/dpvlink_test/run.sh    # NavPacket / CalProgressPacket wire round-trips
+tools/lognames_test/run.sh   # dive-log filename grammar and age ordering
+tools/orient_equiv/          # per-sample orientation vs. the server's port
+```
+
+Each compiles the real source rather than a copy — keep it that way when
+adding more.
 
 ## Code Architecture
 
@@ -74,7 +92,8 @@ Code is organized into namespaces by subsystem:
 - `flow::` - Flow sensor driver (hall-effect pulse, speed calculation)
 - `display::` - TFT display driver (ST7789 320×240, direct hardware writes, nav + debug screen rendering)
 - `menu::` - Hierarchical menu system (JSON-configurable, button-driven, on display device)
-- `logging::` - Data logging system (LittleFS-based)
+- `logging::` - Data logging system (LittleFS-based; `/logs/YYYYMMDD-NNN.csv`)
+- `log_sync::` - Automatic dive-log upload once the unit joins a known network
 - `storage::` - Calibration persistence (JSON files in LittleFS)
 - `hdg_cal::` - Fourier heading calibration (load hdg_fourier.json, apply Fourier-series correction)
 - `nvs_nav::` - Nav device runtime state persistence (ESP32 NVS via Preferences)
@@ -106,7 +125,8 @@ src/
 ├── menu/                      # Menu system (display device only)
 │   ├── menu.cpp/h             # Hierarchical menu: state machine, rendering, JSON load, actions
 ├── util/                      # Utilities
-│   ├── logging.cpp/h          # Data logging to LittleFS
+│   ├── logging.cpp/h          # Data logging to LittleFS (see log_names.h for the filename grammar)
+│   ├── log_names.h            # Dive-log filename grammar; pure C++ so tools/lognames_test/ can exercise it
 │   ├── storage.cpp/h          # Calibration save/load (JSON)
 │   ├── nvs_state.cpp/h        # Runtime state persistence (ESP32 NVS: toggles, position)
 │   ├── hdg_cal.cpp/h          # Fourier heading calibration (load /hdg_fourier.json, apply Fourier-series correction)

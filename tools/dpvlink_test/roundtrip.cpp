@@ -190,6 +190,44 @@ int main() {
         check(rx.current_roll_sector == -1, "roll sector defaults to -1 when absent");
     }
 
-    if (failures == 0) printf("  all dpvlink GAP_FILL target round-trip checks passed\n");
+    // 5. NavPacket's log-sync progress fields ride the same conditional-field
+    //    convention as the cal fields: on the wire only while FLAG2_UPLOADING
+    //    is set, and absent means zero rather than stale.
+    {
+        NavPacket tx{};
+        tx.heading_deg = 191.5f;
+        tx.flags2 = FLAG2_UPLOADING | FLAG2_WIFI_CLIENT;
+        tx.log_sync_done  = 3;
+        tx.log_sync_total = 7;
+        size_t n = navPacketToBytes(tx, buf, sizeof(buf));
+        check(n > 0, "nav encode produced bytes");
+
+        NavPacket rx{};
+        check(bytesToNavPacket(buf, n, rx), "nav decode succeeded");
+        check((rx.flags2 & FLAG2_UPLOADING) != 0, "FLAG2_UPLOADING survived");
+        check(rx.log_sync_done == 3, "log_sync_done survived");
+        check(rx.log_sync_total == 7, "log_sync_total survived");
+
+        // Not uploading: the fields stay off the wire, and a decoder holding a
+        // previous packet's values must be reset to zero, not left showing
+        // "3 of 7" after the pass ended.
+        NavPacket idle{};
+        idle.heading_deg = 191.5f;
+        idle.flags2 = FLAG2_WIFI_CLIENT;
+        idle.log_sync_done  = 3;
+        idle.log_sync_total = 7;
+        n = navPacketToBytes(idle, buf, sizeof(buf));
+        check(strstr(buf, "\"ls\"") == nullptr, "no ls field when not uploading");
+        check(strstr(buf, "\"lt\"") == nullptr, "no lt field when not uploading");
+
+        NavPacket stale{};
+        stale.log_sync_done  = 9;  // poison
+        stale.log_sync_total = 9;
+        bytesToNavPacket(buf, n, stale);
+        check(stale.log_sync_done == 0, "log_sync_done defaults to zero when absent");
+        check(stale.log_sync_total == 0, "log_sync_total defaults to zero when absent");
+    }
+
+    if (failures == 0) printf("  all dpvlink round-trip checks passed\n");
     return failures ? 1 : 0;
 }

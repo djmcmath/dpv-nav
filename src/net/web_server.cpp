@@ -80,6 +80,8 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
     padding: .3rem .7rem; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: .85rem; }
   .uploadbar button:hover, .btn-upload:hover { background: #72efdd; }
   .uploadbar button:disabled, .btn-upload:disabled { background: #333; color: #777; cursor: not-allowed; }
+  .uploadbar .btn-delsel { background: #e63946; color: #fff; }
+  .uploadbar .btn-delsel:hover { background: #ff4d5a; }
   .cloudresult { display: block; font-size: .8rem; color: #72efdd; margin-top: .25rem; }
   .wifisec { margin-top: 1.5rem; padding: 1rem; background: #16213e; border-radius: 8px; }
   .wifisec .row { margin: .4rem 0; }
@@ -107,6 +109,8 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
 </table>
 <div class="uploadbar">
   <button id="uploadselected" onclick="uploadSelected()">Upload Selected to Cloud</button>
+  <button id="deleteselected" class="btn-delsel" onclick="deleteSelected()">Delete Selected</button>
+  <span class="cloudresult" id="delselstatus"></span>
 </div>
 <div class="upload">
   <b>Upload File</b>
@@ -248,6 +252,41 @@ async function uploadSelected() {
     await uploadOne(cb.dataset.name, cb.dataset.kind);
   }
   btn.disabled = false;
+}
+async function deleteSelected() {
+  const boxes = Array.from(document.querySelectorAll('#files .upsel:checked'));
+  const status = document.getElementById('delselstatus');
+  status.textContent = '';
+  if (!boxes.length) { alert('Select at least one file to delete.'); return; }
+  const names = boxes.map(cb => cb.dataset.name);
+  const shown = names.slice(0, 25).map(n => '  ' + n).join('\n');
+  const more = names.length > 25 ? '\n  ... and ' + (names.length - 25) + ' more' : '';
+  const msg = 'Permanently delete ' + names.length +
+    (names.length === 1 ? ' file' : ' files') + ' from the unit?\n\n' + shown + more +
+    '\n\nThis cannot be undone.';
+  if (!confirm(msg)) return;
+  const upBtn = document.getElementById('uploadselected');
+  const delBtn = document.getElementById('deleteselected');
+  upBtn.disabled = true;
+  delBtn.disabled = true;
+  let ok = 0;
+  const failed = [];
+  for (const name of names) {
+    status.textContent = `Deleting ${ok + failed.length + 1} of ${names.length}...`;
+    try {
+      const r = await fetch('/api/delete?file=' + encodeURIComponent(name));
+      if (r.ok) ok++; else failed.push(name);
+    } catch (e) {
+      failed.push(name);
+    }
+  }
+  upBtn.disabled = false;
+  delBtn.disabled = false;
+  document.getElementById('selall').checked = false;
+  status.textContent = failed.length
+    ? `Deleted ${ok}, failed ${failed.length}: ${failed.join(', ')}`
+    : `Deleted ${ok} file${ok === 1 ? '' : 's'}.`;
+  load();
 }
 function fmt(b) {
   if (b < 1024) return b + ' B';

@@ -61,6 +61,8 @@ struct NavPacket {
     uint8_t gps_hdop_x10;  // HDOP × 10 (0=no fix/unknown; 12 = HDOP 1.2)
     uint8_t gps_antenna;   // 0=unknown, 1=error/shorted, 2=internal, 3=active external
     uint8_t flags2;        // see FLAG2_* constants below
+    uint8_t log_sync_done;  // dive logs uploaded so far this pass (valid only with FLAG2_UPLOADING)
+    uint8_t log_sync_total; // dive logs in this pass (valid only with FLAG2_UPLOADING)
 
     float   depth_m;       // depth below surface, meters (0 if sensor absent, see FLAG2_DEPTH_PRESENT)
     float   water_temp_c;  // water temperature, degrees C (0 if sensor absent)
@@ -93,6 +95,13 @@ constexpr uint8_t FLAG2_SALT_WATER    = 0x04;  // 1 = salt water density selecte
 constexpr uint8_t FLAG2_DIVE_MODE     = 0x08;  // 1 = dive mode active (GPS+WiFi off), 0 = surface mode.
                                                 // Authoritative source of truth — dive mode can now be
                                                 // triggered automatically by depth, not just the menu.
+constexpr uint8_t FLAG2_UPLOADING     = 0x10;  // 1 = nav is auto-uploading dive logs (net/log_sync.h) and
+                                                // is about to block on an HTTPS call for up to
+                                                // CLOUD_HTTP_TIMEOUT_MS. log_sync sets it one tick before
+                                                // the first byte moves, so the packet carrying it always
+                                                // arrives before the stall. The display shows its upload
+                                                // screen and suspends NAV_TIMEOUT_MS while it is set —
+                                                // otherwise every file would flash "NO LINK".
 
 // ---------------------------------------------------------------------------
 // Debug packet  (sent alongside NavPacket when debug mode enabled)

@@ -1,6 +1,7 @@
 #include "web_server.h"
 #include "wifi_manager.h"
 #include "cal_sync.h"
+#include "log_sync.h"
 #include "cloud_client.h"
 #include "../util/waypoints.h"
 #include "../nav_main.h"
@@ -202,9 +203,12 @@ async function load() {
     const kind = classifyUpload(f.name);
     const sel = kind
       ? `<input type="checkbox" class="upsel" data-name="${f.name}" data-kind="${kind}">` : '';
+    // Dive logs upload themselves once the unit joins a known network
+    // (net/log_sync.h). The button stays as the force/retry path.
+    const done = f.uploaded === true;
     const cloud = kind
-      ? `<button class="btn-upload" onclick="uploadOne('${f.name}','${kind}')" ${cloudLinked ? '' : 'disabled'}>Upload to cloud</button>` +
-        `<span class="cloudresult" data-name="${f.name}"></span>`
+      ? `<button class="btn-upload" onclick="uploadOne('${f.name}','${kind}')" ${cloudLinked ? '' : 'disabled'}>${done ? 'Upload again' : 'Upload to cloud'}</button>` +
+        `<span class="cloudresult" data-name="${f.name}">${done ? 'Uploaded' : ''}</span>`
       : '';
     return `<tr>
       <td class="sel">${sel}</td>
@@ -505,10 +509,18 @@ static void listDir(File dir, String& json, bool& first) {
             listDir(f, json, first);
         } else {
             if (!first) json += ",";
+            String path = f.path();
+            uint32_t size = f.size();
             json += "{\"name\":\"";
-            json += f.path();
+            json += path;
             json += "\",\"size\":";
-            json += String(f.size());
+            json += String(size);
+            // Dive logs carry whether log_sync has already sent them, so the
+            // page can say "Uploaded" instead of tempting a redundant click.
+            if (path.startsWith("/logs/") && path.endsWith(".csv")) {
+                json += ",\"uploaded\":";
+                json += log_sync::isUploaded(path.c_str(), size) ? "true" : "false";
+            }
             json += "}";
             first = false;
         }
@@ -771,6 +783,10 @@ static void handleCloudStatus() {
     server.send(200, "application/json", json);
 }
 
+static void handleLogSyncStatus() {
+    server.send(200, "application/json", log_sync::statusJson());
+}
+
 static void handleDiveLogUpload() {
     if (!server.hasArg("file")) {
         server.send(400, "text/plain", "Missing 'file' parameter");
@@ -790,6 +806,10 @@ static void handleDiveLogUpload() {
         server.send(502, "text/plain", err);
         return;
     }
+    // Record it, so the automatic pass doesn't re-send what was just pushed
+    // by hand (harmless -- the server dedupes by content hash -- but it would
+    // stall the nav loop again for nothing).
+    log_sync::markUploaded(path.c_str());
     server.send(200, "text/plain", "Uploaded");
 }
 
@@ -873,6 +893,7 @@ void init() {
     server.on("/api/wifi-status",   HTTP_GET,    handleWifiStatus);
     server.on("/api/cloud-status",     HTTP_GET,  handleCloudStatus);
     server.on("/api/dive-logs/upload", HTTP_POST, handleDiveLogUpload);
+    server.on("/api/dive-logs/sync-status", HTTP_GET, handleLogSyncStatus);
     server.on("/api/cal/retry-upload", HTTP_POST, handleCalRetryUpload);
     server.onNotFound([]() {
         Serial.printf("[Web] 404: %s %s\n", server.method() == HTTP_GET ? "GET" : "POST",

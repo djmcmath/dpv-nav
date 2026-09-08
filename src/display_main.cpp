@@ -50,6 +50,12 @@ static char txBuf[96];
 // ---- Timing ----------------------------------------------------------------
 static constexpr uint32_t DISPLAY_INTERVAL_MS = 250;  // 4 Hz refresh
 static constexpr uint32_t NAV_TIMEOUT_MS      = 5000; // show "NO LINK" after 5 s
+// While a dive-log upload pass is running (FLAG2_UPLOADING), nav is blocked
+// inside HTTPS calls and sends nothing. > one CLOUD_HTTP_TIMEOUT_MS (config.h)
+// with margin, so a single slow file never trips the link check, but a nav
+// device that dies mid-pass still surfaces as NO LINK rather than a stuck
+// "Uploading..." screen.
+static constexpr uint32_t LOG_UPLOAD_TIMEOUT_MS = 45000;
 static constexpr uint32_t COUNTER_INTERVAL_MS = 1000; // 1 Hz idle counter
 static constexpr uint32_t REINIT_INTERVAL_MS  = 30000000; // periodic display reinit
 static uint32_t lastDisplayMs  = 0;
@@ -536,8 +542,17 @@ void loop() {
     // FINISH_BASELINE_COLLECTION and nav's completion packet actually
     // arriving -- nav may already be mid CSV-dump by the time it gets to
     // sending that packet. Same reasoning as calCompleteHolding below.
+    // Automatic dive-log upload needs the same override for the same reason,
+    // driven off the last packet's flag rather than a UI phase: nav sets
+    // FLAG2_UPLOADING one tick *before* it starts blocking, so the packet
+    // carrying it is guaranteed to arrive first. Each file can hold the loop
+    // for CLOUD_HTTP_TIMEOUT_MS, well past NAV_TIMEOUT_MS, and a pass can run
+    // several files back to back -- hence a window sized for the whole pass,
+    // after which a genuinely wedged nav device still reports NO LINK.
+    bool uploadingLogs = navValid && (lastNav.flags2 & FLAG2_UPLOADING) &&
+                         (now - lastNavMs < LOG_UPLOAD_TIMEOUT_MS);
     bool linkAlive = calCompleteHolding || gBaselineFinishPending ||
-                     awaitingCloudCal || awaitingCloudLink ||
+                     awaitingCloudCal || awaitingCloudLink || uploadingLogs ||
                      (navValid && (now - lastNavMs < NAV_TIMEOUT_MS));
 
     if (linkAlive) {
@@ -708,7 +723,13 @@ void loop() {
             display::setImperialUnits(menu::settings().imperial);
             display::setRawHeading(menu::settings().headingMode == nvs_disp::HEADING_RAW);
             SystemState navState = static_cast<SystemState>(lastNav.system_state);
-            if (navState == SystemState::CALIBRATION) {
+            if (lastNav.flags2 & FLAG2_UPLOADING) {
+                // Takes precedence over the nav/menu/debug screens: the unit
+                // is unresponsive to everything else while it runs, and the
+                // diver needs to be told that rather than left guessing.
+                display::showLogUpload(lastNav.log_sync_done, lastNav.log_sync_total,
+                                       (now - lastNavMs) / 1000);
+            } else if (navState == SystemState::CALIBRATION) {
                 // Dispatch by cal_mode: 0/1 = mag cal (legacy), 2/3/4 = speed cal
                 if (lastNav.cal_mode <= 1) {
                     display::showCal(lastNav.cal_remaining_s,

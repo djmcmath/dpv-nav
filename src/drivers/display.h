@@ -165,6 +165,14 @@ void showCloudLinkFailed(const char* message);
 // Approved — token saved on the nav device. BTN2 dismisses.
 void showCloudLinkDone();
 
+// --- Automatic dive-log upload ----------------------------------------------
+// Shown for as long as NavPacket carries FLAG2_UPLOADING. The nav device is
+// blocked inside an HTTPS call for most of that window and sends nothing, so
+// this screen is driven by the last packet received and the display's own
+// clock; display_main also suspends its link timeout while the flag is set.
+// `total` is 0 before the first file's result comes back.
+void showLogUpload(uint8_t done, uint8_t total, uint32_t secondsWaiting);
+
 // --- Random-rect self-test --------------------------------------------------
 // Draws a random-color rectangle at a random position once per second.
 // coveragePct (1–100) controls the fraction of screen area the rect fills.

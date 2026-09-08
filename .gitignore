@@ -17,6 +17,7 @@ tools/old csv/*
 tools/orient_equiv/harness
 tools/orient_equiv/chain
 tools/dpvlink_test/roundtrip
+tools/lognames_test/lognames
 
 # Device-auth bearer token written by the cloud-link tooling -- never commit.
 tools/device_token.json

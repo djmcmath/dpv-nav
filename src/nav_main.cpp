@@ -27,6 +27,7 @@
 #include "net/web_server.h"
 #include "net/cloud_client.h"
 #include "net/cal_sync.h"
+#include "net/log_sync.h"
 #include "nav_main.h"
 #include "util/serial_commands.h"
 #include "util/mag_cal_collect.h"
@@ -533,6 +534,7 @@ void setup() {
     wifi::init();
     web::init();
     cal_sync::init();
+    log_sync::init();
 
     // Restore state from NVS (previous session)
     {
@@ -1049,6 +1051,11 @@ void loop() {
     // does anything once every few minutes, see cal_sync.cpp) ---------------
     cal_sync::update();
 
+    // --- Automatic dive-log upload (net/log_sync.h) -------------------------
+    // Held off during calibration: a cal's own upload is blocking and owns the
+    // display, and log_sync's uploads block too, so the two must not interleave.
+    if (!gInCal && sysState != SystemState::CALIBRATION) log_sync::update();
+
     // --- Cloud account-link poll (non-blocking, see LINK_ACCOUNT above) ------
     cloud::updateAuthorizePoll();
     {
@@ -1491,6 +1498,11 @@ static void sendNavPacket(float heading, float headingRaw, float pitch, float ro
     }
     if (gSaltWater) flags2 |= FLAG2_SALT_WATER;
     if (gDiveMode)  flags2 |= FLAG2_DIVE_MODE;
+    if (log_sync::isUploading()) {
+        flags2 |= FLAG2_UPLOADING;
+        pkt.log_sync_done  = log_sync::doneCount();
+        pkt.log_sync_total = log_sync::totalCount();
+    }
     pkt.flags2 = flags2;
 
     updateBattMv();

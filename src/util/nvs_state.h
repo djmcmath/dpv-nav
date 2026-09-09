@@ -32,11 +32,22 @@ void savePosition(float x_m, float y_m);
 
 namespace nvs_disp {
 
+// Heading display mode. RAW shows heading_raw_deg straight off the NavPacket:
+// the pre-Fourier, pre-motor-offset *magnetic* heading, i.e. exactly the value
+// CAPTURE_HDG_POINT records as "indicated". It exists so the diver can read
+// indicated headings for the website's thin-sector gap-fill form without
+// deleting /hdg_fourier.json and /motor_cal.json first.
+enum HeadingMode : uint8_t {
+    HEADING_TRUE = 0,
+    HEADING_MAG  = 1,
+    HEADING_RAW  = 2,
+};
+
 struct State {
-    bool debug_mode;    // true=debug view, false=nav view
-    bool show_eta;      // true=show ETA, false=show speed
-    bool imperial;      // true=ft/mi, false=m/km
-    bool true_heading;  // true=true heading, false=magnetic
+    bool    debug_mode;    // true=debug view, false=nav view
+    bool    show_eta;      // true=show ETA, false=show speed
+    bool    imperial;      // true=ft/mi, false=m/km
+    uint8_t heading_mode;  // HeadingMode; never persists as HEADING_RAW (see load())
 };
 
 // Load from NVS. Returns factory defaults if namespace is uninitialized.

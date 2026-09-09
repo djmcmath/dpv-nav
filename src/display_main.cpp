@@ -131,6 +131,11 @@ static CloudCalUiPhase   gCloudCalPhase          = CloudCalUiPhase::NONE;
 static uint32_t          gCloudCalWaitStartMs    = 0;
 static constexpr uint32_t CLOUD_CAL_WAIT_TIMEOUT_MS = 40000;  // > nav's ~30s worst case
 static uint8_t           gCloudCalChoice         = 0;  // 0=ACCEPT, 1=REJECT
+// False for a gap-fill result: that fit covers only the cells just patched
+// and must never be offered as a standalone install (see nav_main.cpp's
+// ACCEPT_CLOUD_CAL comment). The RESULT screen shows no ACCEPT/REJECT toggle
+// when this is false -- just an acknowledgement.
+static bool              gCloudCalInstallable    = true;
 static uint8_t           gCloudCalQuality        = 0;
 static uint8_t           gCloudCalType           = 0;  // CalType enum -- selects % vs deg label
 static float             gCloudCalRmsPct         = 0.0f;
@@ -232,7 +237,24 @@ static void sendSpeedCalStart(uint16_t dist_ft);
 static void sendWaypointSelectCmd(uint8_t idx);
 static void sendWaypointArriveCmd(uint8_t idx);
 static void renderWaypointUi();
+
+// One place decides which cal screen a CalProgressPacket gets. There are two
+// call sites (live progress, and the post-completion DONE hold) and they must
+// agree -- a completion screen that switches renderers mid-session is how you
+// end up staring at a blank grid wondering whether the cal worked.
+static void renderCalProgress(const CalProgressPacket& pkt) {
+    if (pkt.phase == (uint8_t)CalPhase::ROUGH_SCAN) {
+        display::showBaselineRoughScan(pkt);   // baseline: no grid, honestly
+    } else if (pkt.phase == (uint8_t)CalPhase::GAP_FILL) {
+        display::showCalGrid(pkt, "FILL GAPS");
+    } else {
+        display::showCalGrid(pkt, pkt.cal_type == (uint8_t)CalType::MOUNTED
+                                      ? "MOUNTED CAL" : "BASELINE CAL");
+    }
+}
+
 static void updateButton(ButtonState& b);
+static bool handleModalButtons();
 static void handleButtons();
 
 // ===========================================================================
@@ -300,16 +322,29 @@ void setup() {
 }
 
 // Returns a copy of pkt with heading/bearing adjusted for the current heading
-// mode (true vs. magnetic). Nav device always sends true heading; when the user
+// mode. Nav device always sends true heading in heading_deg; when the user
 // selects magnetic, subtract declination here and clear FLAG_TRUE_HEADING.
+//
+// RAW additionally swaps in heading_raw_deg, which the nav device already
+// sends as the pre-Fourier, pre-motor-offset *magnetic* heading (nav_main.cpp
+// passes headingMagDeg) -- the same value CAPTURE_HDG_POINT records as
+// "indicated". That makes RAW the supported way to read indicated headings for
+// the website's thin-sector gap-fill form, replacing the old routine of
+// deleting /hdg_fourier.json and /motor_cal.json and reloading cal.
+// Bearing-to-home stays on the magnetic treatment in RAW: there is no "raw"
+// bearing, and leaving the rest of the nav screen coherent matters more than
+// consistency with a field that has no raw counterpart.
 static NavPacket applyHeadingMode(NavPacket pkt) {
-    if (!menu::settings().trueHeading) {
+    const uint8_t mode = menu::settings().headingMode;
+    if (mode != nvs_disp::HEADING_TRUE) {
         auto wrap360 = [](float d) {
             while (d < 0.0f)    d += 360.0f;
             while (d >= 360.0f) d -= 360.0f;
             return d;
         };
-        pkt.heading_deg      = wrap360(pkt.heading_deg      - DEFAULT_DECLINATION_DEG);
+        pkt.heading_deg      = (mode == nvs_disp::HEADING_RAW)
+                                   ? wrap360(pkt.heading_raw_deg)
+                                   : wrap360(pkt.heading_deg - DEFAULT_DECLINATION_DEG);
         pkt.bearing_home_deg = wrap360(pkt.bearing_home_deg - DEFAULT_DECLINATION_DEG);
         pkt.flags &= ~FLAG_TRUE_HEADING;
     }
@@ -530,13 +565,7 @@ void loop() {
             // Bin cal complete: hold DONE screen for CAL_COMPLETE_HOLD_MS then return.
             // Baseline never leaves ROUGH_SCAN (no grid to show); mounted uses the grid.
             if (calCompleteHolding) {
-                if (lastCalProgress.phase == (uint8_t)CalPhase::ROUGH_SCAN) {
-                    display::showBaselineRoughScan(lastCalProgress);
-                } else {
-                    display::showCalGrid(lastCalProgress,
-                                         lastCalProgress.cal_type == (uint8_t)CalType::MOUNTED
-                                             ? "MOUNTED CAL" : "BASELINE CAL");
-                }
+                renderCalProgress(lastCalProgress);
                 if (now - calCompleteShownMs >= CAL_COMPLETE_HOLD_MS) {
                     calCompleteHolding = false;
                     calProgressValid   = false;
@@ -571,9 +600,21 @@ void loop() {
                         display::showCloudCalFailed(gCloudCalError);
                         break;
                     case CloudCalUiPhase::RESULT:
-                        display::showCloudCalResult(gCloudCalQuality, gCloudCalRmsPct,
-                                                    gCloudCalRecommendation, gCloudCalCoverageGaps,
-                                                    gCloudCalChoice, gCloudCalType);
+                        if (gCloudCalInstallable) {
+                            display::showCloudCalResult(gCloudCalQuality, gCloudCalRmsPct,
+                                                        gCloudCalRecommendation, gCloudCalCoverageGaps,
+                                                        gCloudCalChoice, gCloudCalType);
+                        } else {
+                            // Gap-fill: informational only, no accept/reject
+                            // choice to make on-device -- this fit is a merge
+                            // candidate, not a thing to install. Reject/discard
+                            // isn't offered either: leaving the row at
+                            // accepted=null is exactly its correct resting
+                            // state until the diver resolves it on the website
+                            // (by merging it in, or ignoring it).
+                            display::showGapFillUploaded(gCloudCalRmsPct, gCloudCalRecommendation,
+                                                         gCloudCalCoverageGaps);
+                        }
                         break;
                     default:
                         break;
@@ -625,15 +666,9 @@ void loop() {
 
             // Active bin cal progress — takes priority over all other rendering.
             // Baseline (always ROUGH_SCAN) gets its own screen, no grid;
-            // mounted (always COLLECT) uses the familiar grid.
+            // mounted (COLLECT) and gap-fill (GAP_FILL) use the grid.
             if (calProgressValid) {
-                if (lastCalProgress.phase == (uint8_t)CalPhase::ROUGH_SCAN) {
-                    display::showBaselineRoughScan(lastCalProgress);
-                } else {
-                    display::showCalGrid(lastCalProgress,
-                                         lastCalProgress.cal_type == (uint8_t)CalType::MOUNTED
-                                             ? "MOUNTED CAL" : "BASELINE CAL");
-                }
+                renderCalProgress(lastCalProgress);
                 return;
             }
 
@@ -671,6 +706,7 @@ void loop() {
             } else {
 
             display::setImperialUnits(menu::settings().imperial);
+            display::setRawHeading(menu::settings().headingMode == nvs_disp::HEADING_RAW);
             SystemState navState = static_cast<SystemState>(lastNav.system_state);
             if (navState == SystemState::CALIBRATION) {
                 // Dispatch by cal_mode: 0/1 = mag cal (legacy), 2/3/4 = speed cal
@@ -808,6 +844,7 @@ static void processNavLine() {
                 gCloudCalType    = pkt.cal_type;
                 gCloudCalRmsPct  = pkt.rms_pct;
                 gCloudCalCoverageGaps = pkt.coverage_gaps;
+                gCloudCalInstallable  = pkt.installable;
                 gCloudCalChoice  = 0;
                 strncpy(gCloudCalRecommendation, pkt.recommendation, sizeof(gCloudCalRecommendation) - 1);
                 gCloudCalRecommendation[sizeof(gCloudCalRecommendation) - 1] = '\0';
@@ -979,7 +1016,20 @@ static void updateButton(ButtonState& b) {
 //   BTN1 short press      → open menu / cycle to next item
 //   BTN2 short press      → select menu item
 // ---------------------------------------------------------------------------
-static void handleButtons() {
+// Swallow any short-press release that is still pending. Every modal screen
+// below returns early, and most of them only ever consume the one button they
+// care about -- the other button's release then sits with fired == false and
+// fires into the menu the instant the modal exits, opening the menu or
+// advancing an item the diver never pressed for. Anything that claims a pass
+// must claim both buttons.
+static void consumePendingReleases() {
+    if (!btn1.pressed && btn1.pressStartMs > 0) btn1.fired = true;
+    if (!btn2.pressed && btn2.pressStartMs > 0) btn2.fired = true;
+}
+
+// Full-screen modes that own the buttons. Returns true if one of them handled
+// (or deliberately ignored) this pass, in which case the menu must not see it.
+static bool handleModalButtons() {
     uint32_t now = millis();
 
     // --- Both buttons held 2s → reset display --------------------------------
@@ -992,16 +1042,23 @@ static void handleButtons() {
             display::reinit();
             btn1.fired = true;
             btn2.fired = true;
-            return;
+            return true;
         }
     }
 
-    // --- Baseline ROUGH_SCAN: BTN2 declares collection done, ends the session ---
-    if (calProgressValid && lastCalProgress.phase == (uint8_t)CalPhase::ROUGH_SCAN) {
+    // --- Baseline / gap-fill: BTN2 declares collection done, ends the session ---
+    // Gap-fill needs this as much as baseline does: a targeted cell can simply
+    // be unreachable in the water (a ceiling, a wall, a scooter you can't
+    // invert), and without a manual finish the session would never end. It also
+    // auto-completes when every target is satisfied -- this is the escape
+    // hatch, not the only exit.
+    if (calProgressValid &&
+        (lastCalProgress.phase == (uint8_t)CalPhase::ROUGH_SCAN ||
+         lastCalProgress.phase == (uint8_t)CalPhase::GAP_FILL)) {
         if (gBaselineFinishPending) {
             // Already requested -- ignore repeat presses until nav confirms
             // (complete=true) or the pending screen times out.
-            return;
+            return true;
         }
         if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
             btn2.fired = true;
@@ -1013,7 +1070,7 @@ static void handleButtons() {
             display::clear();
             Serial.println("[BIN_CAL] BTN2: requested finish baseline collection");
         }
-        return;
+        return true;
     }
 
     // --- Fourier heading calibration -----------------------------------------
@@ -1041,7 +1098,7 @@ static void handleButtons() {
                 display::clear();
             }
         }
-        return;
+        return true;
     }
 
     // --- Speed cal: distance selection mode ----------------------------------
@@ -1059,7 +1116,7 @@ static void handleButtons() {
             sendSpeedCalStart(gSpeedCalDist_ft);
             gSpeedCalPhase = SpeedCalPhase::WAITING;
         }
-        return;
+        return true;
     }
 
     // --- Speed cal: waiting for flow (or manual countdown) --------------------
@@ -1075,7 +1132,7 @@ static void handleButtons() {
                 Serial.println("[SPEED_CAL] Long-press BTN2: starting manual countdown");
             }
         }
-        return;
+        return true;
     }
 
     // --- Speed cal: accept/reject result mode --------------------------------
@@ -1101,7 +1158,7 @@ static void handleButtons() {
             gSpeedCalPhase = SpeedCalPhase::NONE;
             display::clear();
         }
-        return;
+        return true;
     }
 
     // --- Cloud calibration result UI -----------------------------------------
@@ -1112,9 +1169,20 @@ static void handleButtons() {
             gCloudCalPhase = CloudCalUiPhase::NONE;
             display::clear();
         }
-        return;
+        return true;
     }
     if (gCloudCalPhase == CloudCalUiPhase::RESULT) {
+        if (!gCloudCalInstallable) {
+            // Gap-fill: single dismiss, no ACCEPT/REJECT command ever sent.
+            // The uploaded fit stays parked at accepted=null on the server --
+            // its correct resting state until the website resolves it.
+            if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
+                btn2.fired = true;
+                gCloudCalPhase = CloudCalUiPhase::NONE;
+                display::clear();
+            }
+            return true;
+        }
         // BTN1: cycle ACCEPT/REJECT
         if (!btn1.pressed && !btn1.fired && btn1.pressStartMs > 0) {
             btn1.fired = true;
@@ -1130,12 +1198,12 @@ static void handleButtons() {
             gCloudCalPhase = CloudCalUiPhase::NONE;
             display::clear();
         }
-        return;
+        return true;
     }
     // WAITING: no button action -- the nav device is mid-upload and won't see
     // anything sent right now anyway (it's blocked on the network call).
     if (gCloudCalPhase == CloudCalUiPhase::WAITING) {
-        return;
+        return true;
     }
 
     // --- Cloud account-link UI ------------------------------------------------
@@ -1147,7 +1215,7 @@ static void handleButtons() {
             gCloudLinkPhase = CloudLinkUiPhase::NONE;
             display::clear();
         }
-        return;
+        return true;
     }
     // STARTING/WAITING: BTN2 cancels. The nav-side poll is a non-blocking
     // state machine (see cloud_client.h), so CANCEL_LINK reaches it and
@@ -1159,7 +1227,7 @@ static void handleButtons() {
             gCloudLinkPhase = CloudLinkUiPhase::NONE;
             display::clear();
         }
-        return;
+        return true;
     }
 
     // --- Waypoint UI ---------------------------------------------------------
@@ -1189,8 +1257,24 @@ static void handleButtons() {
             gWaypointUiPhase = WaypointUiPhase::NONE;
             display::clear();
         }
+        return true;
+    }
+
+    return false;  // no modal active — the menu gets this pass
+}
+
+static void handleButtons() {
+    if (handleModalButtons()) {
+        consumePendingReleases();
         return;
     }
+
+    // Snapshot before BTN1 runs: BTN1 may open the menu in this very pass, and
+    // BTN2 must not be allowed to select whatever item that lands on. A quick
+    // two-button tap (the same gesture that wakes the unit) released both
+    // buttons inside one debounce window, so BTN1's open and BTN2's select ran
+    // back to back and fired root item 0 sight-unseen.
+    const bool menuWasOpenOnEntry = menu::isOpen();
 
     // --- Normal menu handling ------------------------------------------------
     // BTN1: short press on release
@@ -1207,9 +1291,10 @@ static void handleButtons() {
     // BTN2: short press on release
     if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
         btn2.fired = true;
-        if (menu::isOpen()) {
+        if (menuWasOpenOnEntry && menu::isOpen()) {
             menu::select();
         }
-        // When menu is closed, BTN2 has no action
+        // When the menu is closed — or was only just opened by BTN1 above —
+        // BTN2 has no action.
     }
 }

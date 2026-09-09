@@ -46,6 +46,10 @@ void drawHLine(int x, int y, int w, uint16_t color);
 // DISPLAY_UNITS_IMPERIAL macro, which never actually reached these draws.
 void setImperialUnits(bool imperial);
 
+// Mark the nav screen's heading as RAW (uncorrected magnetic). Cosmetic only;
+// the value substitution happens in display_main.cpp's applyHeadingMode().
+void setRawHeading(bool raw);
+
 // Draw the full navigation screen to canvas and flush to display.
 // Status bar + 2x2 grid: bearing, range, heading, speed.
 void showNav(const NavPacket& pkt);
@@ -134,6 +138,13 @@ void showCloudCalFailed(const char* message);
 //   calType:      CalType enum (BASELINE/MOUNTED/HDG) -- selects the "%"/"deg" label.
 void showCloudCalResult(uint8_t quality, float rmsPct, const char* recommendation,
                          int16_t coverageGaps, uint8_t choice, uint8_t calType);
+
+// Gap-fill's upload result screen: no ACCEPT/REJECT, single BTN2 dismiss.
+// coverageGaps here counts remaining thin/empty cells in THIS PATCH's own
+// coverage (a handful out of 60 -- gap-fill only samples what it was sent to);
+// -1 = not applicable. See the definition for why this fit is never offered
+// as something to install.
+void showGapFillUploaded(float rmsPct, const char* recommendation, int16_t coverageGaps);
 
 // Cloud account-link screens (device-code account link). Shown after the
 // diver selects "Link acct" from the Config menu. No URL is ever shown --

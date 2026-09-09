@@ -4,6 +4,7 @@
 #include "../types/types.h"
 #include <Arduino.h>
 #include "imu.h"
+#include "../util/mag_cal_orient.h"
 #include <math.h>
 #include "../config.h"
 #include <LittleFS.h>
@@ -33,6 +34,18 @@ static AxisMap g_magMap{};        // Axis mapping for LIS3MDL (magnetometer)
 static float g_accel_lsb_per_g = 0.0f;     // counts per g
 static float g_gyro_lsb_per_dps = 0.0f;    // counts per deg/s
 static float g_mag_lsb_per_uT = 0.0f;      // counts per µT (if known)
+
+// The LSB-per-unit divisors below start at 0.0f and are only assigned at the
+// very end of initAccelGyro()/initMag(), after every register write succeeds.
+// A partial init therefore leaves a zero divisor, and dividing a raw count by
+// it yields inf (or NaN when the count is exactly 0) -- which Mahony turns
+// into a permanently NaN quaternion. Every reader that divides checks first
+// and reports NotInitialized instead, so the nav loop takes its sensor-error
+// path rather than silently feeding the filter garbage.
+static inline bool scaleReady(float lsbPerUnit) {
+  return isfinite(lsbPerUnit) && lsbPerUnit > 0.0f;
+}
+
 
 static TwoWire* gWire = nullptr;
 static uint8_t  gLsmAddr = LSM6DS3_ADDR_SA0_0;
@@ -582,14 +595,87 @@ struct BinCalSample {
 };
 
 static bool          g_binCalActive    = false;
-static bool          g_binCalMounted   = false;
+static BinCalMode    g_binCalMode      = BinCalMode::BASELINE;
 static int           g_binCalBinCount  = 0;         // 60 or 36
-static uint8_t       g_binCounts[60]   = {};         // samples per bin
+
+// Convenience: mounted is the only mode with a 36-bin grid and auto-green
+// completion. Baseline and gap-fill are both 60-bin baseline collections that
+// produce the same 9-axis CSV -- they differ in what feedback they can honestly
+// give while collecting, not in what they produce.
+static inline bool binCalIsMounted() { return g_binCalMode == BinCalMode::MOUNTED; }
+
+// GAP_FILL only: the server's per-cell status map (0=ok, 1=thin, 2=empty,
+// 3=over) and the derived "is this a cell the diver was sent to" test.
+// Deliberately not recomputed on-device -- see util/mag_cal_orient.h.
+static uint8_t       g_binTargets[60]  = {};
+static bool          g_binHasTargets   = false;
+
+static inline bool binIsTargeted(int bin) {
+    if (!g_binHasTargets || bin < 0 || bin >= 60) return false;
+    return g_binTargets[bin] == 1 || g_binTargets[bin] == 2;  // thin or empty
+}
+
+// GAP_FILL only: the server's per-(cell, roll-sector) status from a *prior*
+// accepted upload (cal_sync::loadRollTargets(), itself from
+// GET /calibrations/targets' roll_grid -- see config.h's "Roll coverage"
+// block). Same "server decides, device never recomputes" split as
+// g_binTargets, one axis finer. Optional: g_binHasRollTargets is false
+// whenever the server didn't send roll data (older build, or a calibration
+// predating roll coverage), in which case every sector starts this session
+// assuming zero prior coverage -- the same behaviour gap-fill had before this
+// existed.
+static uint8_t       g_binRollTargets[60][MAG_CAL_ROLL_SECTORS] = {};
+static bool          g_binHasRollTargets = false;
+
+static inline bool rollSectorServerSatisfied(int bin, int k) {
+    if (!g_binHasRollTargets || bin < 0 || bin >= 60) return false;
+    const uint8_t st = g_binRollTargets[bin][k];
+    return st == 0 || st == 3;  // ok or over -- not this session's job
+}
+static uint8_t       g_binCounts[60]   = {};         // samples per bin (all roll sectors summed)
 static BinCalSample* g_binSamples      = nullptr;   // heap-allocated
 static int           g_binSampleCount  = 0;
 static int           g_lastComputedBin = -1;         // current device orientation (bin index), updated every tick
 static float         g_lastPitchDeg    = 0.0f;       // actual pitch at last tick (for display readout)
 static float         g_lastHdgDeg      = 0.0f;       // actual heading at last tick (for display readout)
+
+// GAP_FILL only: per-(cell, roll-sector) sample counts for THIS session, the
+// local half of roll coverage (config.h's "Roll coverage" block). Not synced
+// anywhere -- the server's adequacy judgement for a *finished* upload still
+// comes from callib/coverage.py against the full merged dataset, same as
+// g_binCounts always has. This just drives the live per-sector acceptance
+// caps and the persistent widget's breakdown for whichever cell is currently
+// highlighted, exactly the same role g_binCounts already plays for the flat
+// per-cell cap/display, just one axis finer.
+static uint8_t        g_binRollCounts[60][MAG_CAL_ROLL_SECTORS] = {};
+static float          g_lastRollDeg    = 0.0f;       // actual roll at last tick (for display readout)
+static int            g_lastRollSector = -1;         // current device roll sector, updated every tick (mirrors g_lastComputedBin)
+
+// A single roll sector is satisfied if the *server* already considers it
+// ok/over from a prior accepted upload (rollSectorServerSatisfied), or this
+// session's own local count has cleared its cap -- upright's cap is
+// MAG_CAL_GAPFILL_TARGET_CAP, each other sector's is
+// MAG_CAL_GAPFILL_TARGET_CAP_OTHER_ROLL (see config.h). The local-cap half
+// mirrors callib/coverage.py's classify_bins() asymmetric-floor logic
+// against this session's own counts rather than the server's
+// population-relative thresholds -- same "device computes accept/reject,
+// server computes thin/empty/ok" split MAG_CAL_GAPFILL_TARGET_CAP already
+// draws for whole cells.
+static inline bool rollSectorSatisfied(int bin, int k) {
+    if (rollSectorServerSatisfied(bin, k)) return true;
+    const uint8_t cap = (k == 0) ? MAG_CAL_GAPFILL_TARGET_CAP
+                                  : MAG_CAL_GAPFILL_TARGET_CAP_OTHER_ROLL;
+    return g_binRollCounts[bin][k] >= cap;
+}
+
+// A cell counts as roll-satisfied only once every roll sector individually
+// is (see rollSectorSatisfied).
+static inline bool binRollSatisfied(int bin) {
+    for (int k = 0; k < MAG_CAL_ROLL_SECTORS; k++) {
+        if (!rollSectorSatisfied(bin, k)) return false;
+    }
+    return true;
+}
 
 // Per-bin last-accepted sample for runtime duplicate rejection.
 // Prevents the same sensor reading from being counted multiple times when
@@ -623,7 +709,7 @@ static bool         g_binHasSample[60]  = {};
 // *after* a real fit exists instead of needing one to already exist.
 // ---------------------------------------------------------------------------
 
-enum class BinCalSubPhase : uint8_t { ROUGH_SCAN, COLLECT };
+enum class BinCalSubPhase : uint8_t { ROUGH_SCAN, COLLECT, GAP_FILL };
 static BinCalSubPhase g_binCalSubPhase = BinCalSubPhase::COLLECT;
 
 // Map a sample's orientation to a bin index, or -1 if out of range for mounted
@@ -663,18 +749,50 @@ static int16_t g_roughMax[3];
 static int     g_roughScanSampleCount = 0;
 
 // Baseline only: set by magBinCalFinishBaseline() when the diver declares the
-// session done. Baseline has no bin/grid completion concept anymore, so this
-// is the only source of truth for magBinCalIsComplete() in that mode.
+// session done, or auto-set by magBinCalTick() when the sample buffer fills
+// up first. Baseline has no bin/grid completion concept anymore, so this is
+// the only source of truth for magBinCalIsComplete() in that mode.
 static bool g_baselineUserDone = false;
 
-void magBinCalBegin(bool isMounted) {
+// Set alongside g_baselineUserDone only on the buffer-full path, so the
+// display can say *why* the session ended instead of just "Done".
+static bool g_baselineMaxSamplesReached = false;
+
+bool magBinCalBegin(BinCalMode mode, const uint8_t* targets60,
+                    const uint8_t (*rollTargets60x4)[MAG_CAL_ROLL_SECTORS], bool hasRollTargets) {
     magBinCalEnd();  // clean up any previous run
 
-    g_binCalMounted   = isMounted;
+    if (mode == BinCalMode::GAP_FILL && !targets60) {
+        // Refuse rather than degrade. A gap-fill session with no target map
+        // is an unguided baseline collection wearing a guided UI -- the diver
+        // would trust a grid that means nothing. The caller puts a real
+        // message on screen ("Sync targets first").
+        Serial.println("[BIN_CAL] Gap-fill refused: no target map supplied");
+        return false;
+    }
+
+    const bool isMounted = (mode == BinCalMode::MOUNTED);
+    g_binCalMode      = mode;
     g_binCalBinCount  = isMounted ? MAG_CAL_MOUNTED_BINS : MAG_CAL_BASELINE_BINS;
-    g_binCalSubPhase  = isMounted ? BinCalSubPhase::COLLECT : BinCalSubPhase::ROUGH_SCAN;
+    g_binCalSubPhase  = (mode == BinCalMode::MOUNTED)  ? BinCalSubPhase::COLLECT
+                      : (mode == BinCalMode::GAP_FILL) ? BinCalSubPhase::GAP_FILL
+                                                       : BinCalSubPhase::ROUGH_SCAN;
+    g_binHasTargets   = false;
+    memset(g_binTargets, 0, sizeof(g_binTargets));
+    g_binHasRollTargets = false;
+    memset(g_binRollTargets, 0, sizeof(g_binRollTargets));
+    if (mode == BinCalMode::GAP_FILL) {
+        memcpy(g_binTargets, targets60, sizeof(g_binTargets));
+        g_binHasTargets = true;
+        if (rollTargets60x4 && hasRollTargets) {
+            memcpy(g_binRollTargets, rollTargets60x4, sizeof(g_binRollTargets));
+            g_binHasRollTargets = true;
+        }
+    }
     g_binSampleCount  = 0;
     memset(g_binCounts,     0, sizeof(g_binCounts));
+    memset(g_binRollCounts, 0, sizeof(g_binRollCounts));
+    g_lastRollSector = -1;
     memset(g_binHasSample,  0, sizeof(g_binHasSample));
     memset(g_binLastSample, 0, sizeof(g_binLastSample));
 
@@ -682,19 +800,38 @@ void magBinCalBegin(bool isMounted) {
     g_roughMax[0] = g_roughMax[1] = g_roughMax[2] = INT16_MIN;
     g_roughScanSampleCount = 0;
     g_baselineUserDone = false;
+    g_baselineMaxSamplesReached = false;
 
     g_binSamples = (BinCalSample*)malloc(BIN_CAL_MAX_SAMPLES * sizeof(BinCalSample));
     if (!g_binSamples) {
         Serial.println("[BIN_CAL] ERROR: malloc failed for sample buffer");
-        return;
+        return false;
     }
 
     magFit2DReset();  // reset incremental fitter for fresh session
     g_binCalActive = true;
-    Serial.printf("[BIN_CAL] Started %s cal (%s), %d bins, max %d samples\n",
-                  isMounted ? "mounted" : "baseline",
-                  g_binCalSubPhase == BinCalSubPhase::ROUGH_SCAN ? "rough scan" : "collect",
-                  g_binCalBinCount, BIN_CAL_MAX_SAMPLES);
+
+    const char* modeName = (mode == BinCalMode::MOUNTED)  ? "mounted"
+                         : (mode == BinCalMode::GAP_FILL) ? "gap-fill" : "baseline";
+    const char* phaseName = (g_binCalSubPhase == BinCalSubPhase::ROUGH_SCAN) ? "rough scan"
+                          : (g_binCalSubPhase == BinCalSubPhase::GAP_FILL)   ? "gap fill"
+                                                                             : "collect";
+    if (mode == BinCalMode::GAP_FILL) {
+        int remaining = 0, total = 0;
+        magBinCalGapFillProgress(remaining, total);
+        Serial.printf("[BIN_CAL] Started %s cal (%s), %d bins, %d targeted cells, max %d samples\n",
+                      modeName, phaseName, g_binCalBinCount, total, BIN_CAL_MAX_SAMPLES);
+        if (total == 0) {
+            // Targets synced, but the server says nothing needs work. Still a
+            // valid session (the diver may know better than a stale map), just
+            // one worth being explicit about.
+            Serial.println("[BIN_CAL] Note: target map flags no thin or empty cells");
+        }
+    } else {
+        Serial.printf("[BIN_CAL] Started %s cal (%s), %d bins, max %d samples\n",
+                      modeName, phaseName, g_binCalBinCount, BIN_CAL_MAX_SAMPLES);
+    }
+    return true;
 }
 
 bool magBinCalTick(float pitch_deg, float heading_deg, const Vec3i16& rawMagSensor,
@@ -722,7 +859,17 @@ bool magBinCalTick(float pitch_deg, float heading_deg, const Vec3i16& rawMagSens
             s_lastRough.y == rawMagSensor.y && s_lastRough.z == rawMagSensor.z) {
             return false;
         }
-        if (g_binSampleCount >= BIN_CAL_MAX_SAMPLES) return false;
+        if (g_binSampleCount >= BIN_CAL_MAX_SAMPLES) {
+            // Buffer's full and the diver hasn't pressed BTN2 -- auto-finish
+            // rather than silently discarding samples forever. Without this,
+            // the sample count just stops climbing with no indication why.
+            if (!g_baselineUserDone) {
+                g_baselineUserDone         = true;
+                g_baselineMaxSamplesReached = true;
+                Serial.println("[BIN_CAL] Sample buffer full -- auto-finishing baseline collection");
+            }
+            return false;
+        }
 
         BinCalSample s = { rawMagSensor.x, rawMagSensor.y, rawMagSensor.z,
                             accelCal.x, accelCal.y, accelCal.z,
@@ -736,8 +883,96 @@ bool magBinCalTick(float pitch_deg, float heading_deg, const Vec3i16& rawMagSens
         return true;
     }
 
+    if (g_binCalSubPhase == BinCalSubPhase::GAP_FILL) {
+        // Orientation is computed algebraically from THIS sample's mag+accel,
+        // not from the AHRS pitch/heading arguments -- those come from the
+        // Mahony filter, whose lag and hysteresis under rotation is what broke
+        // every previous attempt at a live grid. Nothing here is filtered or
+        // stateful, so the highlighted cell tracks the device exactly.
+        //
+        // AXIS CONVENTION (see util/mag_cal_orient.h -- getting this wrong is
+        // worth up to 180 deg of heading error and would look exactly like the
+        // old failures): the port wants logical-frame mag with the installed
+        // calibration applied and calibrated accel in g. That is precisely the
+        // pair magBinCalDumpCSV() writes and coverage.py reads. Never magNED.
+        const float xc = rawMagSensor.x - g_magCalibration.bias.x;
+        const float yc = rawMagSensor.y - g_magCalibration.bias.y;
+        const float zc = rawMagSensor.z - g_magCalibration.bias.z;
+        const float mxCal = g_magCalibration.softIron[0][0]*xc
+                          + g_magCalibration.softIron[0][1]*yc
+                          + g_magCalibration.softIron[0][2]*zc;
+        const float myCal = g_magCalibration.softIron[1][0]*xc
+                          + g_magCalibration.softIron[1][1]*yc
+                          + g_magCalibration.softIron[1][2]*zc;
+        const float mzCal = g_magCalibration.softIron[2][0]*xc
+                          + g_magCalibration.softIron[2][1]*yc
+                          + g_magCalibration.softIron[2][2]*zc;
+
+        float algPitch = 0.0f, algHdg = 0.0f;
+        mag_orient::reconstructOrientation(mxCal, myCal, mzCal,
+                                           accelCal.x, accelCal.y, accelCal.z,
+                                           algPitch, algHdg);
+        const int gbin = mag_orient::binIndex(algPitch, algHdg);
+        const float algRoll = mag_orient::reconstructRoll(accelCal.x, accelCal.y, accelCal.z);
+        const int rollSector = mag_orient::rollSector(algRoll);
+
+        // Show the diver the orientation the *grid* is using, not the AHRS's.
+        // If these disagree the grid is still right, and a readout that
+        // contradicts the highlighted cell is how you lose trust in both.
+        // Tracked every tick regardless of acceptance below, same as
+        // g_lastComputedBin -- the widget's live outline follows the device,
+        // not just accepted samples.
+        g_lastPitchDeg    = algPitch;
+        g_lastHdgDeg      = algHdg;
+        g_lastRollDeg     = algRoll;
+        g_lastComputedBin = gbin;
+        g_lastRollSector  = rollSector;
+        if (gbin < 0 || gbin >= g_binCalBinCount) return false;
+
+        // Per-cell caps: generous where the diver was sent, token elsewhere.
+        // This is the guard that keeps gap-fill from creating the next
+        // over-weighted bin while closing an empty one. Targeted cells are
+        // additionally capped *per roll sector* (asymmetric, upright gets
+        // MAG_CAL_UPRIGHT_ROLL_WEIGHT times the others), and a sector the
+        // *server* already considers ok/over from a prior accepted upload
+        // stops accepting immediately regardless of this session's own count
+        // -- see rollSectorSatisfied() -- so a diver isn't sent to
+        // re-collect roll coverage they already have. Untargeted cells stay
+        // a single flat token cap across all rolls; they're incidental
+        // context, not something gap-fill is grading.
+        if (binIsTargeted(gbin)) {
+            if (rollSectorSatisfied(gbin, rollSector)) return false;
+        } else {
+            if (g_binCounts[gbin] >= MAG_CAL_GAPFILL_UNTARGETED_CAP) return false;
+        }
+
+        // Same exact-duplicate rejection as COLLECT: the mag ODR (~80 Hz) is
+        // slower than the AHRS loop (100 Hz), so consecutive reads repeat.
+        if (g_binHasSample[gbin]) {
+            const BinCalSample& prev = g_binLastSample[gbin];
+            if (prev.x == rawMagSensor.x && prev.y == rawMagSensor.y &&
+                prev.z == rawMagSensor.z) {
+                return false;
+            }
+        }
+
+        if (g_binSampleCount >= BIN_CAL_MAX_SAMPLES) return false;
+
+        BinCalSample s = { rawMagSensor.x, rawMagSensor.y, rawMagSensor.z,
+                            accelCal.x, accelCal.y, accelCal.z,
+                            gyroCal.x, gyroCal.y, gyroCal.z };
+        g_binSamples[g_binSampleCount++] = s;
+        g_binLastSample[gbin] = s;
+        g_binHasSample[gbin]  = true;
+        g_binCounts[gbin]++;
+        g_binRollCounts[gbin][rollSector]++;
+
+        magFit2DAdd(rawMagSensor);
+        return true;
+    }
+
     // --- COLLECT: unchanged from the original AHRS-based grid ---
-    int bin = getBinIndex(pitch_deg, heading_deg, g_binCalMounted);
+    int bin = getBinIndex(pitch_deg, heading_deg, /*isMounted=*/true);
     g_lastComputedBin = bin;  // always track current orientation, even if sample rejected
     if (bin < 0 || bin >= g_binCalBinCount) return false;
 
@@ -772,23 +1007,60 @@ bool magBinCalTick(float pitch_deg, float heading_deg, const Vec3i16& rawMagSens
 bool magBinCalIsActive() { return g_binCalActive; }
 
 bool magBinCalFinishBaseline() {
-    if (!g_binCalActive || g_binCalMounted) return false;
-    if (g_roughScanSampleCount < MAG_CAL_ROUGH_SCAN_MIN_SAMPLES) {
-        Serial.printf("[BIN_CAL] Finish-baseline ignored: only %d samples (need %d)\n",
-                      g_roughScanSampleCount, MAG_CAL_ROUGH_SCAN_MIN_SAMPLES);
+    if (!g_binCalActive || binCalIsMounted()) return false;
+
+    // Gap-fill counts differently and has a lower floor: it patches a handful
+    // of cells, so a legitimately complete session is small. Its samples land
+    // in g_binSampleCount (binned), not g_roughScanSampleCount (which only
+    // ROUGH_SCAN increments) -- reading the wrong counter here would make
+    // "done" permanently unavailable in gap-fill.
+    const bool isGapFill = (g_binCalMode == BinCalMode::GAP_FILL);
+    const int  have = isGapFill ? g_binSampleCount : g_roughScanSampleCount;
+    const int  need = isGapFill ? MAG_CAL_GAPFILL_MIN_SAMPLES
+                                : MAG_CAL_ROUGH_SCAN_MIN_SAMPLES;
+    if (have < need) {
+        Serial.printf("[BIN_CAL] Finish ignored: only %d samples (need %d)\n", have, need);
         return false;
     }
 
     g_baselineUserDone = true;
-    Serial.printf("[BIN_CAL] Baseline collection finished by diver: %d samples, "
-                  "uploading for server-side grading\n", g_roughScanSampleCount);
+    Serial.printf("[BIN_CAL] %s collection finished by diver: %d samples, "
+                  "uploading for server-side grading\n",
+                  isGapFill ? "Gap-fill" : "Baseline", have);
     return true;
+}
+
+void magBinCalGapFillProgress(int& remainingOut, int& totalOut) {
+    remainingOut = 0;
+    totalOut = 0;
+    if (!g_binCalActive || g_binCalMode != BinCalMode::GAP_FILL || !g_binHasTargets) return;
+
+    for (int i = 0; i < g_binCalBinCount && i < 60; i++) {
+        if (!binIsTargeted(i)) continue;
+        totalOut++;
+        if (!binRollSatisfied(i)) remainingOut++;
+    }
 }
 
 bool magBinCalIsComplete() {
     if (!g_binCalActive) return false;
 
-    if (!g_binCalMounted) {
+    if (g_binCalMode == BinCalMode::GAP_FILL) {
+        // Unlike baseline, gap-fill CAN establish completion as a fact: the
+        // diver is working a finite list of cells the server handed over, and
+        // every one of them is either at its cap or not. The diver can still
+        // stop early (magBinCalFinishBaseline) -- a cell may simply not be
+        // reachable in the water.
+        if (g_baselineUserDone) return true;
+        int remaining = 0, total = 0;
+        magBinCalGapFillProgress(remaining, total);
+        // total == 0 means the target map flags nothing. That must not read as
+        // "instantly complete" -- it would dump a near-empty CSV the moment
+        // collection started. Leave it to the diver's explicit finish.
+        return total > 0 && remaining == 0;
+    }
+
+    if (!binCalIsMounted()) {
         // Baseline has no bin/grid completion concept anymore -- it's a diver
         // decision (magBinCalFinishBaseline), not auto-detected coverage.
         return g_baselineUserDone;
@@ -812,28 +1084,76 @@ bool magBinCalIsComplete() {
 }
 
 void magBinCalGetProgress(CalProgressPacket& pkt) {
-    pkt.cal_type   = g_binCalMounted ? (uint8_t)CalType::MOUNTED : (uint8_t)CalType::BASELINE;
-    pkt.phase      = (g_binCalSubPhase == BinCalSubPhase::ROUGH_SCAN)
-                   ? (uint8_t)CalPhase::ROUGH_SCAN : (uint8_t)CalPhase::COLLECT;
+    pkt.cal_type   = binCalIsMounted() ? (uint8_t)CalType::MOUNTED : (uint8_t)CalType::BASELINE;
+    pkt.phase      = (g_binCalSubPhase == BinCalSubPhase::ROUGH_SCAN) ? (uint8_t)CalPhase::ROUGH_SCAN
+                   : (g_binCalSubPhase == BinCalSubPhase::GAP_FILL)   ? (uint8_t)CalPhase::GAP_FILL
+                                                                      : (uint8_t)CalPhase::COLLECT;
     pkt.bins_total = (uint8_t)g_binCalBinCount;
     pkt.complete   = magBinCalIsComplete();
     pkt.sample_count = (uint16_t)g_binSampleCount;
 
+    // In gap-fill, "green" counts *satisfied targets*, not cells that reached
+    // the baseline green threshold. The diver's job is the target list, so
+    // that's what the X/Y readout has to count -- against MAG_CAL_BIN_GREEN_
+    // THRESHOLD, a session that finished every target would still read 0/60.
+    const bool gapFill = (g_binCalSubPhase == BinCalSubPhase::GAP_FILL);
     uint8_t green = 0;
     for (int i = 0; i < g_binCalBinCount; i++) {
         uint8_t cnt = g_binCounts[i];
         pkt.bin_counts[i] = cnt;
-        if (cnt >= MAG_CAL_BIN_GREEN_THRESHOLD) green++;
+        if (gapFill) {
+            if (binIsTargeted(i) && binRollSatisfied(i)) green++;
+        } else if (cnt >= MAG_CAL_BIN_GREEN_THRESHOLD) {
+            green++;
+        }
     }
     // Zero-fill remaining slots (for baseline → 60, mounted → 36, rest = 0)
     for (int i = g_binCalBinCount; i < 60; i++) {
         pkt.bin_counts[i] = 0;
     }
     pkt.bins_green    = green;
+    // bins_total stays the GRID size (60), not the target count: it sizes the
+    // bin_counts array on the wire and the cell loop on the display, so
+    // repurposing it as a denominator would truncate both. The display derives
+    // the target count from `targets` itself, which it already has.
+    if (gapFill) {
+        pkt.has_targets = g_binHasTargets;
+        memcpy(pkt.targets, g_binTargets, sizeof(pkt.targets));
+    } else {
+        pkt.has_targets = false;
+        memset(pkt.targets, 0, sizeof(pkt.targets));
+    }
+    pkt.max_samples_reached = g_baselineMaxSamplesReached;
     pkt.current_bin   = (g_lastComputedBin >= 0 && g_lastComputedBin < g_binCalBinCount)
                         ? (int8_t)g_lastComputedBin : (int8_t)-1;
     pkt.cur_pitch_deg = g_lastPitchDeg;
     pkt.cur_hdg_deg   = g_lastHdgDeg;
+
+    // Persistent roll widget: for whichever cell current_bin points at, the
+    // combined server-prior-upload + this-session status per roll sector
+    // (rollSectorSatisfied -- 0=ok/satisfied, either because the server
+    // already considered this sector ok/over from a prior accepted upload,
+    // or this session's own count cleared its cap; 1=some local samples but
+    // not yet satisfied; 2=none locally and not server-satisfied), plus the
+    // live roll sector for the widget's outline. `current_bin_roll_counts`
+    // stays this-session-only (the server doesn't send per-roll sample
+    // counts, only status), so a sector satisfied purely by prior server
+    // coverage shows status 0 with count 0 -- correct, not a display bug.
+    // Only meaningful in gap-fill; zeroed and sector -1 otherwise, matching
+    // current_bin's own "-1 if unmappable".
+    if (gapFill && pkt.current_bin >= 0) {
+        const int bin = pkt.current_bin;
+        for (int k = 0; k < MAG_CAL_ROLL_SECTORS; k++) {
+            const uint8_t cnt = g_binRollCounts[bin][k];
+            pkt.current_bin_roll_counts[k] = cnt;
+            pkt.current_bin_roll_targeted[k] = rollSectorSatisfied(bin, k) ? 0 : (cnt > 0) ? 1 : 2;
+        }
+        pkt.current_roll_sector = (int8_t)g_lastRollSector;
+    } else {
+        memset(pkt.current_bin_roll_counts, 0, sizeof(pkt.current_bin_roll_counts));
+        memset(pkt.current_bin_roll_targeted, 0, sizeof(pkt.current_bin_roll_targeted));
+        pkt.current_roll_sector = -1;
+    }
 
     if (g_binCalSubPhase == BinCalSubPhase::ROUGH_SCAN && g_roughScanSampleCount > 0) {
         // fmaxf(0, ...) guards the pre-first-sample state where max<min (sentinel
@@ -878,15 +1198,24 @@ void magBinCalEnd() {
     }
     magFit2DReset();
     g_binCalActive    = false;
+    g_binCalMode      = BinCalMode::BASELINE;
+    g_binHasTargets   = false;
+    memset(g_binTargets, 0, sizeof(g_binTargets));
+    g_binHasRollTargets = false;
+    memset(g_binRollTargets, 0, sizeof(g_binRollTargets));
     g_binCalSubPhase  = BinCalSubPhase::COLLECT;
     g_binSampleCount  = 0;
     g_binCalBinCount  = 0;
     g_roughScanSampleCount = 0;
     g_baselineUserDone = false;
+    g_baselineMaxSamplesReached = false;
     g_lastComputedBin = -1;
     g_lastPitchDeg    = 0.0f;
     g_lastHdgDeg      = 0.0f;
+    g_lastRollDeg     = 0.0f;
+    g_lastRollSector  = -1;
     memset(g_binCounts,     0, sizeof(g_binCounts));
+    memset(g_binRollCounts, 0, sizeof(g_binRollCounts));
     memset(g_binHasSample,  0, sizeof(g_binHasSample));
     memset(g_binLastSample, 0, sizeof(g_binLastSample));
 }
@@ -1066,23 +1395,45 @@ void calibrateAccelerometer(Calib3& out, uint32_t sample_duration_ms) {
   // scale = g_accel_lsb_per_g / (max - bias) (dimensionless correction factor)
   // Expected range is ±1g = ±g_accel_lsb_per_g counts
 
+  // The half-span between the +1g and -1g readings is the divisor for scale.
+  // If an orientation collected no samples its entry is still {0,0,0} from the
+  // zero-init above, so a single failed step makes the span zero and the
+  // division yields inf -- which saveCalib3() then writes to flash as the text
+  // "inf", atof() reads back on the next boot, and Mahony converts into a
+  // permanently NaN quaternion (inf normalized is inf*0 == NaN). Refuse the
+  // axis instead: identity scale is merely uncalibrated, inf is fatal.
+  // Expected half-span is g_accel_lsb_per_g (1g); anything under a tenth of
+  // that is a failed or skipped orientation, not a real measurement.
+  const float minHalfSpan = (g_accel_lsb_per_g > 0.0f) ? g_accel_lsb_per_g * 0.1f : 1.0f;
+  auto axisScale = [&](float vMax, float vMin, char axis) -> float {
+    float halfSpan = (vMax - vMin) / 2.0f;
+    if (!(halfSpan > minHalfSpan)) {   // negated form also rejects NaN
+      Serial.printf("[CAL] ERROR: %c axis span is %.1f counts (need > %.1f) -- "
+                    "orientation missed or sensor read failed. "
+                    "Using scale 1.0 for %c; RERUN THIS CALIBRATION.\n",
+                    axis, (double)(halfSpan * 2.0f), (double)(minHalfSpan * 2.0f), axis);
+      return 1.0f;
+    }
+    return g_accel_lsb_per_g / halfSpan;  // Dimensionless
+  };
+
   // X axis
   float xMax = max(measurements[0].x, measurements[1].x);
   float xMin = min(measurements[0].x, measurements[1].x);
   out.bias.x = (xMax + xMin) / 2.0f;
-  out.scale.x = g_accel_lsb_per_g / ((xMax - xMin) / 2.0f);  // Dimensionless
+  out.scale.x = axisScale(xMax, xMin, 'X');
 
   // Y axis
   float yMax = max(measurements[2].y, measurements[3].y);
   float yMin = min(measurements[2].y, measurements[3].y);
   out.bias.y = (yMax + yMin) / 2.0f;
-  out.scale.y = g_accel_lsb_per_g / ((yMax - yMin) / 2.0f);  // Dimensionless
+  out.scale.y = axisScale(yMax, yMin, 'Y');
 
   // Z axis
   float zMax = max(measurements[4].z, measurements[5].z);
   float zMin = min(measurements[4].z, measurements[5].z);
   out.bias.z = (zMax + zMin) / 2.0f;
-  out.scale.z = g_accel_lsb_per_g / ((zMax - zMin) / 2.0f);  // Dimensionless
+  out.scale.z = axisScale(zMax, zMin, 'Z');
 
   g_accelCalibration = out;
 
@@ -1194,26 +1545,43 @@ ImuStatus initMag(TwoWire& wire) {
   //Serial.print("LIS3MDL WHO_AM_I (expect 0x3D): 0x");
   //Serial.println(who, HEX);
 
+  // This used to be advisory only: initMag() checked WHO_AM_I, ignored the
+  // answer, ignored every magWrite() result, and returned Ok unconditionally.
+  // A mag that never responded still counted as initialized, so the nav loop
+  // never took its sensor-error path.
+  if (who != 0x3D) {
+    Serial.printf("[IMU] LIS3MDL WHO_AM_I = 0x%02X (expect 0x3D) -- mag absent or bus fault\n", who);
+    mag_inited = false;
+    return ImuStatus::WhoAmIMismatch;
+  }
+
   // Basic configuration:
   // CTRL_REG1: ultra-high-performance on X/Y, 10 Hz (for now), temp disabled
   // 0b01100000 = 0x60: TEMP_EN=0, OM=11 (UHP), DO=000 (0.625 Hz) – but let's bump to 10 Hz
   // The datasheet uses different encoding; 0x70 gives DO ~20 Hz w/ UHP.
-  magWrite(LIS3MDL_REG_CTRL_REG1, 0x70); // UHP XY, ~20 Hz
+  bool cfgOk = true;
+  cfgOk &= magWrite(LIS3MDL_REG_CTRL_REG1, 0x70); // UHP XY, ~20 Hz
 
   // CTRL_REG2: full-scale ±4 gauss (0x00) is fine
-  magWrite(LIS3MDL_REG_CTRL_REG2, 0x00);
+  cfgOk &= magWrite(LIS3MDL_REG_CTRL_REG2, 0x00);
 
   // CTRL_REG3: continuous-conversion mode (MD[1:0] = 00)
-  magWrite(LIS3MDL_REG_CTRL_REG3, 0x00);
+  cfgOk &= magWrite(LIS3MDL_REG_CTRL_REG3, 0x00);
 
   // CTRL_REG4: ultra-high-performance on Z
-  magWrite(LIS3MDL_REG_CTRL_REG4, 0x0C);
+  cfgOk &= magWrite(LIS3MDL_REG_CTRL_REG4, 0x0C);
 
   // CTRL_REG5: enable BDU (block data update) — prevents reading partial
   // register updates mid-conversion, which causes byte tearing
-  magWrite(LIS3MDL_REG_CTRL_REG5, 0x40);
+  cfgOk &= magWrite(LIS3MDL_REG_CTRL_REG5, 0x40);
 
   delay(20); // give it a moment
+
+  if (!cfgOk) {
+    Serial.println("[IMU] LIS3MDL config write failed -- mag not initialized");
+    mag_inited = false;
+    return ImuStatus::BusError;
+  }
 
   g_mag_lsb_per_uT = 6842.0f / 100.0f; // 6842 LSB/gauss = 6842/100 LSB/µT for ±4 gauss FS in UHP mode
   mag_inited = true;
@@ -1292,6 +1660,7 @@ ImuStatus readMagRaw(Vec3i16& vecOut) {
 
 // ----------- Unit reads -----------
 ImuStatus readAccel_g(Vec3f& out) {
+  if (!scaleReady(g_accel_lsb_per_g)) return ImuStatus::NotInitialized;
   Vec3i16 raw;
   ImuStatus s = readAccelRaw(raw);
   if (s != ImuStatus::Ok) return s;
@@ -1310,6 +1679,7 @@ ImuStatus readAccel_g(Vec3f& out) {
 
 // Read accelerometer with both raw (uncalibrated) and calibrated outputs
 ImuStatus readAccel_g_raw_cal(Vec3f& rawOut, Vec3f& calOut) {
+  if (!scaleReady(g_accel_lsb_per_g)) return ImuStatus::NotInitialized;
   Vec3i16 raw;
   ImuStatus s = readAccelRaw(raw);
   if (s != ImuStatus::Ok) return s;
@@ -1339,6 +1709,7 @@ ImuStatus readAccel_mps2(Vec3f& out) {
 }
 
 ImuStatus readGyro_rad_s(Vec3f& out) {
+  if (!scaleReady(g_gyro_lsb_per_dps)) return ImuStatus::NotInitialized;
   Vec3i16 raw;
   ImuStatus s = readGyroRaw(raw);
   if (s != ImuStatus::Ok) return s;
@@ -1355,6 +1726,7 @@ ImuStatus readGyro_rad_s(Vec3f& out) {
 
 // Read gyroscope with both raw (uncalibrated) and calibrated outputs
 ImuStatus readGyro_rad_s_raw_cal(Vec3f& rawOut, Vec3f& calOut) {
+  if (!scaleReady(g_gyro_lsb_per_dps)) return ImuStatus::NotInitialized;
   Vec3i16 raw;
   ImuStatus s = readGyroRaw(raw);
   if (s != ImuStatus::Ok) return s;
@@ -1401,10 +1773,15 @@ void setMagCalibration(const MagCalib& cal) {
   g_magCalibration = cal;
 }
 
+void getMagCalibration(MagCalib& out) {
+  out = g_magCalibration;
+}
+
 // Read magnetometer with both raw (uncalibrated) and calibrated outputs
 // rawOut: raw sensor values converted to µT (no calibration applied)
 // calOut: with environmental offset (hard-iron) + soft-iron correction applied
 ImuStatus readMag_raw_cal(Vec3f& rawOut, Vec3f& calOut) {
+  if (!scaleReady(g_mag_lsb_per_uT)) return ImuStatus::NotInitialized;
   Vec3i16 rawSensor;
   ImuStatus s = readMagRaw(rawSensor);
   if (s != ImuStatus::Ok) return s;
@@ -1445,6 +1822,7 @@ ImuStatus readMag_raw_cal(Vec3f& rawOut, Vec3f& calOut) {
 // Read magnetometer with calibration applied (environmental offsets + soft-iron correction)
 // Returns calibrated magnetic field as Vec3f
 ImuStatus readMag(Vec3f& out) {
+  if (!scaleReady(g_mag_lsb_per_uT)) return ImuStatus::NotInitialized;
   Vec3i16 raw;
   ImuStatus s = readMagRaw(raw);
   if (s != ImuStatus::Ok) return s;

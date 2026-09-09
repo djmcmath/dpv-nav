@@ -331,6 +331,44 @@ size_t calProgressPacketToBytes(const CalProgressPacket& pkt, char* buf, size_t 
         doc["cx"] = pkt.cov_x;
         doc["cy"] = pkt.cov_y;
         doc["cz"] = pkt.cov_z;
+        if (pkt.max_samples_reached) doc["mx"] = true;
+    }
+
+    // GAP_FILL only: the server's per-cell target statuses, packed 2 bits per
+    // cell into 15 bytes and hex-encoded (30 chars) rather than sent as a
+    // second 60-element JSON array (~120 bytes). They're constant for the
+    // whole session, so a one-shot packet at session start would be cheaper
+    // still -- but then a display reboot or a single dropped packet leaves the
+    // grid permanently blank with no way to ask for it again. 30 chars on a
+    // packet that already carries the counts array buys statelessness, and the
+    // caller already treats an over-long packet as "skip this frame" (this
+    // function returns 0), so the failure mode is a missed 2 Hz update, not
+    // corruption.
+    if (pkt.phase == (uint8_t)CalPhase::GAP_FILL && pkt.has_targets) {
+        char tg[31];
+        for (int b = 0; b < 15; b++) {
+            uint8_t packed = 0;
+            for (int k = 0; k < 4; k++) {
+                packed |= (uint8_t)((pkt.targets[b * 4 + k] & 0x03) << (k * 2));
+            }
+            static const char kHex[] = "0123456789abcdef";
+            tg[b * 2]     = kHex[packed >> 4];
+            tg[b * 2 + 1] = kHex[packed & 0x0F];
+        }
+        tg[30] = '\0';
+        doc["tg"] = tg;
+
+        // Roll breakdown for the currently-highlighted cell only (4 counts +
+        // 4 statuses + 1 sector index) -- cheap because it's one cell, not
+        // the full 60-cell grid. Same guard as "tg" above: no target map, no
+        // point sending a breakdown for a cell nothing has flagged.
+        JsonArray rc = doc["rc"].to<JsonArray>();
+        JsonArray rt = doc["rt"].to<JsonArray>();
+        for (int k = 0; k < 4; k++) {
+            rc.add(pkt.current_bin_roll_counts[k]);
+            rt.add(pkt.current_bin_roll_targeted[k]);
+        }
+        doc["rs"] = pkt.current_roll_sector;
     }
 
     // Fit quality — only include when valid to save bandwidth
@@ -372,6 +410,57 @@ bool bytesToCalProgressPacket(const char* buf, size_t len, CalProgressPacket& ou
     out.cov_x = doc["cx"] | (uint8_t)0;
     out.cov_y = doc["cy"] | (uint8_t)0;
     out.cov_z = doc["cz"] | (uint8_t)0;
+    out.max_samples_reached = doc["mx"] | false;
+
+    // Unpack the 2-bits-per-cell target statuses (see the encoder above).
+    // Absent "tg" -> has_targets stays false and the array stays zeroed, which
+    // renders as "no targets known" rather than "every cell is fine" -- the
+    // display checks has_targets, not the contents.
+    memset(out.targets, 0, sizeof(out.targets));
+    out.has_targets = false;
+    const char* tg = doc["tg"] | (const char*)nullptr;
+    if (tg && strlen(tg) == 30) {
+        bool ok = true;
+        for (int b = 0; b < 15 && ok; b++) {
+            uint8_t packed = 0;
+            for (int h = 0; h < 2; h++) {
+                char ch = tg[b * 2 + h];
+                uint8_t nib;
+                if (ch >= '0' && ch <= '9')      nib = (uint8_t)(ch - '0');
+                else if (ch >= 'a' && ch <= 'f') nib = (uint8_t)(ch - 'a' + 10);
+                else if (ch >= 'A' && ch <= 'F') nib = (uint8_t)(ch - 'A' + 10);
+                else { ok = false; break; }
+                packed = (uint8_t)((packed << 4) | nib);
+            }
+            if (!ok) break;
+            for (int k = 0; k < 4; k++) {
+                out.targets[b * 4 + k] = (uint8_t)((packed >> (k * 2)) & 0x03);
+            }
+        }
+        if (ok) {
+            out.has_targets = true;
+        } else {
+            // Partially decoded garbage is worse than none: a half-filled
+            // target map would send the diver to cells nobody flagged.
+            memset(out.targets, 0, sizeof(out.targets));
+        }
+    }
+
+    // Roll breakdown for the currently-highlighted cell (see encoder above).
+    // Defaults to all-zero/untargeted and sector -1 when absent -- same
+    // "renders as unknown, not as satisfied" convention as `targets[]`.
+    memset(out.current_bin_roll_counts, 0, sizeof(out.current_bin_roll_counts));
+    memset(out.current_bin_roll_targeted, 0, sizeof(out.current_bin_roll_targeted));
+    out.current_roll_sector = -1;
+    if (out.has_targets) {
+        JsonArray rc = doc["rc"];
+        JsonArray rt = doc["rt"];
+        for (int k = 0; k < 4; k++) {
+            out.current_bin_roll_counts[k]   = rc[k]   | (uint8_t)0;
+            out.current_bin_roll_targeted[k] = rt[k]   | (uint8_t)0;
+        }
+        out.current_roll_sector = doc["rs"] | (int8_t)-1;
+    }
 
     out.fit_valid       = doc["fv"]  | false;
     out.fit_hdg_err_deg = doc["fe"]  | 0.0f;
@@ -393,6 +482,9 @@ size_t calCloudResultPacketToBytes(const CalCloudResultPacket& pkt, char* buf, s
         doc["crc"] = pkt.recommendation;
         doc["cid"] = pkt.calibration_id;
         doc["ccg"] = pkt.coverage_gaps;
+        // Omit when true (the common case) to save bandwidth, same convention
+        // as the other DONE-only fields; decoder defaults absent -> true.
+        if (!pkt.installable) doc["in"] = false;
     } else if (pkt.stage == (uint8_t)CalCloudStage::FAILED) {
         doc["cer"] = pkt.error;
     }
@@ -425,6 +517,8 @@ bool bytesToCalCloudResultPacket(const char* buf, size_t len, CalCloudResultPack
     const char* cid = doc["cid"] | "";
     strncpy(out.calibration_id, cid, sizeof(out.calibration_id) - 1);
     out.calibration_id[sizeof(out.calibration_id) - 1] = '\0';
+
+    out.installable = doc["in"] | true;
     return true;
 }
 

@@ -1,7 +1,9 @@
 #include "web_server.h"
 #include "wifi_manager.h"
 #include "cal_sync.h"
+#include "cloud_client.h"
 #include "../util/waypoints.h"
+#include "../nav_main.h"
 #include <ArduinoJson.h>
 #include <WebServer.h>
 #include <WiFi.h>
@@ -71,6 +73,16 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
   .calsync .label { font-size: .85rem; color: #aaa; margin-top: .6rem; }
   #calsyncstatus { font-size: .9rem; color: #aaa; margin: .5rem 0; }
   #calsyncaction { font-size: .9rem; color: #72efdd; margin-top: .3rem; min-height: 1.2em; }
+  #cloudstatus { font-size: .9rem; color: #aaa; margin: -.5rem 0 1rem; }
+  th.sel, td.sel { width: 1.5rem; }
+  .uploadbar { margin: -1rem 0 1.5rem; }
+  .uploadbar button, .btn-upload { background: #4cc9f0; color: #1a1a2e; border: none;
+    padding: .3rem .7rem; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: .85rem; }
+  .uploadbar button:hover, .btn-upload:hover { background: #72efdd; }
+  .uploadbar button:disabled, .btn-upload:disabled { background: #333; color: #777; cursor: not-allowed; }
+  .uploadbar .btn-delsel { background: #e63946; color: #fff; }
+  .uploadbar .btn-delsel:hover { background: #ff4d5a; }
+  .cloudresult { display: block; font-size: .8rem; color: #72efdd; margin-top: .25rem; }
   .wifisec { margin-top: 1.5rem; padding: 1rem; background: #16213e; border-radius: 8px; }
   .wifisec .row { margin: .4rem 0; }
   .wifisec label { display: inline-block; width: 3.5rem; }
@@ -87,10 +99,19 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <body>
 <h1>DPV-Nav File Manager</h1>
 <div class="info" id="fsinfo">Loading...</div>
+<div class="info" id="cloudstatus">Checking cloud link...</div>
 <table>
-  <thead><tr><th>File</th><th>Size</th><th></th><th></th></tr></thead>
-  <tbody id="files"><tr><td colspan="4">Loading...</td></tr></tbody>
+  <thead><tr>
+    <th class="sel"><input type="checkbox" id="selall" onchange="toggleSelectAll()" title="Select all uploadable files"></th>
+    <th>File</th><th>Size</th><th></th><th></th><th>Cloud</th>
+  </tr></thead>
+  <tbody id="files"><tr><td colspan="6">Loading...</td></tr></tbody>
 </table>
+<div class="uploadbar">
+  <button id="uploadselected" onclick="uploadSelected()">Upload Selected to Cloud</button>
+  <button id="deleteselected" class="btn-delsel" onclick="deleteSelected()">Delete Selected</button>
+  <span class="cloudresult" id="delselstatus"></span>
+</div>
 <div class="upload">
   <b>Upload File</b>
   <form id="upform">
@@ -153,6 +174,21 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
   <div id="wifistat2"></div>
 </div>
 <script>
+// Files recoverable via the calibration retry-upload flow (see
+// nav_main::retryCalibrationUpload) -- kept in sync with the whitelist in
+// nav_main.cpp's retryCalibrationUpload().
+const CAL_RECOVERABLE_FILES = new Set([
+  '/mag_baseline_samples.csv', '/mag_mounted_samples.csv',
+  '/mag_gapfill_samples.csv', '/hdg_samples.csv'
+]);
+let cloudLinked = false;
+
+function classifyUpload(name) {
+  if (name.startsWith('/logs/') && name.endsWith('.csv')) return 'dive_log';
+  if (CAL_RECOVERABLE_FILES.has(name)) return 'cal';
+  return null;
+}
+
 async function load() {
   const [files, info] = await Promise.all([
     fetch('/api/files').then(r => r.json()),
@@ -161,15 +197,96 @@ async function load() {
   document.getElementById('fsinfo').textContent =
     `Storage: ${fmt(info.used)} / ${fmt(info.total)} used (${fmt(info.free)} free)`;
   const tb = document.getElementById('files');
-  if (!files.length) { tb.innerHTML = '<tr><td colspan="4">No files</td></tr>'; return; }
-  tb.innerHTML = files.map(f =>
-    `<tr>
+  if (!files.length) { tb.innerHTML = '<tr><td colspan="6">No files</td></tr>'; return; }
+  tb.innerHTML = files.map(f => {
+    const kind = classifyUpload(f.name);
+    const sel = kind
+      ? `<input type="checkbox" class="upsel" data-name="${f.name}" data-kind="${kind}">` : '';
+    const cloud = kind
+      ? `<button class="btn-upload" onclick="uploadOne('${f.name}','${kind}')" ${cloudLinked ? '' : 'disabled'}>Upload to cloud</button>` +
+        `<span class="cloudresult" data-name="${f.name}"></span>`
+      : '';
+    return `<tr>
+      <td class="sel">${sel}</td>
       <td>${f.name}</td>
       <td>${fmt(f.size)}</td>
       <td><a class="btn btn-dl" href="/api/download?file=${encodeURIComponent(f.name)}">Download</a></td>
       <td><button class="btn btn-del" onclick="del('${f.name}')">Delete</button></td>
-    </tr>`
-  ).join('');
+      <td>${cloud}</td>
+    </tr>`;
+  }).join('');
+}
+function toggleSelectAll() {
+  const on = document.getElementById('selall').checked;
+  document.querySelectorAll('#files .upsel').forEach(cb => cb.checked = on);
+}
+async function uploadOne(name, kind) {
+  const status = document.querySelector(`.cloudresult[data-name="${CSS.escape(name)}"]`);
+  if (status) status.textContent = 'Uploading...';
+  try {
+    if (kind === 'dive_log') {
+      const r = await fetch('/api/dive-logs/upload?file=' + encodeURIComponent(name), { method: 'POST' });
+      const text = await r.text();
+      if (status) status.textContent = r.ok ? 'Uploaded' : 'Failed: ' + text;
+      return;
+    }
+    const r = await fetch('/api/cal/retry-upload?file=' + encodeURIComponent(name), { method: 'POST' });
+    const j = await r.json();
+    if (!status) return;
+    if (!j.ok) { status.textContent = 'Failed: ' + (j.error || 'unknown error'); return; }
+    const unit = name === '/hdg_samples.csv' ? '°' : '%';
+    const next = j.installable
+      ? 'check the unit’s display to accept/reject.'
+      : 'uploaded — merge it into a calibration on the Dive Map website.';
+    status.textContent = `Fit ${j.quality_band} (${j.rms_pct.toFixed(1)}${unit} err) — ${next}`;
+  } catch (e) {
+    if (status) status.textContent = 'Failed: network error';
+  }
+}
+async function uploadSelected() {
+  const boxes = Array.from(document.querySelectorAll('#files .upsel:checked'));
+  if (!boxes.length) { alert('Select at least one file to upload.'); return; }
+  const btn = document.getElementById('uploadselected');
+  btn.disabled = true;
+  for (const cb of boxes) {
+    await uploadOne(cb.dataset.name, cb.dataset.kind);
+  }
+  btn.disabled = false;
+}
+async function deleteSelected() {
+  const boxes = Array.from(document.querySelectorAll('#files .upsel:checked'));
+  const status = document.getElementById('delselstatus');
+  status.textContent = '';
+  if (!boxes.length) { alert('Select at least one file to delete.'); return; }
+  const names = boxes.map(cb => cb.dataset.name);
+  const shown = names.slice(0, 25).map(n => '  ' + n).join('\n');
+  const more = names.length > 25 ? '\n  ... and ' + (names.length - 25) + ' more' : '';
+  const msg = 'Permanently delete ' + names.length +
+    (names.length === 1 ? ' file' : ' files') + ' from the unit?\n\n' + shown + more +
+    '\n\nThis cannot be undone.';
+  if (!confirm(msg)) return;
+  const upBtn = document.getElementById('uploadselected');
+  const delBtn = document.getElementById('deleteselected');
+  upBtn.disabled = true;
+  delBtn.disabled = true;
+  let ok = 0;
+  const failed = [];
+  for (const name of names) {
+    status.textContent = `Deleting ${ok + failed.length + 1} of ${names.length}...`;
+    try {
+      const r = await fetch('/api/delete?file=' + encodeURIComponent(name));
+      if (r.ok) ok++; else failed.push(name);
+    } catch (e) {
+      failed.push(name);
+    }
+  }
+  upBtn.disabled = false;
+  delBtn.disabled = false;
+  document.getElementById('selall').checked = false;
+  status.textContent = failed.length
+    ? `Deleted ${ok}, failed ${failed.length}: ${failed.join(', ')}`
+    : `Deleted ${ok} file${ok === 1 ? '' : 's'}.`;
+  load();
 }
 function fmt(b) {
   if (b < 1024) return b + ' B';
@@ -333,10 +450,23 @@ async function restoreCal(kind) {
   el.textContent = await r.text();
   loadCalSyncStatus();
 }
+async function loadCloudStatus() {
+  const el = document.getElementById('cloudstatus');
+  try {
+    const s = await fetch('/api/cloud-status').then(r => r.json());
+    cloudLinked = s.authorized;
+    el.textContent = cloudLinked
+      ? 'Linked to Dive Map account.'
+      : 'Not linked — link this device from the CAL menu on the unit first.';
+    document.querySelectorAll('.btn-upload').forEach(b => b.disabled = !cloudLinked);
+    document.getElementById('uploadselected').disabled = !cloudLinked;
+  } catch (e) { el.textContent = 'Could not check link status.'; }
+}
 load();
 loadWaypoints();
 loadWifi();
 loadCalSyncStatus();
+loadCloudStatus();
 </script>
 </body>
 </html>
@@ -629,6 +759,72 @@ static void handleWifiStatus() {
     server.send(200, "application/json", json);
 }
 
+// --------------- dive-log upload ---------------
+// Diver-initiated from the "Upload Dive Logs" panel: one blocking call per
+// selected file, same tradeoff already accepted for the other cloud_client
+// calls in this file (calibration sync).
+
+static void handleCloudStatus() {
+    String json = "{\"authorized\":";
+    json += cloud::isAuthorized() ? "true" : "false";
+    json += "}";
+    server.send(200, "application/json", json);
+}
+
+static void handleDiveLogUpload() {
+    if (!server.hasArg("file")) {
+        server.send(400, "text/plain", "Missing 'file' parameter");
+        return;
+    }
+    String path = server.arg("file");
+    if (!path.startsWith("/logs/") || path.indexOf("..") >= 0) {
+        server.send(400, "text/plain", "Invalid file path");
+        return;
+    }
+    if (!LittleFS.exists(path)) {
+        server.send(404, "text/plain", "File not found");
+        return;
+    }
+    String err;
+    if (!cloud::uploadBackup("dive_log", path.c_str(), err)) {
+        server.send(502, "text/plain", err);
+        return;
+    }
+    server.send(200, "text/plain", "Uploaded");
+}
+
+// --------------- calibration retry-upload ---------------
+// Diver-initiated recovery for a raw calibration sample CSV that's still on
+// LittleFS after its automatic cloud upload failed (WiFi blip, deploy
+// restart, etc. -- see dpvnav-http-minus3-causes). Runs the same
+// upload+fit+notify flow a live CAL-menu run performs
+// (nav_main::retryCalibrationUpload / runCalUploadAndNotify), so a
+// successful retry shows the normal accept/reject screen on the unit's
+// display exactly as a fresh cal would.
+
+static void handleCalRetryUpload() {
+    if (!server.hasArg("file")) {
+        server.send(400, "text/plain", "Missing 'file' parameter");
+        return;
+    }
+    CalRetryResult r = retryCalibrationUpload(server.arg("file").c_str());
+
+    JsonDocument doc;
+    doc["ok"] = r.ok;
+    doc["installable"] = r.installable;
+    if (r.ok) {
+        doc["quality_band"] = r.qualityBand;
+        doc["rms_pct"] = r.rmsPct;
+        doc["recommendation"] = r.recommendation;
+        doc["calibration_id"] = r.calibrationId;
+    } else {
+        doc["error"] = r.error;
+    }
+    String json;
+    serializeJson(doc, json);
+    server.send(r.ok ? 200 : 502, "application/json", json);
+}
+
 // --------------- public API ---------------
 
 void init() {
@@ -675,6 +871,9 @@ void init() {
     server.on("/api/wifi-networks", HTTP_POST,   handleAddWifiNetwork);
     server.on("/api/wifi-networks", HTTP_DELETE, handleRemoveWifiNetwork);
     server.on("/api/wifi-status",   HTTP_GET,    handleWifiStatus);
+    server.on("/api/cloud-status",     HTTP_GET,  handleCloudStatus);
+    server.on("/api/dive-logs/upload", HTTP_POST, handleDiveLogUpload);
+    server.on("/api/cal/retry-upload", HTTP_POST, handleCalRetryUpload);
     server.onNotFound([]() {
         Serial.printf("[Web] 404: %s %s\n", server.method() == HTTP_GET ? "GET" : "POST",
                       server.uri().c_str());

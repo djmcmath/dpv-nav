@@ -15,9 +15,22 @@ struct MahonyParams {
 struct MahonyState {
   Quaternion q;      // orientation
   imu::Vec3f integralFB;   // integral feedback (gyro bias estimate-ish)
+
+  // Poison telemetry. A NaN or inf reaching q used to be terminal: every
+  // magnitude guard in mahonyUpdate() is a `<` / `>` comparison, all false for
+  // NaN, so nothing short-circuited and quatNormalize()'s 1/sqrtf(nan) kept it
+  // NaN forever. The filter now refuses non-finite input and rolls back a
+  // poisoned update; these count how often that happened so the condition is
+  // visible in diagnostics instead of silently degrading heading.
+  uint32_t rejectedInputs;   // updates skipped because a sensor vector was non-finite
+  uint32_t rollbacks;        // updates undone because the new quaternion was non-finite
 };
 
 void mahonyInit(MahonyState& s);
+
+// True if every component of q is finite.
+bool quatIsFinite(const Quaternion& q);
+
 // CRITICAL: All three sensor vectors must be in the SAME right-handed NED body frame.
 // The filter uses cross products between accel and mag vectors — if their coordinate
 // frames differ (e.g. one axis is flipped in mag but not accel), the heading will

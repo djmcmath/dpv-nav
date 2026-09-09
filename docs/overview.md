@@ -30,8 +30,8 @@ v1 features (implemented):
 - Operational mode toggle: surface (GPS + WiFi active) vs dive (GPS + WiFi disabled), switchable at runtime via NAV > Op Mode
 - Menu system with JSON-configurable structure: NAV (select WP/arrive WP/mark/op mode), CAL (baseline/mounted/hdg cal/speed), INPUT (GPS/WiFi/logging toggles), DISPLAY (mode/units/heading)
 - Menu loaded from `/menu.json` on LittleFS; hardcoded fallback if file missing
-- Bin-aware magnetometer calibration: two-stage baseline (off-scooter) + mounted (on-scooter) cal, each collecting samples across a heading×elevation grid until coverage is sufficient
-- Fourier heading calibration: guided 12-point on-device collection at 30° intervals, offline 4-harmonic Fourier fit (`fourier_fit.py`), JSON upload; reduces residual error to ~2° max
+- Two-stage magnetometer calibration: baseline (off-scooter, axis-range-bar collection) + mounted (on-scooter, heading×elevation bin grid) cal, each cloud-fit automatically on completion (offline Python fit as WiFi-less fallback); a device-side "Fill gaps" pass plus a website merge step patches thin regions in an installed baseline without redoing the full tumble
+- Fourier heading calibration: guided 12-point on-device collection at 30° intervals, cloud-fit (1–4 harmonics, offline `fourier_fit.py` as fallback); reduces residual error to ~2° max. Thin sectors (>45° gap) are flagged automatically and filled via a manual-entry web form, no device round trip
 - Motor-on heading correction: single fixed offset (`motor_cal.json`) applied after Fourier cal to account for motor magnetic bias during running
 - Interactive speed calibration: swim a known distance (150–500 ft), automatic run detection (flow threshold + heading-change stop), k-factor computed from total pulse count, rolling 6-run average stored to `/speed_cal.json`
 - GPS signal quality display: 0–4 bars computed from HDOP, fix type (2D/3D), and satellite count; antenna status from PGTOP sentence

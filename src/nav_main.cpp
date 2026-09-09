@@ -55,6 +55,27 @@ static MahonyParams mahonyParams{ .kp = 1.0f, .ki = 0.002f, .useMag = true };
 static MagCalib         magCal;
 static Calib3           gyroCal;
 static Calib3           accelCal;
+
+// Print the calibration currently driving the AHRS. Values are printed with
+// %f rather than a fixed precision precisely so inf and nan show up as "inf"
+// and "nan" -- those two spellings are what a poisoned cal file contains, and
+// what saveCalib3()/atof() round-trip through flash.
+static void dumpActiveCalibration(const char* tag) {
+    Serial.printf("[%s] accel bias=(%f, %f, %f) scale=(%f, %f, %f)\n", tag,
+                  (double)accelCal.bias.x,  (double)accelCal.bias.y,  (double)accelCal.bias.z,
+                  (double)accelCal.scale.x, (double)accelCal.scale.y, (double)accelCal.scale.z);
+    Serial.printf("[%s] gyro  bias=(%f, %f, %f) scale=(%f, %f, %f)\n", tag,
+                  (double)gyroCal.bias.x,  (double)gyroCal.bias.y,  (double)gyroCal.bias.z,
+                  (double)gyroCal.scale.x, (double)gyroCal.scale.y, (double)gyroCal.scale.z);
+    Serial.printf("[%s] mag   bias=(%f, %f, %f)\n", tag,
+                  (double)magCal.bias.x, (double)magCal.bias.y, (double)magCal.bias.z);
+    for (int i = 0; i < 3; i++) {
+        Serial.printf("[%s] mag   softIron[%d] = [%f, %f, %f]\n", tag, i,
+                      (double)magCal.softIron[i][0],
+                      (double)magCal.softIron[i][1],
+                      (double)magCal.softIron[i][2]);
+    }
+}
 static hdg_cal::HdgCal  gHdgCal;
 static bool             gHdgCalValid = false;
 static motor_cal::MotorCal gMotorCal;
@@ -110,6 +131,160 @@ static const char* gBinCalCsvPath = nullptr;
 static char gCloudCalId[40]          = "";
 static char gCloudCalPendingPath[40] = "";
 static char gCloudCalActivePath[24]  = "";
+
+// Result of runCalUploadAndNotify() -- a caller-facing summary of what a
+// cloud upload+fit round trip did, independent of the CalCloudResultPacket
+// wire format that round trip also emits to the display device.
+struct CloudCalOutcome {
+    bool    ok = false;           // fit succeeded (CalCloudStage::DONE)
+    bool    offline = false;      // true if skipped for lack of WiFi (ok stays false)
+    String  qualityBand;
+    float   rmsPct = 0.0f;
+    String  recommendation;
+    String  calibrationId;
+    int16_t coverageGaps = -1;
+    String  error;                // set when !ok && !offline
+};
+
+// Runs a calibration-CSV upload+fit round trip and reports the outcome both
+// to the display device (CalCloudResultPacket over Serial1, so its normal
+// accept/reject screen can show it -- unless !installable, e.g. gap-fill,
+// which is never installed on-device) and back to the caller. Shared by the
+// live CAL-menu completion sites below and by retryCalibrationUpload()
+// (tern.local's calibration-recovery action), so both trigger the exact same
+// staging/notify behavior.
+static CloudCalOutcome runCalUploadAndNotify(CalType calType, const char* mode,
+                                              const char* csvPath, const char* pendingPath,
+                                              const char* activePath, bool installable) {
+    CloudCalOutcome outcome;
+    CalCloudResultPacket rpkt{};
+    rpkt.cal_type    = (uint8_t)calType;
+    rpkt.installable = installable;
+
+    if (!wifi::isStaConnected()) {
+        rpkt.stage    = (uint8_t)CalCloudStage::OFFLINE;
+        outcome.offline = true;
+        outcome.error   = "No WiFi connection";
+    } else {
+        cloud::CalibrationResult cr = cloud::runCalibrationUpload(mode, csvPath, pendingPath);
+        if (cr.ok) {
+            rpkt.stage         = (uint8_t)CalCloudStage::DONE;
+            rpkt.quality       = (cr.qualityBand == "good") ? (uint8_t)CalCloudQuality::GOOD
+                               : (cr.qualityBand == "warn") ? (uint8_t)CalCloudQuality::WARN
+                                                             : (uint8_t)CalCloudQuality::BAD;
+            rpkt.rms_pct       = cr.rmsPct;
+            rpkt.coverage_gaps = (int16_t)cr.coverageGaps;
+            strncpy(rpkt.recommendation, cr.recommendation.c_str(), sizeof(rpkt.recommendation) - 1);
+            strncpy(rpkt.calibration_id, cr.calibrationId.c_str(), sizeof(rpkt.calibration_id) - 1);
+
+            strncpy(gCloudCalId, cr.calibrationId.c_str(), sizeof(gCloudCalId) - 1);
+            gCloudCalId[sizeof(gCloudCalId) - 1] = '\0';
+            // Defense in depth, in case a mismatched display build (old
+            // firmware, unaware of `installable`) ever sends
+            // ACCEPT_CLOUD_CAL for a non-installable result anyway: leaving
+            // these two paths empty makes ACCEPT_CLOUD_CAL's own guard
+            // (`strlen(gCloudCalPendingPath) > 0`) reject it as a no-op,
+            // logged, rather than act on it.
+            if (installable) {
+                strncpy(gCloudCalPendingPath, pendingPath, sizeof(gCloudCalPendingPath) - 1);
+                gCloudCalPendingPath[sizeof(gCloudCalPendingPath) - 1] = '\0';
+                strncpy(gCloudCalActivePath, activePath, sizeof(gCloudCalActivePath) - 1);
+                gCloudCalActivePath[sizeof(gCloudCalActivePath) - 1] = '\0';
+            } else {
+                gCloudCalPendingPath[0] = '\0';
+                gCloudCalActivePath[0]  = '\0';
+            }
+
+            outcome.ok             = true;
+            outcome.qualityBand    = cr.qualityBand;
+            outcome.rmsPct         = cr.rmsPct;
+            outcome.recommendation = cr.recommendation;
+            outcome.calibrationId  = cr.calibrationId;
+            outcome.coverageGaps   = cr.coverageGaps;
+        } else {
+            rpkt.stage = (uint8_t)CalCloudStage::FAILED;
+            strncpy(rpkt.error, cr.errorMessage.c_str(), sizeof(rpkt.error) - 1);
+            outcome.error = cr.errorMessage;
+        }
+    }
+
+    char cloudBuf[512];
+    size_t cbn = calCloudResultPacketToBytes(rpkt, cloudBuf, sizeof(cloudBuf));
+    if (cbn > 0) Serial1.write(cloudBuf, cbn);
+
+    return outcome;
+}
+
+// Calibration retry-upload (tern.local's file manager "Upload to cloud"
+// action for a raw sample CSV already sitting on LittleFS -- typically one
+// whose automatic upload failed at collection time). Runs the identical
+// upload+fit+notify flow a live CAL-menu run performs, just triggered later
+// and from a different call site. Exposed via nav_main.h so
+// net/web_server.cpp's handler can call it without reaching into the
+// private cal-tracking globals above.
+CalRetryResult retryCalibrationUpload(const char* filename) {
+    CalRetryResult result;
+    String name = filename ? String(filename) : String();
+
+    // Must not run concurrently with a live CAL-menu collection -- both
+    // paths write the same gCloudCal*/gInCal-adjacent state.
+    if (gInCal || sysState == SystemState::CALIBRATION) {
+        result.error = "A calibration is already in progress on this unit";
+        return result;
+    }
+    if (!wifi::isStaConnected()) {
+        result.error = "No WiFi connection";
+        return result;
+    }
+
+    struct Entry {
+        const char* file;
+        CalType     calType;
+        const char* mode;
+        const char* pendingPath;
+        const char* activePath;
+        bool        installable;
+    };
+    // Gap-fill CSVs upload/fit as mode "baseline" (same as a real baseline
+    // collection -- see the comment at the baseline/mounted call site below)
+    // but are never installable: their fit only ever becomes a merge
+    // candidate on the Dive Map website.
+    const Entry kEntries[] = {
+        { "/mag_baseline_samples.csv", CalType::BASELINE, "baseline",
+          "/mag_base_pending.json", storage::MAG_BASE_FILE, true },
+        { "/mag_mounted_samples.csv", CalType::MOUNTED, "mounted",
+          "/mag_mount_pending.json", storage::MAG_MOUNT_FILE, true },
+        { "/mag_gapfill_samples.csv", CalType::BASELINE, "baseline",
+          "/mag_base_pending.json", storage::MAG_BASE_FILE, false },
+        { hdg_cal::SAMPLES_FILE_PATH, CalType::HDG, "hdg",
+          "/hdg_fourier_pending.json", hdg_cal::FILE_PATH, true },
+    };
+
+    const Entry* match = nullptr;
+    for (const auto& e : kEntries) {
+        if (name == e.file) { match = &e; break; }
+    }
+    if (!match) {
+        result.error = "Not a recoverable calibration file";
+        return result;
+    }
+    if (!LittleFS.exists(match->file)) {
+        result.error = "File not found";
+        return result;
+    }
+
+    CloudCalOutcome outcome = runCalUploadAndNotify(match->calType, match->mode, match->file,
+                                                     match->pendingPath, match->activePath,
+                                                     match->installable);
+    result.ok              = outcome.ok;
+    result.installable      = match->installable;
+    result.qualityBand      = outcome.qualityBand;
+    result.rmsPct           = outcome.rmsPct;
+    result.recommendation   = outcome.recommendation;
+    result.calibrationId    = outcome.calibrationId;
+    result.error            = outcome.error;
+    return result;
+}
 
 // ---- Speed calibration state ------------------------------------------------
 static uint16_t gSpeedCalDist_ft     = 300;    // target distance selected by user
@@ -211,20 +386,36 @@ void setup() {
     sysState = SystemState::SELF_TEST;
 
     // --- Boot self-test -----------------------------------------------------
-    // Every required peripheral is probed unconditionally, regardless of
-    // whether an earlier one failed, so one boot surfaces every hardware
-    // fault at once. Previously GPS/depth checks lived inside the IMU-success
-    // branch, so a board with both a bad IMU wire and a bad GPS wire would
-    // report only the IMU failure -- you'd fix that, reboot, and *then*
-    // discover GPS was broken too. IMU, GPS, and the display link are
-    // required (any failure halts, same as IMU always has); depth is
-    // optional and never blocks boot.
-    struct BootCheck { const char* name; bool ok; };
+    // Every peripheral is probed unconditionally, regardless of whether an
+    // earlier one failed, so one boot surfaces every hardware fault at once.
+    // Previously GPS/depth checks lived inside the IMU-success branch, so a
+    // board with both a bad IMU wire and a bad GPS wire would report only the
+    // IMU failure -- you'd fix that, reboot, and *then* discover GPS was
+    // broken too.
+    //
+    // Only the IMU and the display link are required. GPS is NOT: this is a
+    // dive computer, and dive mode deliberately powers GPS down the moment the
+    // scooter goes under. A subsystem the product switches off on purpose
+    // underwater cannot be a boot blocker -- and making it one meant a weak
+    // GPS signal took the AHRS down with it, so the unit lost heading (the one
+    // thing it must never lose) because it could not find satellites. GPS
+    // failure is now reported and flagged, and the unit boots degraded:
+    // heading works, dead reckoning runs off the flow sensor, absolute
+    // position is unavailable until GPS returns.
+    // AHRS is seeded before the self-test, not inside its success branch.
+    // A failed self-test used to leave `ahrs` default-constructed with
+    // q = {0,0,0,0}, which is finite but not normalizable -- the first
+    // normalize would turn it into NaN. The loop currently early-returns in
+    // ERROR state so nothing consumed it, but that is a fragile reason for a
+    // zero quaternion to exist at all.
+    mahonyInit(ahrs);
+
+    struct BootCheck { const char* name; bool ok; bool required; };
     BootCheck checks[3];
     int checkCount = 0;
 
     bool imuOk = imu::init(imuConfig, accelGyroMap, magMap);
-    checks[checkCount++] = { "IMU", imuOk };
+    checks[checkCount++] = { "IMU", imuOk, /*required=*/true };
     if (imuOk) {
         gBootFlags |= BOOT_IMU_OK;
         // Load or run calibration (sets BOOT_*_CAL_OK flags)
@@ -232,7 +423,7 @@ void setup() {
     }
 
     bool gpsOk = gps::init();
-    checks[checkCount++] = { "GPS", gpsOk };
+    checks[checkCount++] = { "GPS", gpsOk, /*required=*/false };
     if (gpsOk) gBootFlags |= BOOT_GPS_OK;
     gps::setRawNmeaDebug(GPS_RAW_NMEA_ENABLE);
 
@@ -269,15 +460,18 @@ void setup() {
             handleDisplayCmd();
         }
     }
-    checks[checkCount++] = { "Display link", gDisplayLinkAckReceived };
+    checks[checkCount++] = { "Display link", gDisplayLinkAckReceived, /*required=*/true };
     if (gDisplayLinkAckReceived) gBootFlags |= BOOT_DISPLAY_LINK_OK;
 
     // --- Boot summary: every result, not just the first failure -------------
     Serial.println("=== Boot self-test ===");
     bool anyRequiredFailed = false;
     for (int i = 0; i < checkCount; i++) {
-        Serial.printf("  %-14s %s\n", checks[i].name, checks[i].ok ? "OK" : "FAIL");
-        if (!checks[i].ok) anyRequiredFailed = true;
+        const char* verdict = checks[i].ok      ? "OK"
+                            : checks[i].required ? "FAIL"
+                                                 : "FAIL (degraded -- not required)";
+        Serial.printf("  %-14s %s\n", checks[i].name, verdict);
+        if (!checks[i].ok && checks[i].required) anyRequiredFailed = true;
     }
     Serial.printf("  %-14s %s\n", "Depth", depthOk ? "OK" : "absent (optional)");
     Serial.println("=======================");
@@ -289,9 +483,15 @@ void setup() {
     sendNavPacket(0, 0, 0, 0, 0, false, 0, 0, 0, 0, GpsFix{});
 
     if (anyRequiredFailed) {
-        Serial.println("ERROR: one or more required systems failed self-test -- halting");
+        Serial.println("ERROR: a required system (IMU or display link) failed self-test -- halting");
         sysState = SystemState::ERROR;
     } else {
+        if (!gpsOk) {
+            Serial.println("WARNING: GPS not responding -- booting DEGRADED. "
+                           "Heading and flow-based dead reckoning work; "
+                           "absolute position and GPS speed do not.");
+        }
+
         // Flow sensor
         {
             speed_cal::History hist = speed_cal::load();
@@ -315,9 +515,6 @@ void setup() {
 
         // Waypoints (must be after LittleFS.begin())
         waypoints::load();
-
-        // AHRS
-        mahonyInit(ahrs);
 
         // Data logging (starts in OFF state)
         logging::init();
@@ -349,14 +546,18 @@ void setup() {
         if (nvsState.log_level > 0) {
             logging::setLevel(static_cast<logging::LogLevel>(nvsState.log_level));
         }
-        if (gDiveMode) {
-            gps::setEnabled(false);
-            wifi::stop();
-            gWifiEnabled = false;
-        } else {
-            gWifiEnabled = nvsState.wifi;
-            if (!gWifiEnabled) wifi::stop();
-        }
+        // dive_mode in NVS reflects whichever mode the unit was in when it
+        // was last powered off, not whether it's safe/correct to have
+        // GPS+WiFi live right now -- so it's never trusted at boot. Always
+        // start surfaced (the mode with every option available). A depth
+        // sensor, if present, re-enters dive mode within one sample if
+        // actually still submerged -- the depth-triggered check in loop()
+        // is immediate, no dwell. A board with no depth sensor has no way
+        // to re-verify and simply stays surfaced until Op Mode is toggled
+        // manually from the menu.
+        gDiveMode    = false;
+        gWifiEnabled = nvsState.wifi;
+        if (!gWifiEnabled) wifi::stop();
         Serial.printf("[NVS] Restored: gps=%d wifi=%d dive=%d log=%d pos=(%.1f,%.1f) salt=%d\n",
                       gGpsEnabled, gWifiEnabled, gDiveMode,
                       nvsState.log_level, nvsState.pos_x, nvsState.pos_y, gSaltWater);
@@ -414,7 +615,57 @@ void loop() {
     // while accel is in right-handed NED (positive Y=Right). Mahony needs both
     // in the same NED frame, so negate mag Y before passing to the filter.
     imu::Vec3f magNED = { mag.x, -mag.y, mag.z };
+
+    // --- AHRS poison detector ----------------------------------------------
+    // Fires once, on the first non-finite value to reach or leave the filter,
+    // and names the culprit. Runs before mahonyUpdate() so it can report the
+    // inputs as they were, and again after so it also catches a quaternion
+    // that went bad without any single input looking wrong.
+    //
+    // The failure this exists for: a calibration scale factor of inf (from a
+    // 6-point accel cal that divided by a zero span) makes accel inf, Mahony
+    // normalizes inf to NaN, and the quaternion is NaN for good. It reproduces
+    // on the very first loop iteration after boot, which is why this prints
+    // unconditionally rather than being gated behind FULL_DIAG_ENABLE.
+    static bool poisonReported = false;
+    if (!poisonReported) {
+        auto bad3 = [](const imu::Vec3f& v) {
+            return !isfinite(v.x) || !isfinite(v.y) || !isfinite(v.z);
+        };
+        bool badIn = !isfinite(dt) || bad3(accel) || bad3(gyro) || bad3(magNED);
+        if (badIn || !quatIsFinite(ahrs.q)) {
+            poisonReported = true;
+            Serial.println("[POISON] ===== first non-finite AHRS value =====");
+            Serial.printf("[POISON] when=%s  uptime=%lu ms  dt=%f\n",
+                          badIn ? "INPUT" : "QUATERNION",
+                          (unsigned long)millis(), (double)dt);
+            Serial.printf("[POISON] accel raw=(%f, %f, %f)  cal=(%f, %f, %f)\n",
+                          (double)accelRaw.x, (double)accelRaw.y, (double)accelRaw.z,
+                          (double)accel.x,    (double)accel.y,    (double)accel.z);
+            Serial.printf("[POISON] gyro  raw=(%f, %f, %f)  cal=(%f, %f, %f)\n",
+                          (double)gyroRaw.x, (double)gyroRaw.y, (double)gyroRaw.z,
+                          (double)gyro.x,    (double)gyro.y,    (double)gyro.z);
+            Serial.printf("[POISON] mag   raw=(%f, %f, %f)  cal=(%f, %f, %f)\n",
+                          (double)magRaw.x, (double)magRaw.y, (double)magRaw.z,
+                          (double)mag.x,    (double)mag.y,    (double)mag.z);
+            Serial.printf("[POISON] quat=(%f, %f, %f, %f)\n",
+                          (double)ahrs.q.w, (double)ahrs.q.x,
+                          (double)ahrs.q.y, (double)ahrs.q.z);
+            dumpActiveCalibration("POISON");
+            Serial.println("[POISON] ========================================");
+        }
+    }
+
     mahonyUpdate(ahrs, mahonyParams, gyro, accel, magNED, dt);
+
+    if (!poisonReported && !quatIsFinite(ahrs.q)) {
+        poisonReported = true;
+        Serial.printf("[POISON] quaternion went non-finite inside mahonyUpdate: "
+                      "(%f, %f, %f, %f)  dt=%f\n",
+                      (double)ahrs.q.w, (double)ahrs.q.x,
+                      (double)ahrs.q.y, (double)ahrs.q.z, (double)dt);
+        dumpActiveCalibration("POISON");
+    }
 
     // --- Extract Euler angles -----------------------------------------------
     Euler euler = quatToEulerRad(ahrs.q);
@@ -691,6 +942,11 @@ void loop() {
         lastDiagMs = nowMs;
         Serial.printf("[DIAG] dt=%.4f  hdg=%.1f  pitch=%.1f  roll=%.1f\t\n",
                       dt, headingDeg, pitchDeg, rollDeg);
+        if (ahrs.rejectedInputs || ahrs.rollbacks) {
+            Serial.printf("[DIAG] AHRS poison: %lu rejected input(s), %lu rollback(s)\n",
+                          (unsigned long)ahrs.rejectedInputs,
+                          (unsigned long)ahrs.rollbacks);
+        }
         //Serial.printf("[DIAG] accel(g)  X=%+.3f Y=%+.3f Z=%+.3f\t",
         //              accel.x, accel.y, accel.z);
         //Serial.printf("[DIAG] gyro(r/s) X=%+.4f Y=%+.4f Z=%+.4f\t",
@@ -819,8 +1075,8 @@ void loop() {
 
     // --- Calibration tick and completion detection ---------------------------
     if (gInCal) {
-        if (gCalMode == 5 || gCalMode == 6) {
-            // Bin-aware mag cal (baseline=5, mounted=6)
+        if (gCalMode == 5 || gCalMode == 6 || gCalMode == 7) {
+            // Bin-aware mag cal (baseline=5, mounted=6, gap-fill=7)
             // Feed current raw mag sample into the bin collector
             imu::magBinCalTick(pitchDeg, headingDeg, magRaw_logical, accel, gyro);
 
@@ -867,56 +1123,47 @@ void loop() {
                         // The fitted result is staged to a "_pending" file, never written
                         // over the active mag_base.json / mag_mount.json, until the diver
                         // accepts it on the display (ACCEPT_CLOUD_CAL / REJECT_CLOUD_CAL,
-                        // handled below). Either way we tell the display what happened via
-                        // a CalCloudResultPacket -- it can't infer this from NavPacket alone.
-                        CalCloudResultPacket rpkt{};
-                        rpkt.cal_type = (gCalMode == 5) ? (uint8_t)CalType::BASELINE
-                                                         : (uint8_t)CalType::MOUNTED;
+                        // handled below). runCalUploadAndNotify() tells the display what
+                        // happened either way via a CalCloudResultPacket -- it can't infer
+                        // this from NavPacket alone.
+                        //
+                        // Gap-fill (mode 7) is a baseline collection as far as the cloud is
+                        // concerned: same 9-axis CSV, fit as "baseline", then combined with
+                        // the existing baseline from the website's merge picker. It is
+                        // deliberately NOT a distinct cal_type -- a patch that can't be
+                        // merged with what it patches would be useless. Its fit is computed
+                        // from ONLY the patched cells -- a handful out of 60 -- and its only
+                        // useful destiny is as a merge candidate on the website
+                        // (calibrate_upload already made it one; nothing more is needed for
+                        // that). It must never become installable standalone: the RESULT
+                        // screen defaults its ACCEPT/REJECT toggle to ACCEPT, and a diver who
+                        // presses BTN2 without reading it closely would silently overwrite a
+                        // good full-sphere baseline with a partial one. See
+                        // baseline-cal-coverage-feedback-plan.md, "gap-fill never overwrites
+                        // the active baseline on its own."
+                        const bool baselineLike    = (gCalMode == 5 || gCalMode == 7);
+                        const bool isGapFillUpload = (gCalMode == 7);
+                        const char* calMode      = baselineLike ? "baseline" : "mounted";
+                        const char* pendingPath  = baselineLike
+                            ? "/mag_base_pending.json" : "/mag_mount_pending.json";
+                        const char* activePath   = baselineLike
+                            ? storage::MAG_BASE_FILE : storage::MAG_MOUNT_FILE;
+                        const CalType calType    = baselineLike ? CalType::BASELINE : CalType::MOUNTED;
 
-                        if (wifi::isStaConnected()) {
-                            const char* calMode = (gCalMode == 5) ? "baseline" : "mounted";
-                            const char* pendingPath = (gCalMode == 5)
-                                ? "/mag_base_pending.json" : "/mag_mount_pending.json";
-                            Serial.println("[CLOUD_CAL] Uploading calibration...");
-                            cloud::CalibrationResult cr =
-                                cloud::runCalibrationUpload(calMode, gBinCalCsvPath, pendingPath);
-                            if (cr.ok) {
-                                Serial.printf("[CLOUD_CAL] %s (band=%s rms_pct=%.1f) staged to %s\n",
-                                              cr.recommendation.c_str(), cr.qualityBand.c_str(),
-                                              (double)cr.rmsPct, pendingPath);
-                                rpkt.stage   = (uint8_t)CalCloudStage::DONE;
-                                rpkt.quality = (cr.qualityBand == "good") ? (uint8_t)CalCloudQuality::GOOD
-                                             : (cr.qualityBand == "warn") ? (uint8_t)CalCloudQuality::WARN
-                                                                          : (uint8_t)CalCloudQuality::BAD;
-                                rpkt.rms_pct = cr.rmsPct;
-                                rpkt.coverage_gaps = (int16_t)cr.coverageGaps;
-                                strncpy(rpkt.recommendation, cr.recommendation.c_str(),
-                                        sizeof(rpkt.recommendation) - 1);
-                                strncpy(rpkt.calibration_id, cr.calibrationId.c_str(),
-                                        sizeof(rpkt.calibration_id) - 1);
-
-                                strncpy(gCloudCalId, cr.calibrationId.c_str(), sizeof(gCloudCalId) - 1);
-                                gCloudCalId[sizeof(gCloudCalId) - 1] = '\0';
-                                strncpy(gCloudCalPendingPath, pendingPath, sizeof(gCloudCalPendingPath) - 1);
-                                gCloudCalPendingPath[sizeof(gCloudCalPendingPath) - 1] = '\0';
-                                strncpy(gCloudCalActivePath,
-                                        (gCalMode == 5) ? storage::MAG_BASE_FILE : storage::MAG_MOUNT_FILE,
-                                        sizeof(gCloudCalActivePath) - 1);
-                                gCloudCalActivePath[sizeof(gCloudCalActivePath) - 1] = '\0';
-                            } else {
-                                Serial.printf("[CLOUD_CAL] failed: %s\n", cr.errorMessage.c_str());
-                                rpkt.stage = (uint8_t)CalCloudStage::FAILED;
-                                strncpy(rpkt.error, cr.errorMessage.c_str(), sizeof(rpkt.error) - 1);
-                            }
-                        } else {
+                        Serial.println("[CLOUD_CAL] Uploading calibration...");
+                        CloudCalOutcome outcome = runCalUploadAndNotify(
+                            calType, calMode, gBinCalCsvPath, pendingPath, activePath,
+                            /*installable=*/!isGapFillUpload);
+                        if (outcome.ok) {
+                            Serial.printf("[CLOUD_CAL] %s (band=%s rms_pct=%.1f) staged to %s\n",
+                                          outcome.recommendation.c_str(), outcome.qualityBand.c_str(),
+                                          (double)outcome.rmsPct, pendingPath);
+                        } else if (outcome.offline) {
                             Serial.println("[CLOUD_CAL] No WiFi connection -- skipping upload. "
                                             "Connect to WiFi to finish calibration in the cloud.");
-                            rpkt.stage = (uint8_t)CalCloudStage::OFFLINE;
+                        } else {
+                            Serial.printf("[CLOUD_CAL] failed: %s\n", outcome.error.c_str());
                         }
-
-                        char cloudBuf[512];
-                        size_t cbn = calCloudResultPacketToBytes(rpkt, cloudBuf, sizeof(cloudBuf));
-                        if (cbn > 0) Serial1.write(cloudBuf, cbn);
                     } else {
                         Serial.printf("[BIN_CAL] ERROR: could not open %s\n", gBinCalCsvPath);
                     }
@@ -1120,6 +1367,16 @@ static void loadCalibration() {
     if (motor_cal::load(gMotorCal)) {
         Serial.printf("Motor cal loaded (heading offset: %.1f deg)\n", gMotorCal.heading_offset_deg);
     }
+    // This one only poisons heading (fmodf of NaN is NaN), not the quaternion,
+    // so it presents as a NaN heading with valid pitch/roll -- worth telling
+    // apart from an AHRS poisoning at a glance.
+    if (!isfinite(gMotorCal.heading_offset_deg)) {
+        Serial.printf("[CAL] POISON: motor heading offset = %f -- forcing 0\n",
+                      (double)gMotorCal.heading_offset_deg);
+        gMotorCal.heading_offset_deg = 0.0f;
+    }
+
+    dumpActiveCalibration("CAL");
 }
 
 // Reload calibration JSON files without blocking fallbacks.
@@ -1347,6 +1604,22 @@ static void setDiveMode(bool dive) {
     nvs_nav::save(currentNavNvsState());
 }
 
+// Tell the display why a gap-fill session was refused, reusing the cloud-cal
+// FAILED screen the diver already knows rather than inventing a packet type
+// and a UI state for a message. Nothing has started at this point -- the
+// device stays in whatever state it was in, so this is purely informational.
+static void sendGapFillRefusal(const char* why) {
+    CalCloudResultPacket rpkt{};
+    rpkt.cal_type = (uint8_t)CalType::BASELINE;
+    rpkt.stage    = (uint8_t)CalCloudStage::FAILED;
+    strncpy(rpkt.error, why, sizeof(rpkt.error) - 1);
+    rpkt.error[sizeof(rpkt.error) - 1] = '\0';
+
+    char buf[512];
+    size_t n = calCloudResultPacketToBytes(rpkt, buf, sizeof(buf));
+    if (n > 0) Serial1.write(buf, n);
+}
+
 static void handleDisplayCmd() {
     // 96, not 64: ACCEPT_CLOUD_CAL/REJECT_CLOUD_CAL carry a 36-char UUID
     // ("cid") plus JSON overhead, which doesn't fit the old 64-byte size.
@@ -1457,7 +1730,7 @@ static void handleDisplayCmd() {
                         gCalMode = 5;
                         gBinCalCsvPath = "/mag_baseline_samples.csv";
                         gLastCalProgressMs = 0;
-                        imu::magBinCalBegin(false);
+                        imu::magBinCalBegin(imu::BinCalMode::BASELINE);
                         break;
                     case DisplayCmd::START_MOUNTED_CAL:
                         Serial.println("CMD: START_MOUNTED_CAL (bin-aware, on-scooter)");
@@ -1466,11 +1739,56 @@ static void handleDisplayCmd() {
                         gCalMode = 6;
                         gBinCalCsvPath = "/mag_mounted_samples.csv";
                         gLastCalProgressMs = 0;
-                        imu::magBinCalBegin(true);
+                        imu::magBinCalBegin(imu::BinCalMode::MOUNTED);
                         break;
+                    case DisplayCmd::START_GAPFILL_CAL: {
+                        Serial.println("CMD: START_GAPFILL_CAL (guided, targets from cloud)");
+                        // Two hard preconditions, both refused loudly rather than
+                        // degraded. Gap-fill's grid is only trustworthy because a
+                        // good cal already exists and the server said which cells
+                        // to fill; without either, a live grid is exactly the
+                        // untrustworthy thing baseline deliberately doesn't show.
+                        uint8_t targets[60];
+                        MagCalib chainCal{};
+                        bool hasBase = false, hasMount = false;
+                        storage::loadMagCalibrationChain(chainCal, hasBase, hasMount);
+                        if (!hasBase) {
+                            Serial.println("[GAP_FILL] Refused: no baseline cal installed");
+                            sendGapFillRefusal("Run Baseline cal first -- gap-fill needs an installed cal.");
+                            break;
+                        }
+                        if (!cal_sync::loadTargets(targets)) {
+                            Serial.println("[GAP_FILL] Refused: no synced target map");
+                            // "Check for updates" is a tern.local web button, not
+                            // a CAL menu item -- this used to send divers looking
+                            // for a menu entry that doesn't exist.
+                            sendGapFillRefusal("No target map -- run Check for updates on tern.local (WiFi).");
+                            break;
+                        }
+                        // Optional: lets the roll widget start already knowing
+                        // which roll sectors a prior accepted upload covered,
+                        // instead of assuming zero. Absent (older server, or a
+                        // pre-roll-coverage calibration) is a normal case, not
+                        // a refusal condition -- gap-fill still works, the
+                        // widget just tracks this session only.
+                        uint8_t rollTargets[60][MAG_CAL_ROLL_SECTORS];
+                        bool hasRollTargets = cal_sync::loadRollTargets(rollTargets);
+                        if (!imu::magBinCalBegin(imu::BinCalMode::GAP_FILL, targets,
+                                                  rollTargets, hasRollTargets)) {
+                            Serial.println("[GAP_FILL] Refused: collector would not start");
+                            sendGapFillRefusal("Could not start gap-fill collection.");
+                            break;
+                        }
+                        sysState = SystemState::CALIBRATION;
+                        gInCal   = true;
+                        gCalMode = 7;
+                        gBinCalCsvPath = "/mag_gapfill_samples.csv";
+                        gLastCalProgressMs = 0;
+                        break;
+                    }
                     case DisplayCmd::FINISH_BASELINE_COLLECTION:
                         Serial.println("CMD: FINISH_BASELINE_COLLECTION (diver declares done)");
-                        if (gInCal && gCalMode == 5) {
+                        if (gInCal && (gCalMode == 5 || gCalMode == 7)) {
                             imu::magBinCalFinishBaseline();
                         }
                         break;
@@ -1597,55 +1915,26 @@ static void handleDisplayCmd() {
 
                         // Cloud calibration (docs/cloud-calibration-plan.md /
                         // heading-cal-cloud-plan.md): same upload+stage+accept
-                        // flow already used for baseline/mounted (see the
-                        // gCalMode == 5 || 6 block above), just triggered from
+                        // flow already used for baseline/mounted (see
+                        // runCalUploadAndNotify() above), just triggered from
                         // the 12-point collector's own completion point instead
                         // of the bin-grid collector's.
                         if (saved) {
-                            CalCloudResultPacket rpkt{};
-                            rpkt.cal_type = (uint8_t)CalType::HDG;
-
-                            if (wifi::isStaConnected()) {
-                                Serial.println("[CLOUD_CAL] Uploading heading cal...");
-                                cloud::CalibrationResult cr = cloud::runCalibrationUpload(
-                                    "hdg", hdg_cal::SAMPLES_FILE_PATH, "/hdg_fourier_pending.json");
-                                if (cr.ok) {
-                                    Serial.printf("[CLOUD_CAL] %s (band=%s max_err_deg=%.1f) staged\n",
-                                                  cr.recommendation.c_str(), cr.qualityBand.c_str(),
-                                                  (double)cr.rmsPct);
-                                    rpkt.stage   = (uint8_t)CalCloudStage::DONE;
-                                    rpkt.quality = (cr.qualityBand == "good") ? (uint8_t)CalCloudQuality::GOOD
-                                                 : (cr.qualityBand == "warn") ? (uint8_t)CalCloudQuality::WARN
-                                                                              : (uint8_t)CalCloudQuality::BAD;
-                                    rpkt.rms_pct = cr.rmsPct;  // degrees, not percent -- see display side
-                                    rpkt.coverage_gaps = (int16_t)cr.coverageGaps;  // always -1 for hdg
-                                    strncpy(rpkt.recommendation, cr.recommendation.c_str(),
-                                            sizeof(rpkt.recommendation) - 1);
-                                    strncpy(rpkt.calibration_id, cr.calibrationId.c_str(),
-                                            sizeof(rpkt.calibration_id) - 1);
-
-                                    strncpy(gCloudCalId, cr.calibrationId.c_str(), sizeof(gCloudCalId) - 1);
-                                    gCloudCalId[sizeof(gCloudCalId) - 1] = '\0';
-                                    strncpy(gCloudCalPendingPath, "/hdg_fourier_pending.json",
-                                            sizeof(gCloudCalPendingPath) - 1);
-                                    gCloudCalPendingPath[sizeof(gCloudCalPendingPath) - 1] = '\0';
-                                    strncpy(gCloudCalActivePath, hdg_cal::FILE_PATH,
-                                            sizeof(gCloudCalActivePath) - 1);
-                                    gCloudCalActivePath[sizeof(gCloudCalActivePath) - 1] = '\0';
-                                } else {
-                                    Serial.printf("[CLOUD_CAL] failed: %s\n", cr.errorMessage.c_str());
-                                    rpkt.stage = (uint8_t)CalCloudStage::FAILED;
-                                    strncpy(rpkt.error, cr.errorMessage.c_str(), sizeof(rpkt.error) - 1);
-                                }
-                            } else {
+                            Serial.println("[CLOUD_CAL] Uploading heading cal...");
+                            CloudCalOutcome outcome = runCalUploadAndNotify(
+                                CalType::HDG, "hdg", hdg_cal::SAMPLES_FILE_PATH,
+                                "/hdg_fourier_pending.json", hdg_cal::FILE_PATH,
+                                /*installable=*/true);
+                            if (outcome.ok) {
+                                Serial.printf("[CLOUD_CAL] %s (band=%s max_err_deg=%.1f) staged\n",
+                                              outcome.recommendation.c_str(), outcome.qualityBand.c_str(),
+                                              (double)outcome.rmsPct);
+                            } else if (outcome.offline) {
                                 Serial.println("[CLOUD_CAL] No WiFi connection -- skipping upload. "
                                                 "Connect to WiFi to finish heading calibration.");
-                                rpkt.stage = (uint8_t)CalCloudStage::OFFLINE;
+                            } else {
+                                Serial.printf("[CLOUD_CAL] failed: %s\n", outcome.error.c_str());
                             }
-
-                            char cloudBuf[512];
-                            size_t cbn = calCloudResultPacketToBytes(rpkt, cloudBuf, sizeof(cloudBuf));
-                            if (cbn > 0) Serial1.write(cloudBuf, cbn);
                         }
                         break;
                     }

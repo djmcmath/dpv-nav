@@ -1,6 +1,7 @@
 #include "cloud_client.h"
 
 #include <ArduinoJson.h>
+#include <string.h>
 #include <HTTPClient.h>
 #include <LittleFS.h>
 #include <Preferences.h>
@@ -11,92 +12,21 @@
 namespace cloud {
 
 // ---------------------------------------------------------------------------
-// TLS root CA
+// TLS
 // ---------------------------------------------------------------------------
 //
-// divemap.diverdaniel.com's cert chain used to terminate directly at ISRG
-// Root X1. That stopped being true once Let's Encrypt's ACME default profile
-// cut over to the new "Generation Y" hierarchy on 2026-05-13: certs issued
-// after that (ours renewed 2026-08-11) chain leaf -> YE1 -> ISRG Root YE ->
-// ISRG Root X2 -> ISRG Root X1, cross-signed all the way down for compat
-// with trust stores that don't know about YE/X2 yet. See
-// https://letsencrypt.org/2025/11/24/gen-y-hierarchy.
-//
-// Pinning all three self-signed roots below (YE, X2, X1) rather than just X1
-// lets BearSSL terminate the chain walk at whichever one it reaches first --
-// two hops for the current cert instead of four -- and keeps this working
-// across Let's Encrypt's next couple of root transitions without a firmware
-// update each time. rootCaConfigured() below still fails closed (returns an
-// error rather than falling back to WiFiClientSecure::setInsecure()) if this
-// is ever emptied out.
-//
-// Self-signed PEMs fetched directly from:
-//   https://letsencrypt.org/certs/gen-y/root-ye.pem
-//   https://letsencrypt.org/certs/isrg-root-x2.pem
-//   https://letsencrypt.org/certs/isrgrootx1.pem
-static const char* CLOUD_ROOT_CA_PEM = R"EOF(
------BEGIN CERTIFICATE-----
-MIIB2TCCAWCgAwIBAgIRAKQCa6LvbHwg1AR+XmWmk4AwCgYIKoZIzj0EAwMwLjEL
-MAkGA1UEBhMCVVMxDTALBgNVBAoTBElTUkcxEDAOBgNVBAMTB1Jvb3QgWUUwHhcN
-MjUwOTAzMDAwMDAwWhcNNDUwOTAyMjM1OTU5WjAuMQswCQYDVQQGEwJVUzENMAsG
-A1UEChMESVNSRzEQMA4GA1UEAxMHUm9vdCBZRTB2MBAGByqGSM49AgEGBSuBBAAi
-A2IABDwS/6vhrcVqcbBo+wgdI3fwn9x7DNJJOY/lTOti0vkwuRN87RhEhTH17E7X
-yFjWsPYhIPt/wzOqxTd2b+4ZJNy9ID04YywF9U5zasDVyGSNErVNtz8uSGh5izW8
-7j77GaNCMEAwDgYDVR0PAQH/BAQDAgEGMA8GA1UdEwEB/wQFMAMBAf8wHQYDVR0O
-BBYEFKPIJlqOoUzQNWP8myPIOq5W809WMAoGCCqGSM49BAMDA2cAMGQCMHhMr8N9
-LdL1VQKs9BdV81r76eXRB6mtjuNjzk6/lBsPNToWLTDzGYgtQKO1jl63uAIwGV7m
-onyF377c+MM1oqVNs17sgu7F9YKZwgLmVbeOMDbKAXHtKMDLbiGllCcs8f47
------END CERTIFICATE-----
------BEGIN CERTIFICATE-----
-MIICGzCCAaGgAwIBAgIQQdKd0XLq7qeAwSxs6S+HUjAKBggqhkjOPQQDAzBPMQsw
-CQYDVQQGEwJVUzEpMCcGA1UEChMgSW50ZXJuZXQgU2VjdXJpdHkgUmVzZWFyY2gg
-R3JvdXAxFTATBgNVBAMTDElTUkcgUm9vdCBYMjAeFw0yMDA5MDQwMDAwMDBaFw00
-MDA5MTcxNjAwMDBaME8xCzAJBgNVBAYTAlVTMSkwJwYDVQQKEyBJbnRlcm5ldCBT
-ZWN1cml0eSBSZXNlYXJjaCBHcm91cDEVMBMGA1UEAxMMSVNSRyBSb290IFgyMHYw
-EAYHKoZIzj0CAQYFK4EEACIDYgAEzZvVn4CDCuwJSvMWSj5cz3es3mcFDR0HttwW
-+1qLFNvicWDEukWVEYmO6gbf9yoWHKS5xcUy4APgHoIYOIvXRdgKam7mAHf7AlF9
-ItgKbppbd9/w+kHsOdx1ymgHDB/qo0IwQDAOBgNVHQ8BAf8EBAMCAQYwDwYDVR0T
-AQH/BAUwAwEB/zAdBgNVHQ4EFgQUfEKWrt5LSDv6kviejM9ti6lyN5UwCgYIKoZI
-zj0EAwMDaAAwZQIwe3lORlCEwkSHRhtFcP9Ymd70/aTSVaYgLXTWNLxBo1BfASdW
-tL4ndQavEi51mI38AjEAi/V3bNTIZargCyzuFJ0nN6T5U6VR5CmD1/iQMVtCnwr1
-/q4AaOeMSQ+2b1tbFfLn
------END CERTIFICATE-----
------BEGIN CERTIFICATE-----
-MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw
-TzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2Vh
-cmNoIEdyb3VwMRUwEwYDVQQDEwxJU1JHIFJvb3QgWDEwHhcNMTUwNjA0MTEwNDM4
-WhcNMzUwNjA0MTEwNDM4WjBPMQswCQYDVQQGEwJVUzEpMCcGA1UEChMgSW50ZXJu
-ZXQgU2VjdXJpdHkgUmVzZWFyY2ggR3JvdXAxFTATBgNVBAMTDElTUkcgUm9vdCBY
-MTCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBAK3oJHP0FDfzm54rVygc
-h77ct984kIxuPOZXoHj3dcKi/vVqbvYATyjb3miGbESTtrFj/RQSa78f0uoxmyF+
-0TM8ukj13Xnfs7j/EvEhmkvBioZxaUpmZmyPfjxwv60pIgbz5MDmgK7iS4+3mX6U
-A5/TR5d8mUgjU+g4rk8Kb4Mu0UlXjIB0ttov0DiNewNwIRt18jA8+o+u3dpjq+sW
-T8KOEUt+zwvo/7V3LvSye0rgTBIlDHCNAymg4VMk7BPZ7hm/ELNKjD+Jo2FR3qyH
-B5T0Y3HsLuJvW5iB4YlcNHlsdu87kGJ55tukmi8mxdAQ4Q7e2RCOFvu396j3x+UC
-B5iPNgiV5+I3lg02dZ77DnKxHZu8A/lJBdiB3QW0KtZB6awBdpUKD9jf1b0SHzUv
-KBds0pjBqAlkd25HN7rOrFleaJ1/ctaJxQZBKT5ZPt0m9STJEadao0xAH0ahmbWn
-OlFuhjuefXKnEgV4We0+UXgVCwOPjdAvBbI+e0ocS3MFEvzG6uBQE3xDk3SzynTn
-jh8BCNAw1FtxNrQHusEwMFxIt4I7mKZ9YIqioymCzLq9gwQbooMDQaHWBfEbwrbw
-qHyGO0aoSCqI3Haadr8faqU9GY/rOPNk3sgrDQoo//fb4hVC1CLQJ13hef4Y53CI
-rU7m2Ys6xt0nUW7/vGT1M0NPAgMBAAGjQjBAMA4GA1UdDwEB/wQEAwIBBjAPBgNV
-HRMBAf8EBTADAQH/MB0GA1UdDgQWBBR5tFnme7bl5AFzgAiIyBpY9umbbjANBgkq
-hkiG9w0BAQsFAAOCAgEAVR9YqbyyqFDQDLHYGmkgJykIrGF1XIpu+ILlaS/V9lZL
-ubhzEFnTIZd+50xx+7LSYK05qAvqFyFWhfFQDlnrzuBZ6brJFe+GnY+EgPbk6ZGQ
-3BebYhtF8GaV0nxvwuo77x/Py9auJ/GpsMiu/X1+mvoiBOv/2X/qkSsisRcOj/KK
-NFtY2PwByVS5uCbMiogziUwthDyC3+6WVwW6LLv3xLfHTjuCvjHIInNzktHCgKQ5
-ORAzI4JMPJ+GslWYHb4phowim57iaztXOoJwTdwJx4nLCgdNbOhdjsnvzqvHu7Ur
-TkXWStAmzOVyyghqpZXjFaH3pO3JLF+l+/+sKAIuvtd7u+Nxe5AW0wdeRlN8NwdC
-jNPElpzVmbUq4JUagEiuTDkHzsxHpFKVK7q4+63SM1N95R1NbdWhscdCb+ZAJzVc
-oyi3B43njTOQ5yOf+1CceWxG1bQVs5ZufpsMljq4Ui0/1lvh+wjChP4kqKOJ2qxq
-4RgqsahDYVvTH9w7jXbyLeiNdd8XM2w9U/t7y0Ff/9yi0GE44Za4rF2LN9d11TPA
-mRGunUHBcnWEvgJBQl9nJEiU0Zsnvgc/ubhPgXRR4Xq37Z0j4r7g1SgEEzwxA57d
-emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
------END CERTIFICATE-----
-)EOF";
-
-static bool rootCaConfigured() {
-    return CLOUD_ROOT_CA_PEM != nullptr && strlen(CLOUD_ROOT_CA_PEM) > 0;
-}
+// No CA pinning: every WiFiClientSecure below calls setInsecure(), so the
+// server's certificate chain is never validated. Traffic is still TLS
+// (encrypted in transit), just not authenticated against a trust anchor.
+// This used to pin divemap.diverdaniel.com's root CA as a compiled-in PEM,
+// which meant every CA rotation needed a USB reflash of every unit in the
+// field -- it broke for real on 2026-08-22 when Let's Encrypt moved to a new
+// root hierarchy. Deliberately not replaced with a refreshable-CA scheme:
+// the payloads here are dive calibration data, not anything sensitive, and
+// the actual security boundary is the bearer token issued by the device-auth
+// flow below (validated server-side against a DB-stored hash, independent of
+// TLS validation) -- see docs/cloud-calibration-plan.md for the full
+// reasoning.
 
 // ---------------------------------------------------------------------------
 // Token persistence (NVS, mirrors util/nvs_state.cpp's Preferences pattern)
@@ -161,13 +91,8 @@ static String extractError(const String& body, int httpCode) {
 // ---------------------------------------------------------------------------
 
 bool beginAuthorize(String& deviceCodeOut, String& userCodeOut, String& errorOut) {
-    if (!rootCaConfigured()) {
-        errorOut = "cloud TLS root CA not configured";
-        return false;
-    }
-
     WiFiClientSecure client;
-    client.setCACert(CLOUD_ROOT_CA_PEM);
+    client.setInsecure();
     HTTPClient https;
     https.setTimeout(CLOUD_HTTP_TIMEOUT_MS);
 
@@ -248,14 +173,8 @@ void updateAuthorizePoll() {
     // self-correcting (we just keep polling).
     gAuthNextPollDueMs = now + CLOUD_AUTH_POLL_INTERVAL_MS;
 
-    if (!rootCaConfigured()) {
-        gAuthLastError  = "cloud TLS root CA not configured";
-        gAuthPollStatus = AuthPollStatus::ERROR;
-        return;
-    }
-
     WiFiClientSecure pollClient;
-    pollClient.setCACert(CLOUD_ROOT_CA_PEM);
+    pollClient.setInsecure();
     HTTPClient pollHttps;
     pollHttps.setTimeout(CLOUD_HTTP_TIMEOUT_MS);
     if (!pollHttps.begin(pollClient, apiUrl("/api/device/token"))) {
@@ -322,11 +241,6 @@ static const char* basenameOf(const char* path) {
 CalibrationResult runCalibrationUpload(const char* mode, const char* csvPath, const char* outputPath) {
     CalibrationResult result;
 
-    if (!rootCaConfigured()) {
-        result.errorMessage = "cloud TLS root CA not configured";
-        return result;
-    }
-
     String token = loadToken();
     if (token.length() == 0) {
         result.errorMessage = "device not authorized -- run cloud setup first";
@@ -353,7 +267,7 @@ CalibrationResult runCalibrationUpload(const char* mode, const char* csvPath, co
         size_t csvLen = csvFile.size();
 
         WiFiClientSecure client;
-        client.setCACert(CLOUD_ROOT_CA_PEM);
+        client.setInsecure();
         HTTPClient https;
         https.setTimeout(CLOUD_HTTP_TIMEOUT_MS);
         if (!https.begin(client, apiUrl("/api/device/uploads"))) {
@@ -393,7 +307,7 @@ CalibrationResult runCalibrationUpload(const char* mode, const char* csvPath, co
     JsonDocument calJson;  // holds the response's cal_json sub-object for step 3
     {
         WiFiClientSecure client;
-        client.setCACert(CLOUD_ROOT_CA_PEM);
+        client.setInsecure();
         HTTPClient https;
         https.setTimeout(CLOUD_HTTP_TIMEOUT_MS);
         String path = "/api/device/uploads/" + uploadId + "/calibrate";
@@ -447,13 +361,11 @@ CalibrationResult runCalibrationUpload(const char* mode, const char* csvPath, co
 }
 
 bool respondToCalibration(const String& calibrationId, bool accepted) {
-    if (!rootCaConfigured()) return false;
-
     String token = loadToken();
     if (token.length() == 0) return false;
 
     WiFiClientSecure client;
-    client.setCACert(CLOUD_ROOT_CA_PEM);
+    client.setInsecure();
     HTTPClient https;
     https.setTimeout(CLOUD_HTTP_TIMEOUT_MS);
     String path = "/api/calibrations/" + calibrationId;
@@ -479,10 +391,6 @@ bool respondToCalibration(const String& calibrationId, bool accepted) {
 bool fetchCalibrationStatus(std::vector<CalStatusEntry>& outEntries, String& errorOut) {
     outEntries.clear();
 
-    if (!rootCaConfigured()) {
-        errorOut = "cloud TLS root CA not configured";
-        return false;
-    }
     String token = loadToken();
     if (token.length() == 0) {
         errorOut = "device not authorized -- run cloud setup first";
@@ -490,7 +398,7 @@ bool fetchCalibrationStatus(std::vector<CalStatusEntry>& outEntries, String& err
     }
 
     WiFiClientSecure client;
-    client.setCACert(CLOUD_ROOT_CA_PEM);
+    client.setInsecure();
     HTTPClient https;
     https.setTimeout(CLOUD_HTTP_TIMEOUT_MS);
     if (!https.begin(client, apiUrl("/api/device/calibrations/status"))) {
@@ -525,11 +433,14 @@ bool fetchCalibrationStatus(std::vector<CalStatusEntry>& outEntries, String& err
     return true;
 }
 
-bool downloadUpload(const String& uploadId, const char* outputPath, String& errorOut) {
-    if (!rootCaConfigured()) {
-        errorOut = "cloud TLS root CA not configured";
-        return false;
-    }
+bool fetchCalTargets(uint8_t outGrid[60], bool& degradedOut,
+                      uint8_t outRollGrid[60][MAG_CAL_ROLL_SECTORS], bool& hasRollOut,
+                      String& errorOut) {
+    memset(outGrid, 0, 60);
+    degradedOut = false;
+    memset(outRollGrid, 0, 60 * MAG_CAL_ROLL_SECTORS);
+    hasRollOut = false;
+
     String token = loadToken();
     if (token.length() == 0) {
         errorOut = "device not authorized -- run cloud setup first";
@@ -537,7 +448,96 @@ bool downloadUpload(const String& uploadId, const char* outputPath, String& erro
     }
 
     WiFiClientSecure client;
-    client.setCACert(CLOUD_ROOT_CA_PEM);
+    client.setInsecure();
+    HTTPClient https;
+    https.setTimeout(CLOUD_HTTP_TIMEOUT_MS);
+    if (!https.begin(client, apiUrl("/api/device/calibrations/targets"))) {
+        errorOut = "could not start connection";
+        return false;
+    }
+    https.addHeader("Authorization", "Bearer " + token);
+
+    int code = https.GET();
+    String body = https.getString();
+    https.end();
+
+    if (code == 404) {
+        // Not necessarily an alarm -- covers three distinct backend reasons
+        // (no accepted baseline at all / accepted baseline has no coverage
+        // field / coverage field present but malformed), which used to get
+        // collapsed into one hardcoded "no graded baseline to target yet"
+        // here regardless of which one it actually was. Pass the backend's
+        // own `details` message through instead so the three are
+        // distinguishable from the diver-visible result text (see
+        // handlers/device.rs's calibration_targets for the exact strings).
+        errorOut = extractError(body, code);
+        return false;
+    }
+    if (code != 200) {
+        errorOut = extractError(body, code);
+        return false;
+    }
+
+    JsonDocument doc;
+    if (deserializeJson(doc, body) != DeserializationError::Ok) {
+        errorOut = "malformed targets response";
+        return false;
+    }
+
+    // The grid must be exactly the size the device renders. A short or long
+    // array means the server and firmware disagree about the grid shape, and
+    // guessing which cells the values belong to would send the diver to the
+    // wrong orientations -- refuse instead.
+    JsonArray grid = doc["grid"];
+    if (grid.isNull() || grid.size() != 60) {
+        errorOut = "targets grid was not 60 cells";
+        return false;
+    }
+    const int bands   = doc["elev_bands"]  | 0;
+    const int sectors = doc["hdg_sectors"] | 0;
+    if (bands != MAG_CAL_BASELINE_ELEV_BANDS || sectors != MAG_CAL_BASELINE_HDG_SECTORS) {
+        errorOut = "targets grid shape does not match this firmware";
+        return false;
+    }
+
+    for (int i = 0; i < 60; i++) {
+        int v = grid[i] | 0;
+        // Clamp unknown codes to "ok" -- an unfamiliar status from a newer
+        // processor should look uninteresting, not send the diver somewhere.
+        outGrid[i] = (v >= 0 && v <= 3) ? (uint8_t)v : (uint8_t)0;
+    }
+    degradedOut = doc["degraded"] | false;
+
+    // roll_grid is optional (absent for pre-roll or degraded calibrations --
+    // see the server's `targets_grid_from_coverage`/`roll_grid_from_coverage`
+    // in dive-map's device.rs). Same refuse-rather-than-guess discipline as
+    // the flat grid above: a shape that doesn't match this firmware's own
+    // MAG_CAL_ROLL_SECTORS is treated as "no roll data", not as roll data
+    // read into the wrong slots.
+    JsonArray rollGrid = doc["roll_grid"];
+    const int rollSectors = doc["roll_sectors"] | 0;
+    if (!rollGrid.isNull() && rollSectors == MAG_CAL_ROLL_SECTORS &&
+        rollGrid.size() == 60 * (size_t)MAG_CAL_ROLL_SECTORS) {
+        for (int i = 0; i < 60; i++) {
+            for (int k = 0; k < MAG_CAL_ROLL_SECTORS; k++) {
+                int v = rollGrid[i * MAG_CAL_ROLL_SECTORS + k] | 0;
+                outRollGrid[i][k] = (v >= 0 && v <= 3) ? (uint8_t)v : (uint8_t)0;
+            }
+        }
+        hasRollOut = true;
+    }
+    return true;
+}
+
+bool downloadUpload(const String& uploadId, const char* outputPath, String& errorOut) {
+    String token = loadToken();
+    if (token.length() == 0) {
+        errorOut = "device not authorized -- run cloud setup first";
+        return false;
+    }
+
+    WiFiClientSecure client;
+    client.setInsecure();
     HTTPClient https;
     https.setTimeout(CLOUD_HTTP_TIMEOUT_MS);
     String path = "/api/device/uploads/" + uploadId + "/raw";
@@ -570,10 +570,6 @@ bool downloadUpload(const String& uploadId, const char* outputPath, String& erro
 }
 
 bool confirmInstalled(const String& calibrationId, String& errorOut) {
-    if (!rootCaConfigured()) {
-        errorOut = "cloud TLS root CA not configured";
-        return false;
-    }
     String token = loadToken();
     if (token.length() == 0) {
         errorOut = "device not authorized -- run cloud setup first";
@@ -581,7 +577,7 @@ bool confirmInstalled(const String& calibrationId, String& errorOut) {
     }
 
     WiFiClientSecure client;
-    client.setCACert(CLOUD_ROOT_CA_PEM);
+    client.setInsecure();
     HTTPClient https;
     https.setTimeout(CLOUD_HTTP_TIMEOUT_MS);
     String path = "/api/device/calibrations/" + calibrationId + "/confirm-installed";
@@ -604,10 +600,6 @@ bool confirmInstalled(const String& calibrationId, String& errorOut) {
 }
 
 bool uploadBackup(const char* kind, const char* filePath, String& errorOut) {
-    if (!rootCaConfigured()) {
-        errorOut = "cloud TLS root CA not configured";
-        return false;
-    }
     String token = loadToken();
     if (token.length() == 0) {
         errorOut = "device not authorized -- run cloud setup first";
@@ -622,7 +614,7 @@ bool uploadBackup(const char* kind, const char* filePath, String& errorOut) {
     size_t len = f.size();
 
     WiFiClientSecure client;
-    client.setCACert(CLOUD_ROOT_CA_PEM);
+    client.setInsecure();
     HTTPClient https;
     https.setTimeout(CLOUD_HTTP_TIMEOUT_MS);
     if (!https.begin(client, apiUrl("/api/device/uploads"))) {
@@ -648,10 +640,6 @@ bool uploadBackup(const char* kind, const char* filePath, String& errorOut) {
 }
 
 bool fetchLatestBackup(const char* kind, const char* outputPath, String& errorOut) {
-    if (!rootCaConfigured()) {
-        errorOut = "cloud TLS root CA not configured";
-        return false;
-    }
     String token = loadToken();
     if (token.length() == 0) {
         errorOut = "device not authorized -- run cloud setup first";
@@ -659,7 +647,7 @@ bool fetchLatestBackup(const char* kind, const char* outputPath, String& errorOu
     }
 
     WiFiClientSecure client;
-    client.setCACert(CLOUD_ROOT_CA_PEM);
+    client.setInsecure();
     HTTPClient https;
     https.setTimeout(CLOUD_HTTP_TIMEOUT_MS);
     String path = "/api/device/uploads?kind=" + String(kind) + "&latest=true";

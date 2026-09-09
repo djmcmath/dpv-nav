@@ -59,15 +59,10 @@ static void loadNetworks() {
     gNetCount = 0;
 
     if (!LittleFS.exists(NETWORKS_PATH)) {
-        // First boot: seed from compile-time defaults if provided
-        if (strlen(WIFI_STA_SSID) > 0) {
-            strlcpy(gNets[0].ssid, WIFI_STA_SSID, sizeof(gNets[0].ssid));
-            strlcpy(gNets[0].pass, WIFI_STA_PASS, sizeof(gNets[0].pass));
-            gNetCount = 1;
-            saveNetworks();
-            Serial.printf("[WiFi] Seeded network list from compile-time defaults ('%s')\n",
-                          WIFI_STA_SSID);
-        }
+        // No known networks yet.  There are deliberately no compile-time STA
+        // credentials in this repo -- join the Tern AP and add a network from
+        // the web UI, which persists it to wifi_networks.json.
+        Serial.println("[WiFi] No known networks -- add one from the Tern AP web UI");
         return;
     }
 

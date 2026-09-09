@@ -34,9 +34,27 @@ pio device monitor
 ```
 
 ### Upload LittleFS Filesystem
+
+**Know which board you are flashing.** Both environments share the one `data/`
+directory, but only one of them is safe to overwrite:
+
 ```bash
-pio run -e nav -t uploadfs
+pio run -e display -t uploadfs   # SAFE. The display board's FS holds only
+                                 # /menu.json, and nothing on that board ever
+                                 # writes to LittleFS. Nothing is lost.
+
+pio run -e nav -t uploadfs       # DESTRUCTIVE. Erases dive logs, mag_base.json,
+                                 # mag_mount.json, hdg_fourier.json, motor_cal.json,
+                                 # speed_cal.json, cal_targets.json and the cal
+                                 # archives. Pull anything you want off
+                                 # tern.local first.
 ```
+
+`data/menu.json` is read by the **display** board (`loadFromJSON()` in
+[menu.cpp](src/menu/menu.cpp)). The web UI's file upload lives on the **nav**
+board — `net/` is in `[env:nav]` only and the display env has no network stack
+at all — so there is no way to push menu.json over WiFi. It needs
+`-e display -t uploadfs` with that board on USB.
 
 ### Clean Build
 ```bash
@@ -92,7 +110,9 @@ src/
 │   ├── storage.cpp/h          # Calibration save/load (JSON)
 │   ├── nvs_state.cpp/h        # Runtime state persistence (ESP32 NVS: toggles, position)
 │   ├── hdg_cal.cpp/h          # Fourier heading calibration (load /hdg_fourier.json, apply Fourier-series correction)
-│   └── speed_cal.cpp/h        # Speed cal k-factor history (LittleFS /speed_cal.json, rolling 6-run average)
+│   ├── speed_cal.cpp/h        # Speed cal k-factor history (LittleFS /speed_cal.json, rolling 6-run average)
+│   ├── motor_cal.cpp/h        # Motor-on heading offset (load /motor_cal.json, single fixed correction)
+│   └── mag_cal_orient.cpp/h   # Algebraic per-sample orientation for gap-fill cal — VERBATIM PORT of the server's callib/coverage.py (read its header first: the axis convention is a 180° trap)
 └── types/
     └── types.h                # Core data types (Vec3i16, Vec3f, Calib3, MagCalib, etc.)
 lib/
@@ -111,7 +131,7 @@ data/
    - Magnetometer: `MagCalib` applies hard-iron offset + soft-iron matrix (3×3)
 4. **AHRS fusion** ([math/mahony.h](src/math/mahony.h)): Normalized sensor vectors → `Quaternion` (orientation)
 5. **Euler extraction** ([math/orientation.h](src/math/orientation.h)): Quaternion → Roll/Pitch/Yaw (rad)
-6. **Heading calculation**: Yaw → `headingRawDeg` (0-360°) → `headingDeg` (Fourier hdg_cal correction applied if `/hdg_fourier.json` loaded, else same as raw). Both values are sent in NavPacket (`heading_deg` = corrected, `heading_raw_deg` = pre-correction).
+6. **Heading calculation**: Yaw → `headingRawDeg` (0-360°) → `headingDeg` (Fourier hdg_cal correction applied if `/hdg_fourier.json` loaded, else same as raw, then motor-on heading offset added if `/motor_cal.json` loaded). Both values are sent in NavPacket (`heading_deg` = corrected, `heading_raw_deg` = pre-correction).
 7. **Speed selection**: GPS speed is filtered through a two-stage gate before use. First, a SOG (Speed Over Ground) deadband rejects speeds below 0.5 kn as position jitter noise and trusts speeds above 2.0 kn unconditionally. Speeds in the middle zone must also pass a COG (Course Over Ground) coherence check — an EMA of sin/cos(COG) whose resultant length measures heading consistency (0=random, 1=steady). If GPS speed fails either check, flowmeter speed is used instead. See `GPS_SOG_NOISE_FLOOR_KN`, `GPS_SOG_TRUST_FLOOR_KN`, and `GPS_COG_COHERENCE_THRESH` in [config.h](src/config.h).
 8. **Position estimation** ([nav/nav_model.h](src/nav/nav_model.h)): Dead-reckoning integration (speed × heading × dt) with optional GPS truth override
 9. **Serial link**: `NavPacket` sent to display device at 10 Hz via JSON over Serial1. Optional `DebugPacket` at 5 Hz when `ENABLE_DEBUG_PACKET` is set.
@@ -159,12 +179,14 @@ imu::AxisMap imuAxisMap{
 
 The system supports automatic calibration with persistence to LittleFS (flash storage):
 
-**Magnetometer (two-stage, menu-triggered, bin-aware):**
-- **Baseline** (CAL > Baseline): Device off DPV, full sphere coverage. Collects samples to `/mag_baseline_samples.csv`. Run `python tools/mag_calibration.py --mode baseline mag_baseline_samples.csv`, upload the resulting `mag_base.json` to the device filesystem root as `/mag_base.json`.
-- **Mounted** (CAL > Mounted): Device installed on DPV, horizontal rotations. Collects samples to `/mag_mounted_samples.csv`. Run `python tools/mag_calibration.py --mode mounted --base mag_base.json mag_mounted_samples.csv`, upload the resulting `mag_mount.json` as `/mag_mount.json`.
-- **Filename matters:** the firmware only ever reads `/mag_base.json` and `/mag_mount.json` from the root (see [src/util/storage.h](src/util/storage.h)). Do **not** pass `--output` with a different name (e.g. `mag_mounted.json`) unless you rename it to `/mag_mount.json` on upload — otherwise the device silently ignores it and keeps running the previous (stale) calibration. The script warns if the output name won't be read.
-- Both stages show a live heading×elevation bin-coverage grid on the display. Auto-completes when required bins are green.
+**Magnetometer (two-stage, menu-triggered, cloud-fit):**
+- **Baseline** (CAL > Baseline): Device off DPV, full sphere coverage. No live grid (retired 2026-07-25 after six failed attempts, see [docs/baseline-cal-two-pass.md](docs/baseline-cal-two-pass.md)) — shows axis-range bars + live fit stats instead; diver presses BTN2 when coverage looks good enough (`FINISH_BASELINE_COLLECTION`). Collects samples to `/mag_baseline_samples.csv`.
+- **Mounted** (CAL > Mounted): Device installed on DPV, horizontal rotations. Still shows the original live heading×elevation bin-coverage grid (narrower ±30° range sidesteps the pole problem Baseline's grid had) — auto-completes when required bins are green. Collects samples to `/mag_mounted_samples.csv`.
+- **Both stages upload and fit in the cloud automatically** if the unit has WiFi at completion (`cloud::runCalibrationUpload`, same round trip described under Fourier Heading Calibration below): result is staged, not written over the active file, and the display shows an accept/reject screen with quality band + RMS. Accept copies staged → active and hot-reloads immediately.
+- **No WiFi at completion:** display shows an offline notice; the CSV is still saved to LittleFS, so the old manual fallback still works — run `python tools/mag_calibration.py --mode baseline mag_baseline_samples.csv` (or `--mode mounted --base mag_base.json mag_mounted_samples.csv`), then upload the result to LittleFS root.
+- **Filename matters for the manual fallback only** (the cloud path always writes the right name): the firmware only ever reads `/mag_base.json` and `/mag_mount.json` from the root (see [src/util/storage.h](src/util/storage.h)). Do **not** pass `--output` with a different name (e.g. `mag_mounted.json`) unless you rename it to `/mag_mount.json` on upload — otherwise the device silently ignores it and keeps running the previous (stale) calibration. The script warns if the output name won't be read.
 - On boot: tries `mag_base.json` + `mag_mount.json` chain → falls back to legacy `mag_cal.json` → falls back to 90s blocking sweep.
+- **Filling coverage gaps:** see "Guided Gap-Fill" below (device-side, Baseline only) and the Fourier Heading Calibration entry below (website form, hdg only) — different mechanisms because a 2-D orientation grid and a 1-D ring of headings need different gap detection.
 
 **Gyroscope:** On first boot (no `gyro_cal.json`): 10s stationary bias sampling. Subsequent boots load from LittleFS.
 
@@ -173,8 +195,12 @@ The system supports automatic calibration with persistence to LittleFS (flash st
 **Fourier Heading Calibration (CAL > Hdg cal):**
 - Optional, run after completing baseline + mounted mag cal. Run in a magnetically clean environment (living room, not garage).
 - On-device: display guides user through 12 headings (0°, 30°, 60°, … 330°) at 30° intervals. User aligns DPV to each target and presses BTN2. Nav device records `(target, indicated)` pairs and saves to `/hdg_samples.csv`.
-- Offline: download `/hdg_samples.csv` via web interface, run `python tools/fourier_fit.py hdg_samples.csv`, upload the resulting `hdg_fourier.json` to nav device LittleFS.
+- **Same cloud round trip as baseline/mounted mag cal**, triggered from the 12th point's completion (`FINALIZE_HDG_CAL` in nav_main.cpp): if WiFi is connected, the CSV uploads automatically, the server fits it (auto-selecting 1–4 harmonics) and returns a quality band + RMS in **degrees** (`showCloudCalResult()` labels the shared field "°" instead of "%" for this mode), staged to `/hdg_fourier_pending.json`. Same accept/reject screen as mag cal; accept copies staged → active `hdg_fourier.json` and hot-reloads. **No WiFi:** offline notice shown, `/hdg_samples.csv` still saved — fall back to `python tools/fourier_fit.py hdg_samples.csv`, upload the resulting `hdg_fourier.json` manually.
 - The JSON contains `n` (number of harmonics, 1–4) and `c` (Fourier coefficients array). Up to 4 harmonics (9 coefficients: DC + 4×cos/sin pairs).
+- **Filling sector gaps:** the server also checks `sector_adequacy` on every fit — any gap > 45° between the collected **indicated** headings gets flagged (e.g. only 4 of 12 points falling in a 330°→060° span). Unlike Baseline's `CAL > Fill gaps`, there is no on-device flow for this at all — no firmware change, no menu item. The Dive Map website's Calibration History shows a "thin sector(s)" badge on the affected row; expanding it shows an editable-rows form (seeded from the suggested bearings) where the diver aims the DPV at each bearing, reads the indicated heading off the display, and types the `(actual, indicated)` pair in by hand. Submitting posts to `POST /calibrations/{id}/hdg-manual-samples`, which combines it with the original upload and re-fits, producing a new pending row to Accept/Reject on the website.
+- **Two frames, and the 2026-08-27 fix.** Gap *detection* is in the indicated domain (that's what the Fourier series is a function of, so that's where it's unconstrained). Gap *suggestions* must be actual bearings, since that's all a diver can steer. `sector_adequacy` used to emit the indicated-frame division points and the form seeded them into the `actual` column — so the diver was told to steer a bearing that landed right next to a point already collected, adding no coverage and degrading the fit. It now interpolates between the two observed points bracketing the gap (never the fitted curve — inside the gap that's the least trustworthy thing available), rounds to `SUGGESTION_ROUNDING_DEG` (5°, the finest a diver holds on a small compass), and drops anything within `MIN_SUGGESTION_SEPARATION_DEG` (10°) of an already-collected bearing. `from_deg`/`to_deg`/`span_deg` stay indicated-frame; `suggested_headings`/`from_actual_deg`/`to_actual_deg` are actual-frame. Every pre-existing test used `actual == indicated` data, which is exactly why the bug was invisible.
+- **Reading the indicated heading: `DISPLAY > Heading` → `RAW`.** The toggle cycles TRUE → MAG → RAW. RAW substitutes `heading_raw_deg` — which nav_main.cpp already sends as the pre-Fourier, pre-motor-offset *magnetic* heading, i.e. exactly what `CAPTURE_HDG_POINT` records — so `hdg_fourier.json` and `motor_cal.json` stay installed. This replaced a delete/zero/reload/restore ritual that had no backup path for `motor_cal.json`. RAW is a bench mode: it renders in yellow with an `R` suffix, and `nvs_disp::load()` deliberately reverts it to MAG on boot so a forgotten toggle can't leave the unit navigating uncorrected.
+- **Accepting on the website does not push to the device by itself.** A web-accepted result (from this gap-fill form, or a merged Baseline gap-fill) only updates the database until the diver explicitly pulls it: on `tern.local`, under "Calibration Cloud Sync," press "Check for updates." A calibration accepted on-device via the normal accept/reject screen needs no such step.
 - At runtime, `hdg_cal::apply()` evaluates the Fourier series to correct `headingRawDeg` → `headingDeg`. Loaded silently on boot from `/hdg_fourier.json` (skipped if absent).
 - Display shows `heading_raw_deg` from NavPacket during cal prompts (pre-correction absolute readings, not residual corrections).
 
@@ -183,13 +209,32 @@ The system supports automatic calibration with persistence to LittleFS (flash st
 - k-factor computed from total pulse count + true distance; stored as rolling 6-run average in `/speed_cal.json`.
 - RESET+ACCEPT clears history (use after DPV service); ACCEPT adds to average; REJECT discards.
 
-To force recalibration, delete the corresponding JSON file from LittleFS. See [docs/calibration-guide.md](docs/calibration-guide.md) and [docs/mag-calibration-workflow.md](docs/mag-calibration-workflow.md).
+**Guided Gap-Fill (`CAL > Fill gaps`):**
+- A *second* baseline pass that patches only the orientation cells the server flagged as thin or empty on the installed baseline cal. Uploads as a `baseline` collection and is combined with the existing one from the website's merge picker.
+- Two hard preconditions, both refused with an on-screen message rather than degraded: a baseline cal must be installed, and a target map must have been synced. Sync happens via `tern.local`'s "Check for updates" button (not a device menu item — the on-device refusal text used to wrongly say `CAL > Check for updates`, fixed) — every click re-syncs the target map, cached at `/cal_targets.json`, in addition to whatever cal files it installs (`cal_sync.cpp`'s `refreshTargets()`, unconditional on both branches of `checkForUpdates()`). A sync failure (e.g. the accepted baseline predates coverage grading) now shows up in the result text on `tern.local` itself instead of only a Serial log line — this used to fail silently and was the actual cause of "Fill gaps" refusing with no obvious explanation.
+- **Unlike baseline cal, this one gets a live grid** — because a good cal already exists, so orientation is computed algebraically per sample by [mag_cal_orient.h](src/util/mag_cal_orient.h) with no Mahony filter in the path. That is what separates it from the six failed attempts at live orientation feedback documented in [docs/baseline-cal-two-pass.md](docs/baseline-cal-two-pass.md) and the SPIKE block in [imu.cpp](src/sensors/imu.cpp).
+- Which cells are targets is decided **server-side and never recomputed on the device** — the thin/empty thresholds are still being tuned, and keeping the judgement on the server means retuning them costs a sync, not a reflash.
+- Per-cell acceptance caps (`MAG_CAL_GAPFILL_TARGET_CAP` / `_UNTARGETED_CAP` in [config.h](src/config.h)) keep gap-fill from creating the next over-weighted bin while closing an empty one.
+- Auto-completes when every target is satisfied; BTN2 still finishes early, since a targeted cell can be physically unreachable.
+- Host-side tests in [tools/README.md](tools/README.md) prove the port matches the server and that a flagged cell reaches the device as the same cell — run them after touching either side.
+- **Roll coverage (2026-08-26):** the elevation×heading grid is deliberately roll-invariant (that's what makes tilt compensation work), so a cell can read fully green while every sample came from the same roll about the tracked axis -- a real, previously invisible coverage gap, not a UI bug (root-caused from real hardware CSVs; a geometry simulation confirmed restricting collection to "upright only" leaves a permanent unreachable cap on the sensor's own local sphere). Each cell now also grades roll diversity across `MAG_CAL_ROLL_SECTORS` (4: upright/right-side/upside-down/left-side, reusing the accelerometer-cal vocabulary), upright weighted `MAG_CAL_UPRIGHT_ROLL_WEIGHT`x the others. `util/mag_cal_orient.h`'s `reconstructRoll`/`rollSector` are a verbatim port of `callib/coverage.py`'s `reconstruct_roll`/`_roll_sector`, same discipline and same `tools/orient_equivalence.py` cross-check as the pitch/heading math. `imu.cpp` accumulates a local `g_binRollCounts[60][4]` per session and applies per-roll-sector acceptance caps (`MAG_CAL_GAPFILL_TARGET_CAP_OTHER_ROLL` for the non-upright sectors); a roll sector the *server* already considers ok/over from a prior accepted upload (`cal_sync::loadRollTargets()`, from `GET /calibrations/targets`' optional `roll_grid`) counts as satisfied from session start too, so gap-fill doesn't re-ask for coverage a diver already has. `display.cpp`'s `showCalGrid` renders this as a **persistent** 4-triangle widget next to the orientation readout — not a mode swap with the main grid (explicitly rejected as confusing) — always reflecting whichever cell `current_bin` currently points at. See [docs/calibration-guide.md](docs/calibration-guide.md)'s "Why you sometimes have to hold the unit upside-down or on its side" and dive-map's [calibration-grid-conventions.md](../dive-map/docs/architecture/calibration-grid-conventions.md) for the full cross-system convention reference.
 
-**Planned:** the magnetometer offline-fit step (export CSV → run `mag_calibration.py` on
-a laptop → upload result) is planned to move to a WiFi round-trip with Dive Map,
-reusing the device-auth/upload mechanism already built for dive-log sync. See
-[docs/cloud-calibration-plan.md](docs/cloud-calibration-plan.md). Nothing here has
-shipped yet — this section still describes the current, working behavior.
+**Motor-On Heading Correction:**
+- The Fourier heading cal (above) is collected with the motor off (bench procedure). A running motor adds a roughly constant magnetic bias to heading, independent of heading angle or motor speed.
+- Run after Fourier cal: do a reciprocal-leg test on a known bearing with the motor running, or derive the offset automatically from a reciprocal-leg GPS run via `tools/correct_track.py`.
+- Stored as a single value in `/motor_cal.json`: `{ "heading_offset_deg": -3.0 }`. Positive = compass reads low (add to get true heading); negative = compass reads high (subtract from indicated).
+- Loaded by `motor_cal::load()` at boot and on "Reload Cal Files" from the web page; applied on top of the Fourier-corrected heading (`headingDeg += heading_offset_deg`). Absent/invalid file → offset defaults to `0.0` (no correction).
+
+To force recalibration, delete the corresponding JSON file from LittleFS. See [docs/calibration-guide.md](docs/calibration-guide.md).
+
+**Shipped:** the cloud round trip described above (baseline/mounted/hdg all fit
+server-side, with accept/reject on-device) replaced the old "export CSV → run the
+Python tool on a laptop → upload result" workflow as the default path. See
+[docs/cloud-calibration-plan.md](docs/cloud-calibration-plan.md) and divemap's
+[heading-cal-cloud-plan.md](../dive-map/docs/architecture/heading-cal-cloud-plan.md)
+and [calibration-session-merge-plan.md](../dive-map/docs/architecture/calibration-session-merge-plan.md)
+for the implementation history. The manual laptop workflow still exists as the
+offline fallback when the unit has no WiFi at cal time.
 
 ### NVS State Persistence
 
@@ -263,19 +308,49 @@ The display device includes a hierarchical menu system ([src/menu/menu.h](src/me
 - **BTN1 short press**: Open menu (when closed) or cycle to next item (when open)
 - **BTN2 short press**: Select highlighted item (enter submenu, execute action, or go back)
 - **BTN1 + BTN2 held 2s**: Reset display device (sends `DisplayCmd::RESET`)
-- **15-second idle timeout**: Menu auto-closes
+- **45-second idle timeout**: Menu auto-closes; reopening within `MENU_RESUME_WINDOW_MS` (2 min) resumes at the same item rather than at the root
 
 ### Menu Structure
 ```
 MENU (root)
-├── OFF      — power off nav device
-├── NAV:     Outbound, Home, Mark, Op Mode
-├── CAL:     Baseline, Mounted, Hdg cal, Speed cal
-├── INPUT:   GPS Pos, GPS Spd, WiFi, Logging
-└── DISPLAY: Mode, Spd/ETA, Units, Heading
+├── Nav:     Select WP, Arrive WP, Mark, Op Mode
+├── Cal:     Baseline, Fill gaps, Mounted, Hdg cal, Speed cal
+├── Config:  GPS, WiFi, Log, Water, Link acct
+├── Display: Mode, Spd/ETA, Units, Heading
+├── OFF      — power off nav device (two presses; see below)
+└── Close    — auto-generated, leaves the menu
 ```
 
-Each submenu has an auto-generated ".." (back) item. Toggle items (GPS Pos, Units, Mode, Op Mode, etc.) show current state inline and stay open after toggle.
+Each submenu has an auto-generated ".." back item; the root gets "Close". Both
+carry `Action::BACK` — do not go back to identifying them by label, the old
+`strcmp(label, "..")` test is precisely why the root could not have its own
+exit. Toggle items (GPS, Units, Mode, Op Mode, etc.) show current state inline
+and stay open after toggle.
+
+### Menu Safety Invariants (do not regress these)
+
+Three defects here cost a real dive in August 2026: the diver could not find
+`Config > Log` underwater and shut the unit down by hand to stop logging, and
+separately powered it off while trying to select `Display`. The fixes are
+load-bearing, not cosmetic.
+
+1. **`OFF` is never index 0, and never adjacent-by-wraparound to a real action.**
+   It used to be root item 0, which made it both the item the menu opened on and
+   the item `Display` wrapped onto. It now sits second-to-last with the no-op
+   `Close` behind it, so overshooting the end of the list is harmless.
+2. **`POWER_OFF` takes two presses.** The first BTN2 arms it (`gPowerOffArmed`,
+   item repaints as `OFF:SURE?`), the second fires. `next()`, `close()` and
+   `open()` all disarm.
+3. **BTN2 cannot act on a menu that BTN1 opened in the same pass.**
+   `handleButtons()` snapshots `menu::isOpen()` before running the BTN1 branch.
+   Without that snapshot, a two-button tap — the same gesture that wakes the
+   unit — released both buttons inside one 50 ms debounce window and ran
+   open-then-select back to back, firing root item 0 sight-unseen.
+4. **A modal screen that claims a button pass must claim both buttons.**
+   `handleModalButtons()` returns true when a full-screen mode owned the pass and
+   `handleButtons()` then calls `consumePendingReleases()`. Modals only ever
+   handle the one button they care about; the other one's release used to sit
+   with `fired == false` and fire into the menu the instant the modal exited.
 
 **Speed cal** uses a multi-phase UI that takes over the display outside the menu system:
 1. Menu closes → display enters distance-selection mode (`SpeedCalPhase::DIST_SELECT` in display_main.cpp)
@@ -292,7 +367,7 @@ Each submenu has an auto-generated ".." (back) item. Toggle items (GPS Pos, Unit
 - **y=120–239**: Menu area (separator line, title, up to visible items with scroll)
 
 ### Menu Definition
-Menu structure is loaded from `/menu.json` on LittleFS at boot. If the file is missing, a hardcoded default is used. The JSON maps action IDs to `menu::Action` enum values. To customize the menu, edit [data/menu.json](data/menu.json) and upload with `pio run -e display -t uploadfs`.
+Menu structure is loaded from `/menu.json` on the **display** board's LittleFS at boot. If the file is missing, `loadDefaults()` is used — keep the two in sync, or the menu a given unit shows depends on whether its filesystem was ever flashed. The JSON maps action IDs to `menu::Action` enum values. To customize the menu, edit [data/menu.json](data/menu.json) and upload with `pio run -e display -t uploadfs`.
 
 ### Adding New Menu Actions
 1. Add a new `menu::Action` enum value in [src/menu/menu.h](src/menu/menu.h)
@@ -340,8 +415,10 @@ mahonyUpdate(ahrs, mahonyParams, gyro, accel, magNED, dt);
 1. **Never change `magMap` without also updating the `magNED` negation** — they are a matched pair
 2. **Never pass `mag` directly to `mahonyUpdate()`** — always use `magNED`
 3. **If you change the axis map, all mag calibration data must be re-collected** — the soft-iron matrix is frame-dependent
-4. **Diagnostics and `debug_axes` use `mag` (not `magNED`)** — they use `atan2(my, mx)` which works in the left-handed frame
+4. **Diagnostics and `debug_axes` use `mag` (not `magNED`)** — they use `atan2(my, mx)`, which works in the left-handed frame **at level**. That qualifier matters: see rule 6.
 5. **The LIS3MDL BDU (Block Data Update) must be enabled** (CTRL_REG5 = 0x40) or mag readings will byte-tear and fluctuate wildly
+6. **Anything that applies an accel-derived rotation to the mag vector must un-mirror mag Y first.** `atan2(my, mx)` being correct at level does *not* generalize — the mirror only cancels when no rotation is applied. `mag_cal_orient.cpp` / `callib/coverage.py` un-mirror internally and pair it with `atan2(-yh, xh)`; callers still pass the mirrored vector. This was gotten wrong from 2026-07-26 to 2026-08-26 and cost up to 180° of heading and 90° of elevation at any real tilt, while every test passed — because `axis_test` sampled only level headings, the nav logs hold ≤±5° of tilt, and the synthetic cross-checks built their samples from the same assumption. **A level-only measurement certifies nothing about this.**
+7. **Validate orientation changes against `tools/fixtures/`** via `tools/frame_fixture_check.py` — 13 poses captured from real hardware at known attitudes, the only test here whose ground truth is not the code. Re-capture with the `axis_test` serial command.
 
 ### Struct-Based Configuration
 All configuration uses struct initialization with named fields (not function params). Keeps init calls readable and decouples config from init logic.
@@ -379,9 +456,10 @@ Calibration timing is configured at the call sites in [nav_main.cpp](src/nav_mai
 - **Boot mag cal (brand-new device)**: if none of mag_base.json/mag_mount.json/mag_cal.json exist, mag runs with an identity (no-op) calibration and `BOOT_MAG_CAL_OK` stays unset — no automatic sweep. The diver runs CAL > Baseline (+ Mounted) from the menu when ready. (`imu::calibrateMagnetometer()` still exists but is no longer called at boot.)
 - **Gyro cal (boot)**: `imu::calibrateGyroscope(gyroCal, 10000)` — 10 sec at rest
 - **Accel cal (boot)**: `imu::calibrateAccelerometer(accelCal, 2500)` — 2.5 sec per orientation (15 sec total)
-- **Baseline/Mounted bin-aware cal**: sample collection runs until required bins are green (no fixed time)
+- **Baseline (rough-scan)**: axis-range-bar collection ends when the diver presses BTN2 (no fixed time, no bin grid)
+- **Mounted bin-aware cal**: sample collection runs until required bins are green (no fixed time)
 
-To force recalibration, delete the JSON files from LittleFS and reboot. Preferred workflow: CAL > Baseline (off DPV) → offline fit → upload `mag_base.json`; then CAL > Mounted (on DPV) → offline fit → upload `mag_mount.json`.
+To force recalibration, delete the JSON files from LittleFS and reboot. Preferred workflow: CAL > Baseline (off DPV) → cloud-fit + accept on-device (WiFi) or offline fit + upload `mag_base.json` (no WiFi); then CAL > Mounted (on DPV), same either/or.
 
 ## Key Files Reference
 
@@ -408,6 +486,7 @@ To force recalibration, delete the JSON files from LittleFS and reboot. Preferre
 - [src/util/hdg_cal.h](src/util/hdg_cal.h) — Fourier heading calibration: `load()` (reads `/hdg_fourier.json`), `apply(headingDeg, cal)` (evaluates Fourier series)
 - [src/util/logging.h](src/util/logging.h) — Data logging system (CSV-like format)
 - [src/util/speed_cal.h](src/util/speed_cal.h) — Speed cal k-factor history: `load()`, `save()`, `addMeasurement()`, `averageK()`, `reset()`
+- [src/util/motor_cal.h](src/util/motor_cal.h) — Motor-on heading offset: `load()` (reads `/motor_cal.json`, single `heading_offset_deg` field)
 - [docs/overview.md](docs/overview.md) — Project overview, architecture, feature summary
 - [docs/user-guide.md](docs/user-guide.md) — User-facing guide: boot, display, buttons, dive workflow
 - [docs/calibration-guide.md](docs/calibration-guide.md) — Sensor calibration (mag baseline + mounted two-stage workflow, gyro, accel, speed)

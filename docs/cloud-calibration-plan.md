@@ -133,14 +133,27 @@ existing "DONE" screen and CSV save):
   way, and the *only* remedy is finding it, plugging in a USB cable, and reflashing —
   exactly the failure mode this project's own goal statement (units that "log in to
   Dive Map on its own... as soon as it finds a connection") was trying to avoid.
-  **Real fix, not yet built:** move `CLOUD_ROOT_CA_PEM` out of compiled firmware into
+  ~~**Real fix, not yet built:** move `CLOUD_ROOT_CA_PEM` out of compiled firmware into
   a LittleFS file (e.g. `/cloud_ca.pem`), loaded at runtime the same way
   `hdg_cal::load()` reads `/hdg_fourier.json`, with the compiled-in bundle kept only
   as a first-boot default. A stale/soon-to-expire root could then be refreshed the
   same way `mag_base.json` already is — upload a new file over the existing web UI,
   no reflash, no USB — and would also let a still-linked unit self-update its own CA
   file autonomously via the very cloud connection this plan is building, the first
-  time it successfully reaches the server after a new root ships server-side.
+  time it successfully reaches the server after a new root ships server-side.~~
+  **Resolved differently (2026-08-27): CA pinning removed outright, not made
+  refreshable.** `CLOUD_ROOT_CA_PEM` and `rootCaConfigured()` are gone; every
+  `WiFiClientSecure` in `cloud_client.cpp` now calls `setInsecure()` instead of
+  `setCACert(...)` — TLS still encrypts the connection, but the server's certificate
+  chain is no longer validated against any trust anchor, so there is no CA left to
+  rotate or refresh. This trades away server authentication rather than building
+  machinery to keep it working: the realistic threat (someone actively MITM-ing a
+  hobbyist's dive-computer WiFi session to corrupt calibration data or lift the
+  bearer token) was judged not worth defending against for what this payload is.
+  The actual security boundary is unchanged and unaffected by this — it's the bearer
+  token from the device-auth flow below, checked server-side against a DB-stored
+  hash (`DeviceAuth` in dive-map's `auth.rs`), independent of how or whether the TLS
+  layer validates the server's identity.
 - **Where the current bin-aware collector's source lives wasn't pinned down precisely**
   during this planning pass (CLAUDE.md and calibration-guide.md describe its behavior,
   but the source file wasn't conclusively located — likely `menu.cpp`/`display_main.cpp`/
@@ -159,28 +172,39 @@ existing "DONE" screen and CSV save):
   since gotten its own cloud round trip** — see divemap's
   [heading-cal-cloud-plan.md](../../divemap/docs/architecture/heading-cal-cloud-plan.md),
   which reuses this plan's shared cloud client and the same
-  `gCloudCalPhase` wait/result UI. **Still not solved:** a real fit-adequacy check
-  beyond a single RMS number. Today's fixed 12-point collection can still leave
-  one sector thin (real case, 2026-07-24: only 4 of the 12 points fell in a
-  330°-060° span with a large swing, giving a mediocre fit there until
-  315/345/015/045 were added by hand) — that plan deliberately ports the
-  whole-CSV fit as-is and defers server-side sector reporting + a
-  point-and-click targeted-resample UI to future work.
-- **Dropping TLS (plain HTTP to divemap.diverdaniel.com) was considered and rejected
-  for now — flagged as a possible future step, not a plan.** The payloads themselves
-  (cal CSVs, eventually track logs) aren't sensitive, but the RFC 8628 bearer token
-  persisted by `cloud::isAuthorized()`/`loadToken()`/`saveToken()` is a long-lived
-  credential with no visible expiry/rotation, and it rides in cleartext on every
-  request over plain HTTP. Risk isn't "someone reads a cal CSV" — it's (a) token theft
-  giving standing account access (read history, push uploads as that device) to anyone
-  with path visibility (shared WiFi at a marina/dive shop, any hop to the backend), and
-  (b) no server authentication, so a MITM could impersonate the backend and feed back a
-  forged calibration fit, corrupting the heading correction the AHRS relies on. Revisit
-  only if server-side reasonability checks on uploaded/returned cal data make the
-  integrity risk acceptable — the ~150KB flash saved (mbedcrypto + mbedtls + mbedx509 +
+  `gCloudCalPhase` wait/result UI. That plan originally deferred a real
+  fit-adequacy check beyond a single RMS number — today's fixed 12-point
+  collection can still leave one sector thin (real case, 2026-07-24: only 4 of
+  the 12 points fell in a 330°-060° span with a large swing, giving a
+  mediocre fit there until 315/345/015/045 were added by hand). **Solved
+  2026-07-28**, not on-device: divemap's
+  [calibration-session-merge-plan.md](../../dive-map/docs/architecture/calibration-session-merge-plan.md)
+  added server-side `sector_adequacy` reporting plus a website manual-entry
+  form (Phase A) that lets a diver type in `(actual, indicated)` readings for
+  the suggested headings and re-fit, without any firmware change or
+  re-collection. A firmware-driven targeted-resample UI (Phase B) remains
+  unbuilt and is intentionally sequenced after real-world use of Phase A.
+- **Dropping TLS entirely (plain HTTP to divemap.diverdaniel.com) was considered and
+  rejected for now — flagged as a possible future step, not a plan.** The payloads
+  themselves (cal CSVs, eventually track logs) aren't sensitive, but the RFC 8628
+  bearer token persisted by `cloud::isAuthorized()`/`loadToken()`/`saveToken()` is a
+  long-lived credential with no visible expiry/rotation, and it would ride in
+  cleartext on every request over plain HTTP, readable by anyone with passive path
+  visibility (shared WiFi at a marina/dive shop, any hop to the backend) — not just
+  an active attacker. The ~150KB flash saved (mbedcrypto + mbedtls + mbedx509 +
   WiFiClientSecure; WiFi/lwIP stay regardless, since the local file-browser AP needs
-  them) is real but was not, by itself, judged worth the tradeoff once
-  `partitions_nav.csv` (see below) recovered flash headroom a different way.
+  them) is real but was not, by itself, judged worth that tradeoff once
+  `partitions_nav.csv` (see below) recovered flash headroom a different way. This
+  stands as-is — TLS itself is still in place; nothing below removed it.
+  **What *was* removed (2026-08-27, see the entry above): server authentication.**
+  `setInsecure()` means an active MITM can now impersonate the backend (feed back a
+  forged calibration fit) or intercept the bearer token in a way passive sniffing
+  never could over an unauthenticated-but-encrypted channel — the same two risks
+  this paragraph originally raised, minus the passive-sniffing case that dropping to
+  plain HTTP would have added on top. That residual active-MITM risk was weighed and
+  accepted directly, not overlooked: judged impractical enough for this project's
+  real threat model (a hobbyist device uploading calibration data) to not be worth
+  the CA-maintenance burden that avoiding it requires.
 
 ---
 

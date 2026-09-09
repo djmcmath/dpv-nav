@@ -24,3 +24,7 @@ tools/device_token.json
 # Dive-log CSVs captured off the device for analysis. Data, not source --
 # these are large and are kept locally rather than versioned.
 tools/logs/
+
+# Per-machine PlatformIO config -- upload/monitor ports differ per dev box.
+platformio.ini
+*.dsn

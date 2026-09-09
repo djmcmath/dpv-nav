@@ -539,10 +539,6 @@
       {
         "netclass": "CritSignal",
         "pattern": "/SCK"
-      },
-      {
-        "netclass": "CritSignal",
-        "pattern": "+5V"
       }
     ]
   },

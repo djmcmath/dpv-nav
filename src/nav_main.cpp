@@ -2067,16 +2067,21 @@ static void handleDisplayCmd() {
                             // Log the position correction as a waypoint-type entry
                             if (logging::isLogging()) {
                                 nav::Position pos = nav::getPosition();
+                                GpsFix fix = gps::getFix();
                                 logging::LogData ld{};
-                                ld.timestamp_ms = millis();
-                                ld.heading_deg  = 0.0f;
-                                ld.speed_ms     = 0.0f;
-                                ld.gpsSpeed     = false;
-                                ld.pos_x_m      = pos.x_m;
-                                ld.pos_y_m      = pos.y_m;
-                                ld.lat          = wp->lat;
-                                ld.lon          = wp->lon;
-                                ld.pos_src      = 'W';
+                                ld.timestamp_ms   = millis();
+                                ld.heading_deg    = 0.0f;
+                                ld.speed_ms       = 0.0f;
+                                ld.gpsSpeed       = false;
+                                ld.pos_x_m        = pos.x_m;
+                                ld.pos_y_m        = pos.y_m;
+                                ld.lat            = wp->lat;
+                                ld.lon            = wp->lon;
+                                ld.pos_src        = 'W';
+                                ld.gps_satellites = fix.has_fix ? fix.satellites : 0;
+                                ld.gps_hdop       = fix.has_fix ? fix.hdop       : 0.0f;
+                                ld.depth_m        = depth::isPresent() ? depth::getDepth_m() : 0.0f;
+                                ld.water_temp_c   = depth::isPresent() ? depth::getTemp_c()  : 0.0f;
                                 logging::logImmediate(ld);
                             }
                         } else {

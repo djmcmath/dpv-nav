@@ -3,6 +3,10 @@
 Magnetometer Ellipsoid Calibration Tool
 Reads raw magnetometer samples (CSV format) and computes hard-iron offset + soft-iron correction matrix.
 
+Baseline mode fits here. Mounted mode delegates to dive-map's
+calibration-processor (callib.fit.fit_mounted) so the bench and the server cannot
+compute different answers for the same CSV — see load_callib_fit().
+
 Usage:
     python mag_calibration.py <mag_samples.csv>
 
@@ -25,6 +29,37 @@ import os
 import sys
 import json
 from scipy import linalg
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(os.path.dirname(HERE))
+CALLIB_PARENT = os.path.join(REPO_ROOT, "dive-map", "calibration-processor")
+
+
+def load_callib_fit():
+    """Import dive-map's callib.fit — the one copy of the fit math.
+
+    calibration-processor/README.md is explicit that this script and that
+    service must not compute different answers for the same CSV, and mounted
+    mode is exactly where that promise broke. The server learned to fit the
+    correction from near-level samples only (compute_mounted_correction_level,
+    2026-09-13) because the collection procedure deliberately gathers tilted
+    rings, while compute_mounted_correction() below went on fitting every
+    sample as if it were level. Copying the new fit down here would close
+    today's gap and re-open the same one tomorrow, so mounted mode calls the
+    server's fit_mounted() directly instead.
+
+    Same sibling-checkout assumption orient_equivalence.py already makes:
+    dive-map/ and dpv-nav/ side by side under one parent. Returns None when
+    that checkout (or numpy/scipy) isn't there so the caller can explain what
+    to do about it — a bare ImportError traceback would not.
+    """
+    if CALLIB_PARENT not in sys.path:
+        sys.path.insert(0, CALLIB_PARENT)
+    try:
+        from callib import fit as callib_fit
+    except ImportError:
+        return None
+    return callib_fit
 
 
 def warn_device_filename(output_file, expected):
@@ -728,7 +763,12 @@ def run_baseline(args):
 
 
 def run_mounted(args):
-    """Handle --mode mounted: solve M_mount/b_mount correction → mag_mount.json"""
+    """Handle --mode mounted: solve M_mount/b_mount correction → mag_mount.json
+
+    The fit itself is dive-map's callib.fit.fit_mounted() rather than anything
+    computed here, so this script and the server cannot answer differently for
+    the same CSV. --legacy-fit forces the local pre-2026-09-13 path instead.
+    """
     if not args.base:
         print("ERROR: --mode mounted requires --base <mag_base.json>")
         sys.exit(1)
@@ -742,6 +782,94 @@ def run_mounted(args):
     base_bias, base_soft_iron = load_json_calibration(args.base)
     print(f"  b_base: X={base_bias[0]:.2f}  Y={base_bias[1]:.2f}  Z={base_bias[2]:.2f}")
 
+    if args.legacy_fit:
+        run_mounted_legacy(args, output_file, base_bias, base_soft_iron)
+        return
+
+    callib_fit = load_callib_fit()
+    if callib_fit is None:
+        print(f"\nERROR: could not import callib from {CALLIB_PARENT}")
+        print("  Mounted mode fits through dive-map's calibration-processor so that this")
+        print("  script and the server cannot disagree about the same CSV. Check out")
+        print("  dive-map/ alongside dpv-nav/ (and pip install numpy scipy), or pass")
+        print("  --legacy-fit to use this script's own pre-2026-09-13 fit — which fits")
+        print("  the procedure's tilted rings as if they were level, and is meant for")
+        print("  reproducing an already-installed cal, not for making a new one.")
+        sys.exit(1)
+
+    print(f"\nLoading mounted cal samples from {args.input}...")
+    print(f"  (fitting via {CALLIB_PARENT}/callib/fit.py — same code path as the server)")
+    try:
+        result = callib_fit.fit_mounted(
+            [args.input], base_bias.tolist(), base_soft_iron.tolist()
+        )
+    except callib_fit.CalibrationError as exc:
+        # The server's 422: a fact about the data, not a crash. Same wording
+        # the diver would see on the website for this upload.
+        print(f"\nERROR: {exc}")
+        sys.exit(1)
+
+    b_mount = np.array(result.bias)
+    M_mount = np.array(result.soft_iron)
+    diag = result.diagnostics
+    level = diag.get("level_fit")
+
+    print("\n" + "="*60)
+    print("MOUNTED CALIBRATION CORRECTION RESULTS")
+    print("="*60)
+    print(f"\nMounted hard-iron offset (b_mount, in base-corrected space):")
+    print(f"  X: {b_mount[0]:+8.4f}")
+    print(f"  Y: {b_mount[1]:+8.4f}")
+    print(f"  Z:     0.0000  (locked — insufficient vertical coverage to constrain)")
+    print(f"\nMounted soft-iron correction (M_mount, diagonal):")
+    for i in range(3):
+        print(f"  [{M_mount[i, 0]:8.6f}, {M_mount[i, 1]:8.6f}, {M_mount[i, 2]:8.6f}]")
+
+    LSB_PER_UT = 68.42
+    avg_radius = diag.get("avg_radius")
+    print(f"\nDiagnostics:")
+    print(f"  Samples: {result.num_samples}")
+    if level:
+        print(f"  Fit path: NEAR-LEVEL SUBSET, tilt-compensated")
+        print(f"    {level['num_level_samples']} of {level['num_samples']} samples within "
+              f"{level['tilt_window_deg']:.0f}° of level; largest azimuth gap "
+              f"{level['max_azimuth_gap_deg']:.0f}°")
+    else:
+        print(f"  Fit path: LEGACY all-samples XY (see notes below)")
+    if avg_radius:
+        print(f"  Circle radius: {avg_radius:.2f} counts  ({avg_radius/LSB_PER_UT:.2f} µT)")
+    print(f"  Per-axis scale: X={M_mount[0, 0]:.4f}  Y={M_mount[1, 1]:.4f}  Z=1.0000 (locked)")
+    print(f"  RMS error (after correction): {result.rms:.2f}  ({result.rms_pct:.2f}%)"
+          f"  [{result.quality_band.upper()}]")
+    print(f"  Max abs error: {result.max_abs_pct:.2f}%")
+    # The level path's residual is a horizontal circle residual and the legacy
+    # path's is an all-samples sphere residual, so they are graded against
+    # different bands. Two mounted cals' rms_pct are only comparable when the
+    # "Fit path" line above matches.
+    print(f"  {result.recommendation}")
+    for note in diag.get("notes", []):
+        print(f"  NOTE: {note}")
+
+    print("\n" + "="*60)
+    save_json_calibration(output_file, b_mount, M_mount)
+    warn_device_filename(output_file, "mag_mount.json")
+    print(f"\nNext steps:")
+    print(f"  1. Upload {output_file} to the device filesystem root as /mag_mount.json")
+    print(f"  2. Reboot device — it will apply the full base+mount correction chain")
+    print(f"     corrected = M_mount * (M_base * (raw - b_base) - b_mount)")
+    print(f"  3. Re-collect the heading (Fourier) cal from scratch — a mounted stage")
+    print(f"     change invalidates hdg_fourier.json, and nothing catches that on device.")
+
+
+def run_mounted_legacy(args, output_file, base_bias, base_soft_iron):
+    """--legacy-fit: the pre-2026-09-13 all-samples XY fit, kept for one job.
+
+    This is the fit that produced every mounted cal now installed on a device,
+    so it is how you reproduce what a unit is actually running — and how you
+    measure what refitting would change. It is not the fit to use for a new
+    calibration: it treats the procedure's deliberately tilted rings as level.
+    See load_callib_fit().
+    """
     print(f"\nLoading mounted cal samples from {args.input}...")
     raw_samples = load_csv(args.input)
     raw_samples = deduplicate(raw_samples)
@@ -806,6 +934,10 @@ Modes:
 
   mounted   Solve correction from base-corrected residuals → mag_mount.json
             Usage: python mag_calibration.py --mode mounted --base mag_base.json <mounted.csv>
+            Fitted by dive-map/calibration-processor's callib.fit (the one copy of
+            the fit math), from the near-level samples only — so this and the
+            server cannot disagree about the same CSV. Needs dive-map/ checked out
+            alongside dpv-nav/; --legacy-fit falls back to this script's own fit.
 
 Transform chain applied on device:
   corrected = M_mount * (M_base * (raw - b_base) - b_mount)
@@ -819,6 +951,10 @@ Transform chain applied on device:
                         help='(mounted mode) mag_base.json from previous baseline cal')
     parser.add_argument('--output', '-o', metavar='OUTPUT_JSON',
                         help='Output JSON filename (default: mag_base.json or mag_mount.json)')
+    parser.add_argument('--legacy-fit', action='store_true',
+                        help='(mounted mode) Use this script\'s own pre-2026-09-13 fit instead of '
+                             'calibration-processor\'s. Fits the procedure\'s tilted rings as if they '
+                             'were level; for reproducing an installed cal, not for making a new one.')
 
     args = parser.parse_args()
 

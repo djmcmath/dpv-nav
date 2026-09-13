@@ -523,8 +523,12 @@ static void drawLogIndicator(const NavPacket& pkt) {
     uint16_t color;
     const char* label;
     switch (level) {
+        // Wire values (logging.h): 1=LOW, 2=HIGH, 3=MID. L0/L1/L2 keep the
+        // meanings divers already know; MID gets its own label rather than
+        // renumbering HIGH.
         case 1:  color = COLOR_YELLOW; label = "L1"; break;
         case 2:  color = COLOR_RED;    label = "L2"; break;
+        case 3:  color = COLOR_YELLOW; label = "LM"; break;
         default: color = COLOR_GRAY;   label = "L0"; break;
     }
     tft.setTextSize(2);

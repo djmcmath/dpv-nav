@@ -10,13 +10,15 @@ nul
 tools/*.ods
 tools/old csv/*
 .~lock.*#
-*.lock__pycache__/
+*.lock
+__pycache__/
 
 # Host-compiled calibration test harnesses (tools/README.md) -- built on demand
 # by their own runner scripts, never checked in.
 tools/orient_equiv/harness
 tools/orient_equiv/chain
 tools/dpvlink_test/roundtrip
+tools/lognames_test/lognames
 
 # Device-auth bearer token written by the cloud-link tooling -- never commit.
 tools/device_token.json
@@ -24,6 +26,10 @@ tools/device_token.json
 # Dive-log CSVs captured off the device for analysis. Data, not source --
 # these are large and are kept locally rather than versioned.
 tools/logs/
+
+# Bench-capture CSVs kept beside the cal JSONs they were recorded against
+# ("baseline cal jsons/<date> .../"). Same rule as tools/logs/: data, not source.
+baseline cal jsons/**/*.csv
 
 # Per-machine PlatformIO config -- upload/monitor ports differ per dev box.
 platformio.ini

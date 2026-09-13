@@ -21,8 +21,14 @@ static NavPacket lastNav{};
 static bool navValid = false;
 static uint32_t lastNavMs = 0;
 
+// The debug screen is a bench tool, not a dive feature: it was a runtime menu
+// toggle (DISPLAY > Mode) nobody used, and it sat one button press away from
+// replacing the nav screen underwater. Build with -DDISPLAY_MODE=1 (and the nav
+// device with -DENABLE_DEBUG_PACKET=1) when you actually want it.
+#if DISPLAY_MODE
 static DebugPacket lastDebug{};
 static bool debugValid = false;
+#endif
 
 static CalProgressPacket lastCalProgress{};
 static bool calProgressValid  = false;
@@ -733,12 +739,16 @@ void loop() {
                 menu::render();
                 display::flush();
             } else {
-                // Normal full-screen nav or debug
-                if (menu::settings().debugMode && debugValid) {
+#if DISPLAY_MODE
+                // Bench build: raw sensor values instead of the nav screen.
+                if (debugValid) {
                     display::showDebug(lastDebug);
                 } else {
                     display::showNav(applyHeadingMode(lastNav));
                 }
+#else
+                display::showNav(applyHeadingMode(lastNav));
+#endif
             }
             } // end else (not DIST_SELECT)
         }
@@ -798,10 +808,12 @@ static void processNavLine() {
             }
         }
     } else if (ptype == PacketType::DEBUG) {
+#if DISPLAY_MODE
         if (bytesToDebugPacket(rxBuf, rxPos, lastDebug)) {
             debugValid = true;
             lastNavMs = millis();
         }
+#endif
     } else if (ptype == PacketType::CAL_PROGRESS) {
         if (bytesToCalProgressPacket(rxBuf, rxPos, lastCalProgress)) {
             calProgressValid   = true;

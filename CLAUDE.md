@@ -248,10 +248,9 @@ Runtime toggle states and estimated position are persisted to ESP32 NVS (Non-Vol
 | GPS speed enabled | `nav_state` | `gps_spd` | On toggle |
 | WiFi enabled | `nav_state` | `wifi` | On toggle |
 | Dive mode | `nav_state` | `dive_mode` | On toggle |
-| Log level (0/1/2) | `nav_state` | `log_level` | On cycle |
+| Log level (0=OFF/1=LOW/2=HIGH/3=MID) | `nav_state` | `log_level` | On cycle |
 | Estimated X position | `nav_state` | `pos_x` | Every `NVS_POS_SAVE_INTERVAL_MS` (30 s) |
 | Estimated Y position | `nav_state` | `pos_y` | Every `NVS_POS_SAVE_INTERVAL_MS` (30 s) |
-| Display mode (nav/debug) | `disp_state` | `debug_mode` | On toggle |
 | Show ETA vs speed | `disp_state` | `show_eta` | On toggle |
 | Imperial units | `disp_state` | `imperial` | On toggle |
 | True heading | `disp_state` | `true_heading` | On toggle |
@@ -308,7 +307,7 @@ The display device includes a hierarchical menu system ([src/menu/menu.h](src/me
 - **BTN1 short press**: Open menu (when closed) or cycle to next item (when open)
 - **BTN2 short press**: Select highlighted item (enter submenu, execute action, or go back)
 - **BTN1 + BTN2 held 2s**: Reset display device (sends `DisplayCmd::RESET`)
-- **45-second idle timeout**: Menu auto-closes; reopening within `MENU_RESUME_WINDOW_MS` (2 min) resumes at the same item rather than at the root
+- **15-second idle timeout**: Menu auto-closes; reopening within `MENU_RESUME_WINDOW_MS` (2 min) resumes at the same item rather than at the root, which is what keeps a short timeout from costing the diver their place
 
 ### Menu Structure
 ```
@@ -316,7 +315,7 @@ MENU (root)
 ├── Nav:     Select WP, Arrive WP, Mark, Op Mode
 ├── Cal:     Baseline, Fill gaps, Mounted, Hdg cal, Speed cal
 ├── Config:  GPS, WiFi, Log, Water, Link acct
-├── Display: Mode, Spd/ETA, Units, Heading
+├── Display: Spd/ETA, Units, Heading
 ├── OFF      — power off nav device (two presses; see below)
 └── Close    — auto-generated, leaves the menu
 ```
@@ -324,8 +323,20 @@ MENU (root)
 Each submenu has an auto-generated ".." back item; the root gets "Close". Both
 carry `Action::BACK` — do not go back to identifying them by label, the old
 `strcmp(label, "..")` test is precisely why the root could not have its own
-exit. Toggle items (GPS, Units, Mode, Op Mode, etc.) show current state inline
+exit. Toggle items (GPS, Units, Op Mode, etc.) show current state inline
 and stay open after toggle.
+
+**`CONFIG > Log` starts logging on a delay and stops it immediately.** The cycle
+is OFF → LOW → MID → HIGH → OFF, so every level is reachable only by passing through
+another, and opening on the keypress left a stub file every time a diver went
+past a level en route to the one they wanted. Now a LOW/HIGH selection only
+arms: the label and the NavPacket log-level flags change at once, but the file
+opens `LOG_COMMIT_DELAY_MS` (5 s) later via `logging::tick()` in the nav loop.
+**OFF is applied on the spot** by `cycleLevel()` itself — it opens nothing, and
+closing promptly is what makes the file visible to the auto-upload. So a
+LOW → HIGH → OFF sweep ends with the LOW file closed and intact and no HIGH file
+at all. `getLevel()` is the selection, `getActiveLevel()` is the open file's
+schema — anything deciding what to *write* must use the latter.
 
 ### Menu Safety Invariants (do not regress these)
 

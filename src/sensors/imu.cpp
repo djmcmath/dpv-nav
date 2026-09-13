@@ -1556,11 +1556,17 @@ ImuStatus initMag(TwoWire& wire) {
   }
 
   // Basic configuration:
-  // CTRL_REG1: ultra-high-performance on X/Y, 10 Hz (for now), temp disabled
-  // 0b01100000 = 0x60: TEMP_EN=0, OM=11 (UHP), DO=000 (0.625 Hz) – but let's bump to 10 Hz
-  // The datasheet uses different encoding; 0x70 gives DO ~20 Hz w/ UHP.
+  // CTRL_REG1 = 0xF0 = 0b1111_0000: TEMP_EN=1, OM=11 (ultra-high-performance
+  // on X/Y), DO=100 (10 Hz), FAST_ODR=0, ST=0.
+  //
+  // TEMP_EN was 0 until 2026-09-11 (the value was 0x70, and the comment here
+  // claimed "~20 Hz" — DO=100 is 10 Hz; the 20 Hz encoding is DO=101). The die
+  // temperature is enabled because the magnetometer's offset moves with
+  // temperature and the only other thermometer on the unit (MS5837, in the
+  // nose) lags it badly. Enabling it costs nothing: temperature conversion is
+  // independent of the magnetic channels.
   bool cfgOk = true;
-  cfgOk &= magWrite(LIS3MDL_REG_CTRL_REG1, 0x70); // UHP XY, ~20 Hz
+  cfgOk &= magWrite(LIS3MDL_REG_CTRL_REG1, 0xF0); // TEMP_EN, UHP XY, 10 Hz
 
   // CTRL_REG2: full-scale ±4 gauss (0x00) is fine
   cfgOk &= magWrite(LIS3MDL_REG_CTRL_REG2, 0x00);
@@ -1745,6 +1751,19 @@ ImuStatus readGyro_rad_s_raw_cal(Vec3f& rawOut, Vec3f& calOut) {
   float cal_dps_z = dps_z - (g_gyroCalibration.bias.z / g_gyro_lsb_per_dps);
   calOut = { dpsToRad(cal_dps_x), dpsToRad(cal_dps_y), dpsToRad(cal_dps_z) };
 
+  return ImuStatus::Ok;
+}
+
+ImuStatus readMagTemp_c(float& out) {
+  if (!mag_inited) return ImuStatus::NotInitialized;
+  uint8_t buffer[2];
+  magRead(LIS3MDL_REG_TEMP_OUT_L | 0x80, buffer, 2); // 0x80 for auto-increment
+
+  // Two's complement, little-endian. 8 LSB/degC, nominal zero at 25 degC. The
+  // offset is not factory-trimmed, so treat the absolute value as indicative
+  // and the CHANGE as the real measurement (see imu.h).
+  int16_t raw = (int16_t)(buffer[1] << 8 | buffer[0]);
+  out = 25.0f + (float)raw / 8.0f;
   return ImuStatus::Ok;
 }
 

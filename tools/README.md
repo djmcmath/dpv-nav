@@ -85,6 +85,37 @@ Snapping a waypoint at the wreck (a `W` row) splits that useless loop into two
 informative legs, which is enough to solve for speed factor, heading offset
 **and** the current, exactly. `--mode auto` will say so when it happens.
 
+## circle_audit.py — bench heading check against a reference compass
+
+Scores a level "circle test" log (log level HIGH; stop every 10° by a reference
+compass -- or any multiple of `--step`, inferred per stop, so uneven spacing and
+an accidental extra stop are both fine -- through one or more circles each way,
+e.g. CW, CW, CCW, CCW, optionally after a static lead-in at the first heading). Reports displayed error per bin
+(samples / stops / mean / max), worst case and RMS, per-circle error and
+horizontal field centre, circle-vs-circle differences (separates time effects from
+direction effects), the constant / 1 / 2 / 3-cycle decomposition (displayed and
+pre-Fourier), the loaded Fourier vs a refit on this data (a stale heading cal shows
+up here), the |B| and level-|Bh| gates with a horizontal circle fit, held-out
+scoring, field drift over a static lead-in, and -- with `--mount` -- what a
+level-only mounted fit would give vs the installed mount stage. Drift is
+correlated against `mag_temp_c` (the LIS3MDL's own die temperature) when the log
+has it, falling back to `water_temp_c`, which lags the sensor by ~23 s; the
+header line says which column it used. A static-only log
+gets just the drift report. `--fourier` must be the heading cal that was installed
+while the log was recorded.
+
+```bash
+python circle_audit.py "logs/high log circles.csv" \
+    --fourier "../baseline cal jsons/20260911 cal files/hdg_fourier (1).json" \
+    --mount   "../baseline cal jsons/20260911 cal files/mag_mount (1).json"
+```
+
+Check the stop-matching line first: it assumes the first stop is `--first-actual`
+(default 000) and auto-picks where the return sweep started; override with
+`--second-start` if it guessed wrong. With one circle each way, a change over
+time and a direction-dependent effect look identical -- run two circles each way
+to separate them.
+
 ## Future Tools
 
 - **log_analyzer.py**: Parse and visualize LittleFS data logs

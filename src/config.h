@@ -69,6 +69,21 @@ constexpr uint32_t NVS_POS_SAVE_INTERVAL_MS = 30000;  // 30 seconds
 // Data logging intervals (ms) — minimum time between log entries per level
 constexpr uint32_t LOG_LOW_INTERVAL_MS  = 1000;   // 1 entry per second (LOW level)
 constexpr uint32_t LOG_HIGH_INTERVAL_MS = 1000;   // 1 entry per second (HIGH level)
+// MID: LOW's columns plus mag_*_cal, pitch/roll and mag_temp_c — enough to
+// diagnose a heading problem on a real dive, which HIGH cannot cover. HIGH costs
+// ~241 B/row (~850 KiB/hour at 1 Hz) against a 768 KiB LittleFS partition
+// (partitions_nav.csv), so it runs dry in under an hour; MID is ~140 B/row, and
+// at 1.5 s that is ~330 KiB/hour — roughly 2.2 hours before cleanupOldLogs()
+// starts pruning.
+constexpr uint32_t LOG_MID_INTERVAL_MS  = 1500;   // 1 entry per 1.5 s (MID level)
+
+// How long a LOW or HIGH selection must be left alone before a log file is
+// actually opened. CONFIG > Log cycles OFF -> LOW -> HIGH -> OFF, so reaching
+// any given level means passing *through* the others; opening on the keypress
+// left a stub file every time a diver went past a level on the way to the one
+// they wanted. The level shown on screen still changes immediately, and OFF
+// still stops logging on the spot — only opening a new file waits.
+constexpr uint32_t LOG_COMMIT_DELAY_MS  = 5000;   // 5 s settle before a file opens
 
 
 // ---------------------------------------------------------------------------

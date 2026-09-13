@@ -44,7 +44,6 @@ enum HeadingMode : uint8_t {
 };
 
 struct State {
-    bool    debug_mode;    // true=debug view, false=nav view
     bool    show_eta;      // true=show ETA, false=show speed
     bool    imperial;      // true=ft/mi, false=m/km
     uint8_t heading_mode;  // HeadingMode; never persists as HEADING_RAW (see load())

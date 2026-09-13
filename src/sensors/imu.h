@@ -46,6 +46,15 @@ ImuStatus readAccel_g(Vec3f& out);        // g
 ImuStatus readGyro_rad_s(Vec3f& out);     // rad/s
 ImuStatus readMag_uT(Vec3f& out);         // µT (or "sensor units" if you don't have scale yet)
 
+// LIS3MDL die temperature, degrees C. Same die as the magnetometer, so this is
+// the thermometer that matters for thermal drift of the hard-iron offset — the
+// MS5837's reading (depth::getTemp_c()) lags it by ~23 s, measured 2026-09-11.
+//
+// ABSOLUTE VALUE IS NOT TRUSTWORTHY: sensitivity is 8 LSB/°C with zero at 25 °C
+// per the datasheet, but the offset is not factory-trimmed and can be off by
+// several degrees. Use it for CHANGE, not as a room thermometer.
+ImuStatus readMagTemp_c(float& out);
+
 // Converted units with both raw and calibrated outputs:
 ImuStatus readAccel_g_raw_cal(Vec3f& rawOut, Vec3f& calOut);  // g (raw = uncalibrated, cal = with bias/scale applied)
 ImuStatus readGyro_rad_s_raw_cal(Vec3f& rawOut, Vec3f& calOut);  // rad/s (raw = uncalibrated, cal = with bias applied)

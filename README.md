@@ -28,7 +28,9 @@ Workflow and usage:
 -- You can keep it as something that you connect to with a wireless device, or you can set it to automatically connect to a known wireless network.  Calibration is much easier if it has a good full-time wireless connection.
 -- Make sure wireless is on ("WiFi AP" in white (or green), not gray, on the display)
 -- Connect to wireless AP "Tern," with password "password", then browse to 192.168.4.1.
--- Enter your wireless network information in the appropriate part of the page.  It'll autoconnect to that network at next boot, if it's available.  Then it should appear as "tern.local" on your network.
+-- In the "WiFi Networks" section, press "Scan for networks," pick yours off the list, and type the password.  (The page goes quiet for a few seconds during the scan -- the radio has to leave the Tern AP to listen.)  It'll autoconnect to that network at next boot, if it's available.  Then it should appear as "tern.local" on your network.
+-- Hidden networks and phone hotspots don't show up in a scan, so type the name in by hand and tick "Hidden network / phone hotspot"; the unit then tries it by name whether or not it's beaconing.  Two things bite people here, both on the phone: the unit is 2.4 GHz only (iPhone: turn on *Personal Hotspot > Maximize Compatibility*; Android: set the hotspot band to 2.4 GHz), and the hotspot has to actually be awake, so leave the Personal Hotspot screen open while pairing.
+-- A phone can't serve its own hotspot and stay joined to the Tern AP at the same time.  Save the credentials from the phone first, then leave the page and switch the hotspot on -- the unit picks it up within about a minute on its own.  From a laptop or a second phone, "Try now" next to a saved network forces the attempt immediately.
 - Pair the device with the cloud.
 -- Create an account on https://map.terndiving.com.
 -- In the upper right corner, select the "gear" icon, then "My Devices," then "link a device."

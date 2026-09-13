@@ -15,12 +15,12 @@ constexpr int MAX_ITEMS       = 8;    // max items per submenu (including auto b
 constexpr int MAX_MENU_DEPTH  = 3;    // max nesting depth (root + 2 levels)
 constexpr int MENU_LABEL_LEN  = 12;   // max chars for item label
 
-constexpr uint32_t MENU_TIMEOUT_MS = 45000;  // auto-close after 45 s idle
+constexpr uint32_t MENU_TIMEOUT_MS = 15000;  // auto-close after 15 s idle
 
 // After an idle timeout, reopening the menu within this window resumes at the
 // item the diver was last on instead of dumping them back at the root. Hunting
-// seven items deep for Log with gloves on, twice, is how the old 15 s timeout
-// lost people mid-dive.
+// seven items deep for Log with gloves on, twice, is what made a short timeout
+// expensive; the resume point is what makes 15 s affordable again.
 constexpr uint32_t MENU_RESUME_WINDOW_MS = 120000;
 
 // ---------------------------------------------------------------------------
@@ -41,7 +41,8 @@ enum class Action : uint8_t {
     INPUT_WIFI    = 10,
     INPUT_LOG_CYCLE = 11,
     // Local display-device settings
-    DISP_MODE     = 12,  // debug vs navigate
+    // 12 retired (was DISP_MODE — the nav/debug view toggle; the debug screen is
+    // now compile-time only, see DISPLAY_MODE in config.h)
     DISP_SPD_ETA  = 13,  // speed vs ETA
     DISP_UNITS    = 14,  // m vs ft
     DISP_HDG_TYPE = 15,  // mag vs true
@@ -75,7 +76,6 @@ struct SubMenu {
 // Local display settings (toggle states visible to menu)
 // ---------------------------------------------------------------------------
 struct DisplaySettings {
-    bool    debugMode;    // true = debug, false = nav
     bool    showETA;      // true = ETA, false = speed
     bool    imperial;     // true = ft, false = m
     uint8_t headingMode;  // nvs_disp::HeadingMode (TRUE / MAG / RAW)

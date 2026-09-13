@@ -69,11 +69,10 @@ MENU
 ├── CONFIG
 │   ├── GPS        — toggle GPS position + speed on/off (shows current state)
 │   ├── WiFi       — toggle WiFi on/off
-│   ├── Log        — cycle log level: off / low / high
+│   ├── Log        — cycle log level: off / low / high (off is immediate; low/high start 5 s later)
 │   ├── Water      — toggle salt/fresh water density for depth calc (see Depth Sensor below)
 │   └── Link acct  — begin device-auth cloud account link
 ├── DISPLAY
-│   ├── Mode       — toggle debug vs navigate display
 │   ├── Spd/ETA    — toggle speed vs ETA readout
 │   ├── Units      — toggle meters vs feet (applies to distance, speed, and depth)
 │   └── Heading    — toggle magnetic vs true heading
@@ -82,6 +81,15 @@ MENU
 ```
 
 Toggle items show their current state (e.g., "Units: m", "Op Mode: SURF") and stay open after toggling. Non-toggle items (Baseline, Fill gaps, Mounted, Hdg cal, Mark) execute and close the menu. Select WP and Arrive WP open the waypoint selector UI.
+
+**Logging starts on a delay and stops immediately.** The cycle is off → low →
+high → off, so getting to any level means passing through the others. The menu
+label updates as soon as you press, but a **low** or **high** selection waits 5
+seconds of no further presses before a log file is actually opened — so passing
+through a level on the way to the one you want no longer leaves a stub one-row
+file behind. Landing on **off** takes effect at once: the open file is closed
+immediately, which is also what makes it available to the automatic upload. If
+you want high, wait for the label to sit still on `Log:HI` before backing out.
 
 **OFF needs two presses.** The first BTN2 on OFF arms it and the item repaints as `OFF:SURE?`; a second BTN2 shuts the unit down. Pressing BTN1 (or letting the menu time out) disarms it. OFF sits second-to-last on purpose, with the harmless **Close** after it, so overshooting the end of the list lands on a no-op rather than on the one action you cannot undo underwater.
 
@@ -283,7 +291,7 @@ An optional BlueRobotics Bar30 (MS5837-30BA) connects to the nav board's J3 head
 
 ## Display Modes
 
-The display mode can be toggled at runtime via the **DISPLAY > Mode** menu item (or set at compile time via `DISPLAY_MODE` in [src/config.h](../src/config.h)).
+Divers only ever see navigation mode. Debug mode is a bench build: set `DISPLAY_MODE 1` in [src/config.h](../src/config.h) (and `ENABLE_DEBUG_PACKET 1` so the nav device actually sends the sensor data) and reflash. It used to be a runtime toggle at **DISPLAY > Mode**, which nobody used and which sat one button press away from replacing the nav screen underwater.
 
 ### Navigation Mode (`DISPLAY_MODE 0`)
 

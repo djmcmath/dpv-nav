@@ -11,7 +11,15 @@ namespace logging {
 // State
 // ---------------------------------------------------------------------------
 static bool     gReady    = false;   // init() succeeded
-static LogLevel gLevel    = LogLevel::LEVEL_OFF;
+
+// Two levels, because selecting one and acting on it are deliberately separated
+// by LOG_COMMIT_DELAY_MS (see config.h). gLevel is what the diver picked and
+// what the UI reports; gActiveLevel is what the open file — if any — actually
+// is, and it alone decides the CSV schema.
+static LogLevel gLevel       = LogLevel::LEVEL_OFF;
+static LogLevel gActiveLevel = LogLevel::LEVEL_OFF;
+static uint32_t gLevelSetMs  = 0;    // millis() of the last cycleLevel()
+
 static File     gLogFile;
 static char     gLogPath[32] = "";
 static uint16_t gNextNum  = 1;       // next sequential file number
@@ -83,11 +91,17 @@ static void cleanupOldLogs() {
 // Write CSV header appropriate for the current level.
 static void writeHeader() {
     if (!gLogFile) return;
-    if (gLevel == LogLevel::LEVEL_LOW) {
+    if (gActiveLevel == LogLevel::LEVEL_LOW) {
         gLogFile.print("timestamp_ms,local_time,heading_deg,speed_ms,speed_src,"
                        "pos_x_m,pos_y_m,lat,lon,pos_src,"
                        "gps_satellites,gps_hdop,depth_m,water_temp_c\n");
-    } else if (gLevel == LogLevel::LEVEL_HIGH) {
+    } else if (gActiveLevel == LogLevel::LEVEL_MID) {
+        gLogFile.print("timestamp_ms,local_time,heading_deg,speed_ms,speed_src,"
+                       "pos_x_m,pos_y_m,lat,lon,pos_src,"
+                       "gps_satellites,gps_hdop,depth_m,water_temp_c,"
+                       "mag_x_cal,mag_y_cal,mag_z_cal,"
+                       "pitch_deg,roll_deg,mag_temp_c\n");
+    } else if (gActiveLevel == LogLevel::LEVEL_HIGH) {
         gLogFile.print("timestamp_ms,local_time,heading_deg,speed_ms,speed_src,"
                        "pos_x_m,pos_y_m,lat,lon,pos_src,"
                        "gps_satellites,gps_hdop,depth_m,water_temp_c,"
@@ -97,9 +111,11 @@ static void writeHeader() {
                        "mag_x_cal,mag_y_cal,mag_z_cal,"
                        "accel_x_cal,accel_y_cal,accel_z_cal,"
                        "gyro_x_cal,gyro_y_cal,gyro_z_cal,"
-                       "pitch_deg,roll_deg\n");
+                       "pitch_deg,roll_deg,mag_temp_c\n");
     }
 }
+
+static const char* levelName(LogLevel l);  // defined below, beside cycleLevel()
 
 // Open a new log file with the next sequential number.
 static bool openNextFile() {
@@ -109,8 +125,7 @@ static bool openNextFile() {
         Serial.printf("[LOG] Error: could not open %s\n", gLogPath);
         return false;
     }
-    Serial.printf("[LOG] Opened %s (level %s)\n", gLogPath,
-                  gLevel == LogLevel::LEVEL_LOW ? "LOW" : "HIGH");
+    Serial.printf("[LOG] Opened %s (level %s)\n", gLogPath, levelName(gActiveLevel));
     gNextNum++;
     writeHeader();
     return true;
@@ -145,8 +160,10 @@ bool init() {
     // Clean up old logs if space is low.
     cleanupOldLogs();
 
-    gLevel = LogLevel::LEVEL_OFF;
-    gReady = true;
+    gLevel       = LogLevel::LEVEL_OFF;
+    gActiveLevel = LogLevel::LEVEL_OFF;
+    gLevelSetMs  = millis();
+    gReady       = true;
 
     size_t freeBytes = LittleFS.totalBytes() - LittleFS.usedBytes();
     Serial.printf("[LOG] Init OK, next file: %s/%03u.csv, free: %u bytes\n",
@@ -156,65 +173,137 @@ bool init() {
 
 void shutdown() {
     closeFile();
-    gReady = false;
-    gLevel = LogLevel::LEVEL_OFF;
+    gReady       = false;
+    gLevel       = LogLevel::LEVEL_OFF;
+    gActiveLevel = LogLevel::LEVEL_OFF;
 }
 
 LogLevel getLevel() {
     return gLevel;
 }
 
+LogLevel getActiveLevel() {
+    return gActiveLevel;
+}
+
+// Close whatever is open and, unless the target is OFF, start a fresh file at
+// the new level. The only place gActiveLevel moves.
+static void applyLevel(LogLevel level) {
+    closeFile();
+    gActiveLevel = level;
+    if (gActiveLevel != LogLevel::LEVEL_OFF) {
+        openNextFile();
+    }
+}
+
+static const char* levelName(LogLevel l) {
+    switch (l) {
+        case LogLevel::LEVEL_LOW:  return "LOW";
+        case LogLevel::LEVEL_MID:  return "MID";
+        case LogLevel::LEVEL_HIGH: return "HIGH";
+        default:                   return "OFF";
+    }
+}
+
 void cycleLevel() {
     if (!gReady) return;
 
-    // Close existing file when transitioning to OFF or changing level
-    // (different level = different CSV schema = new file).
     LogLevel prev = gLevel;
 
     switch (gLevel) {
         case LogLevel::LEVEL_OFF:  gLevel = LogLevel::LEVEL_LOW;  break;
-        case LogLevel::LEVEL_LOW:  gLevel = LogLevel::LEVEL_HIGH; break;
+        case LogLevel::LEVEL_LOW:  gLevel = LogLevel::LEVEL_MID;  break;
+        case LogLevel::LEVEL_MID:  gLevel = LogLevel::LEVEL_HIGH; break;
         case LogLevel::LEVEL_HIGH: gLevel = LogLevel::LEVEL_OFF;  break;
     }
+    gLevelSetMs = millis();
 
-    Serial.printf("[LOG] Level: %s -> %s\n",
-                  prev == LogLevel::LEVEL_OFF ? "OFF" : (prev == LogLevel::LEVEL_LOW ? "LOW" : "HIGH"),
-                  gLevel == LogLevel::LEVEL_OFF ? "OFF" : (gLevel == LogLevel::LEVEL_LOW ? "LOW" : "HIGH"));
-
-    // Close previous file on any transition (schema changes between LOW/HIGH).
-    closeFile();
-
-    // Open new file if moving to an active level.
-    if (gLevel != LogLevel::LEVEL_OFF) {
-        openNextFile();
+    // Stopping is never deferred. The delay exists to stop a level the diver
+    // only passed through from creating a file; OFF creates nothing, and
+    // closing now is what makes the file available to the auto-upload. It also
+    // means the file open on the way in gets closed rather than replaced: a
+    // LOW -> HIGH -> OFF sweep ends with the LOW file intact and no HIGH file
+    // at all.
+    if (gLevel == LogLevel::LEVEL_OFF) {
+        Serial.printf("[LOG] Level: %s -> OFF (immediate)\n", levelName(prev));
+        applyLevel(gLevel);
+        return;
     }
+
+    // LOW/HIGH are a selection only — tick() opens the file once the diver has
+    // stopped pressing for LOG_COMMIT_DELAY_MS.
+    Serial.printf("[LOG] Level: %s -> %s (pending, %lu ms)\n",
+                  levelName(prev), levelName(gLevel),
+                  (unsigned long)LOG_COMMIT_DELAY_MS);
 }
 
 void setLevel(LogLevel level) {
-    if (!gReady || gLevel == level) return;
-    closeFile();
-    gLevel = level;
-    if (gLevel != LogLevel::LEVEL_OFF) {
-        openNextFile();
-    }
+    if (!gReady) return;
+    gLevel      = level;
+    gLevelSetMs = millis();
+    if (gActiveLevel == level) return;
+    applyLevel(level);
+}
+
+void tick() {
+    if (!gReady) return;
+    // Only ever LOW or HIGH: cycleLevel() applies OFF on the spot, so a pending
+    // change here always ends in a file being opened.
+    if (gLevel == gActiveLevel) return;                        // nothing pending
+    if (millis() - gLevelSetMs < LOG_COMMIT_DELAY_MS) return;  // still settling
+
+    Serial.printf("[LOG] Level committed: %s -> %s\n",
+                  levelName(gActiveLevel), levelName(gLevel));
+    applyLevel(gLevel);
 }
 
 bool isLogging() {
-    return gReady && gLevel != LogLevel::LEVEL_OFF;
+    return gReady && gActiveLevel != LogLevel::LEVEL_OFF;
+}
+
+// Columns beyond LOW's common set, per level. Shared by log() and logImmediate()
+// so the two can't drift apart on schema — they already duplicated the common
+// set, and a third copy of the per-level tail is how a header stops matching its
+// rows.
+static void writeLevelColumns(const LogData& d) {
+    if (gActiveLevel == LogLevel::LEVEL_MID) {
+        gLogFile.printf(",%.3f,%.3f,%.3f,%.2f,%.2f,%.2f",
+                        d.mag_cal.x, d.mag_cal.y, d.mag_cal.z,
+                        d.pitch_deg, d.roll_deg, d.mag_temp_c);
+    } else if (gActiveLevel == LogLevel::LEVEL_HIGH) {
+        gLogFile.printf(",%.3f,%.3f,%.3f"
+                        ",%.3f,%.3f,%.3f"
+                        ",%.3f,%.3f,%.3f"
+                        ",%.3f,%.3f,%.3f"
+                        ",%.3f,%.3f,%.3f"
+                        ",%.3f,%.3f,%.3f"
+                        ",%.2f,%.2f,%.2f",
+                        d.mag_raw.x, d.mag_raw.y, d.mag_raw.z,
+                        d.accel_raw.x, d.accel_raw.y, d.accel_raw.z,
+                        d.gyro_raw.x, d.gyro_raw.y, d.gyro_raw.z,
+                        d.mag_cal.x, d.mag_cal.y, d.mag_cal.z,
+                        d.accel_cal.x, d.accel_cal.y, d.accel_cal.z,
+                        d.gyro_cal.x, d.gyro_cal.y, d.gyro_cal.z,
+                        d.pitch_deg, d.roll_deg, d.mag_temp_c);
+    }
 }
 
 void log(const LogData& d) {
-    if (!gReady || gLevel == LogLevel::LEVEL_OFF || !gLogFile) return;
+    if (!gReady || gActiveLevel == LogLevel::LEVEL_OFF || !gLogFile) return;
 
     // Throttle log rate per level.
     {
         static uint32_t lastLowLogMs  = 0;
+        static uint32_t lastMidLogMs  = 0;
         static uint32_t lastHighLogMs = 0;
         uint32_t now = millis();
-        if (gLevel == LogLevel::LEVEL_LOW) {
+        if (gActiveLevel == LogLevel::LEVEL_LOW) {
             if (now - lastLowLogMs < LOG_LOW_INTERVAL_MS) return;
             lastLowLogMs = now;
-        } else if (gLevel == LogLevel::LEVEL_HIGH) {
+        } else if (gActiveLevel == LogLevel::LEVEL_MID) {
+            if (now - lastMidLogMs < LOG_MID_INTERVAL_MS) return;
+            lastMidLogMs = now;
+        } else if (gActiveLevel == LogLevel::LEVEL_HIGH) {
             if (now - lastHighLogMs < LOG_HIGH_INTERVAL_MS) return;
             lastHighLogMs = now;
         }
@@ -251,22 +340,7 @@ void log(const LogData& d) {
 
     gLogFile.printf(",%.2f,%.2f", d.depth_m, d.water_temp_c);
 
-    if (gLevel == LogLevel::LEVEL_HIGH) {
-        gLogFile.printf(",%.3f,%.3f,%.3f"
-                        ",%.3f,%.3f,%.3f"
-                        ",%.3f,%.3f,%.3f"
-                        ",%.3f,%.3f,%.3f"
-                        ",%.3f,%.3f,%.3f"
-                        ",%.3f,%.3f,%.3f"
-                        ",%.2f,%.2f",
-                        d.mag_raw.x, d.mag_raw.y, d.mag_raw.z,
-                        d.accel_raw.x, d.accel_raw.y, d.accel_raw.z,
-                        d.gyro_raw.x, d.gyro_raw.y, d.gyro_raw.z,
-                        d.mag_cal.x, d.mag_cal.y, d.mag_cal.z,
-                        d.accel_cal.x, d.accel_cal.y, d.accel_cal.z,
-                        d.gyro_cal.x, d.gyro_cal.y, d.gyro_cal.z,
-                        d.pitch_deg, d.roll_deg);
-    }
+    writeLevelColumns(d);
 
     gLogFile.print('\n');
 
@@ -280,7 +354,7 @@ void log(const LogData& d) {
 }
 
 void logImmediate(const LogData& d) {
-    if (!gReady || gLevel == LogLevel::LEVEL_OFF || !gLogFile) return;
+    if (!gReady || gActiveLevel == LogLevel::LEVEL_OFF || !gLogFile) return;
 
     char localTimeBuf[24] = "";
     time_t now_t = time(nullptr);
@@ -310,22 +384,7 @@ void logImmediate(const LogData& d) {
 
     gLogFile.printf(",%.2f,%.2f", d.depth_m, d.water_temp_c);
 
-    if (gLevel == LogLevel::LEVEL_HIGH) {
-        gLogFile.printf(",%.3f,%.3f,%.3f"
-                        ",%.3f,%.3f,%.3f"
-                        ",%.3f,%.3f,%.3f"
-                        ",%.3f,%.3f,%.3f"
-                        ",%.3f,%.3f,%.3f"
-                        ",%.3f,%.3f,%.3f"
-                        ",%.2f,%.2f",
-                        d.mag_raw.x, d.mag_raw.y, d.mag_raw.z,
-                        d.accel_raw.x, d.accel_raw.y, d.accel_raw.z,
-                        d.gyro_raw.x, d.gyro_raw.y, d.gyro_raw.z,
-                        d.mag_cal.x, d.mag_cal.y, d.mag_cal.z,
-                        d.accel_cal.x, d.accel_cal.y, d.accel_cal.z,
-                        d.gyro_cal.x, d.gyro_cal.y, d.gyro_cal.z,
-                        d.pitch_deg, d.roll_deg);
-    }
+    writeLevelColumns(d);
 
     gLogFile.print('\n');
     gLogFile.flush();

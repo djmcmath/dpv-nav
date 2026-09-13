@@ -28,6 +28,26 @@ python mag_calibration.py --mode mounted --base mag_base.json mag_mounted_sample
 ```
 Output: `mag_mount.json`
 
+Mounted mode does not fit here. It calls `dive-map/calibration-processor`'s
+`callib.fit.fit_mounted()` — the one copy of the fit math — so this script and the
+server cannot answer differently for the same CSV, which is the whole point of that
+module's "one copy" rule. It therefore needs **dive-map/ checked out alongside
+dpv-nav/**, the same sibling-checkout assumption `orient_equivalence.py` makes. If it
+isn't there the script says so and stops rather than quietly fitting a different way.
+
+That fit uses only the samples within 15° of level, tilt-compensated. The collection
+procedure deliberately gathers nose-up and nose-down rings (the device's mounted
+coverage grid requires them), and fitting those as if they were level pours vertical
+field into the XY plane — worth ~0.9 µT per degree of tilt, which is what produced the
+lopsided scales seen on real units. A CSV with no accel columns (pre-9-axis firmware)
+can't be fitted this way and falls back to the old all-samples fit, saying so in a NOTE.
+Check the **Fit path** line in the output: a mounted cal's RMS % is only comparable to
+another fitted by the same path.
+
+`--legacy-fit` forces this script's own pre-2026-09-13 fit. Its one job is reproducing
+what an already-installed cal contains (and measuring what refitting would change) — it
+is not the way to make a new calibration.
+
 ### Quality Indicators
 
 **Baseline:**

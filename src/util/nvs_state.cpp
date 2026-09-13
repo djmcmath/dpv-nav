@@ -32,6 +32,11 @@ State load() {
     s.wifi       = prefs.getBool ("wifi",       true);
     s.dive_mode  = prefs.getBool ("dive_mode",  false);
     s.log_level  = prefs.getUChar("log_level",  0);
+    // Only 0..3 are real levels (OFF/LOW/HIGH/MID — MID appended as 3, see
+    // logging.h). Anything else is a corrupt record or one written by a build
+    // that numbered them differently; casting it to LogLevel would select a
+    // schema that doesn't exist.
+    if (s.log_level > 3) s.log_level = 0;
     s.pos_x      = prefs.getFloat("pos_x",      0.0f);
     s.pos_y      = prefs.getFloat("pos_y",      0.0f);
     // NVS is a second place a NaN can outlive a reboot. Dead reckoning does
@@ -102,13 +107,11 @@ State load() {
     State s;
     Preferences prefs;
     if (!prefs.begin(DISP_NS, /*readOnly=*/true)) {
-        s.debug_mode   = false;
         s.show_eta     = false;
         s.imperial     = false;
         s.heading_mode = HEADING_TRUE;
         return s;
     }
-    s.debug_mode   = prefs.getBool("debug_mode",   false);
     s.show_eta     = prefs.getBool("show_eta",      false);
     s.imperial     = prefs.getBool("imperial",      false);
 
@@ -131,7 +134,6 @@ State load() {
 void save(const State& s) {
     Preferences prefs;
     if (!prefs.begin(DISP_NS, /*readOnly=*/false)) return;
-    prefs.putBool("debug_mode",   s.debug_mode);
     prefs.putBool("show_eta",     s.show_eta);
     prefs.putBool("imperial",     s.imperial);
     // Persist RAW as MAG rather than refusing to save: the diver's *other*

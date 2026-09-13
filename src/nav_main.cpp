@@ -342,6 +342,14 @@ static void sendNavPacket(float heading, float headingRaw, float pitch, float ro
                           float posX, float posY,
                           const GpsFix& fix);
 static void sendWaypointListPacket();
+#if ENABLE_DEBUG_PACKET
+// Bench build only (see DISPLAY_MODE / ENABLE_DEBUG_PACKET in config.h): the
+// definition sits below its call site, so without this the debug build does not
+// compile at all.
+static void sendDebugPacket(const imu::Vec3f& accel, const imu::Vec3f& gyro,
+                            const imu::Vec3f& mag,
+                            float headingDeg, float pitchDeg, float rollDeg);
+#endif
 static void handleDisplayCmd();
 static void setDiveMode(bool dive);
 
@@ -861,6 +869,11 @@ void loop() {
     if (!useGpsSpeed && speed < DR_MIN_FLOW_SPEED_MS) speed = 0.0f;
     nav::updateDR(headingDeg, speed, dt);
 
+    // --- Commit any settled log-level change --------------------------------
+    // CONFIG > Log only records the selection; the file open/close happens here
+    // once it has held still for LOG_COMMIT_DELAY_MS.
+    logging::tick();
+
     // --- Send NavPacket at link rate ----------------------------------------
     uint32_t nowMs = millis();
     if (nowMs - lastSendMs >= SEND_INTERVAL_MS) {
@@ -894,6 +907,12 @@ void loop() {
             ld.gyro_cal      = gyro;
             ld.pitch_deg     = pitchDeg;
             ld.roll_deg      = rollDeg;
+            // Die temperature is only written at MID/HIGH, so don't spend an
+            // I2C read per loop at LOW. NaN if the read fails — see logging.h.
+            ld.mag_temp_c    = NAN;
+            if (logging::getActiveLevel() != logging::LogLevel::LEVEL_LOW) {
+                imu::readMagTemp_c(ld.mag_temp_c);
+            }
             logging::log(ld);
         }
     }
@@ -1712,6 +1731,11 @@ static void handleDisplayCmd() {
                             ld.gps_hdop       = fix.has_fix ? fix.hdop       : 0.0f;
                             ld.depth_m        = depth::isPresent() ? depth::getDepth_m() : 0.0f;
                             ld.water_temp_c   = depth::isPresent() ? depth::getTemp_c()  : 0.0f;
+                            // The sensor fields of a MARK row are not sampled
+                            // here (they stay zero — a known wart), but a zero
+                            // die temperature would read as a real -25 degC
+                            // offset, so say "missing" outright.
+                            ld.mag_temp_c     = NAN;
                             logging::logImmediate(ld);
                         }
                         break;
@@ -1862,6 +1886,10 @@ static void handleDisplayCmd() {
                         nvs_nav::save(currentNavNvsState());
                         break;
                     case DisplayCmd::CYCLE_LOG_LEVEL:
+                        // Selection only — logging::tick() opens/closes the file
+                        // once the diver settles on a level. The NVS write is
+                        // still immediate so the choice survives a power cycle
+                        // even if they shut down inside the settle window.
                         logging::cycleLevel();
                         nvs_nav::save(currentNavNvsState());
                         break;
@@ -2082,6 +2110,10 @@ static void handleDisplayCmd() {
                                 ld.gps_hdop       = fix.has_fix ? fix.hdop       : 0.0f;
                                 ld.depth_m        = depth::isPresent() ? depth::getDepth_m() : 0.0f;
                                 ld.water_temp_c   = depth::isPresent() ? depth::getTemp_c()  : 0.0f;
+                                // Same as the MARK row: sensor fields aren't
+                                // sampled here, and a zero die temperature
+                                // would read as a real -25 degC.
+                                ld.mag_temp_c     = NAN;
                                 logging::logImmediate(ld);
                             }
                         } else {
@@ -2098,6 +2130,12 @@ static void handleDisplayCmd() {
                             nvs_nav::savePosition(pos.x_m, pos.y_m);
                         }
                         nvs_nav::save(currentNavNvsState());
+                        // Flush and close any open log file. Deep sleep does not
+                        // unwind LittleFS, and a level change made inside the
+                        // LOG_COMMIT_DELAY_MS window has not been acted on yet —
+                        // so "set Log to OFF, then power off" can still arrive
+                        // here with a file open.
+                        logging::shutdown();
                         // Power down GPS (fix is retained by module's backup battery).
                         gps::setEnabled(false);
                         Serial.flush();

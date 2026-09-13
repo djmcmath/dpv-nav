@@ -83,7 +83,7 @@ constexpr uint8_t FLAG_HAS_HOME        = 0x04;  // 1 = home position set
 constexpr uint8_t FLAG_GPS_ENABLED     = 0x08;  // 1 = GPS usage enabled (position + speed)
 constexpr uint8_t FLAG_WIFI_ENABLED    = 0x10;  // 1 = WiFi radio enabled
 // 0x20 retired (was FLAG_GPS_SPD_ENABLED — GPS position/speed toggles merged into one)
-constexpr uint8_t FLAG_LOG_LEVEL_MASK  = 0xC0;  // bits 7:6 — log level (0=OFF, 1=LOW, 2=HIGH)
+constexpr uint8_t FLAG_LOG_LEVEL_MASK  = 0xC0;  // bits 7:6 — log level (0=OFF, 1=LOW, 2=HIGH, 3=MID)
 constexpr uint8_t FLAG_LOG_LEVEL_SHIFT = 6;
 
 // NavPacket.flags2 bit definitions

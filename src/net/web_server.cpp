@@ -93,7 +93,22 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
     border-radius: 4px; cursor: pointer; font-weight: bold; margin-right: .5rem; }
   .wifisec button:hover { background: #72efdd; }
   #wifista { color: #aaa; font-size: .85rem; margin: .4rem 0 .6rem; }
-  #wifistat2 { margin-top: .4rem; font-size: .9rem; color: #72efdd; }
+  #wifistat2 { margin-top: .4rem; font-size: .9rem; color: #72efdd; min-height: 1.2em; }
+  .wifisec .tag { font-size: .7rem; background: #333; color: #aaa; border-radius: 3px;
+    padding: .05rem .3rem; margin-left: .4rem; vertical-align: middle; }
+  .wifisec .btn { margin-left: .4rem; }
+  #scanout { margin: .4rem 0 .2rem; }
+  .scanrow { display: flex; justify-content: space-between; align-items: center; width: 100%;
+    background: #1a1a2e; color: #e0e0e0; border: 1px solid #2a2a44; border-radius: 4px;
+    padding: .45rem .6rem; margin: 0 0 .25rem; cursor: pointer; font-size: .9rem;
+    text-align: left; font-weight: normal; }
+  .scanrow:hover { background: #232347; border-color: #4cc9f0; }
+  .scanrow .sig { color: #888; font-size: .8rem; font-family: monospace; margin-left: .75rem;
+    white-space: nowrap; }
+  .scannote, .hotspothelp { color: #aaa; font-size: .8rem; line-height: 1.4; margin: .4rem 0; }
+  .hotspothelp b { color: #ffd166; font-weight: bold; }
+  .wifisec .chk { font-size: .85rem; color: #ccc; }
+  .wifisec .chk input { vertical-align: middle; margin-right: .3rem; }
 </style>
 </head>
 <body>
@@ -164,14 +179,35 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
   <b>WiFi Networks</b>
   <div id="wifista">Loading...</div>
   <table style="width:100%;border-collapse:collapse;margin-bottom:.5rem">
-    <thead><tr><th style="text-align:left;color:#4cc9f0;padding:.4rem .5rem">SSID</th><th></th></tr></thead>
+    <thead><tr><th style="text-align:left;color:#4cc9f0;padding:.4rem .5rem">Saved network</th><th></th></tr></thead>
     <tbody id="netbody"><tr><td colspan="2">Loading...</td></tr></tbody>
   </table>
-  <div style="margin-top:.6rem"><b style="font-size:.9rem">Add / Update Network</b></div>
-  <div class="row"><label>SSID:</label><input type="text" id="netssid" placeholder="Network name" autocomplete="off"></div>
+
+  <div style="margin-top:.8rem"><b style="font-size:.9rem">Add a network</b></div>
+  <div class="row"><button id="scanbtn" onclick="scanWifi()">Scan for networks</button></div>
+  <div id="scanout"></div>
+
+  <div class="row"><label>SSID:</label><input type="text" id="netssid" placeholder="Pick one above, or type it" autocomplete="off"></div>
   <div class="row"><label>Pass:</label><input type="password" id="netpass" placeholder="Password" autocomplete="new-password"></div>
+  <div class="row"><label></label><label class="chk"><input type="checkbox" id="nethidden">Hidden network / phone hotspot</label></div>
   <div class="row"><button onclick="addNet()">Save</button></div>
   <div id="wifistat2"></div>
+
+  <div class="hotspothelp">
+    <b>Pairing with a phone hotspot.</b>
+    A hotspot often will not show up in a scan &mdash; it stops broadcasting when nothing is
+    connected to it. Type its name in exactly, tick the box above, and save; the unit then
+    tries it by name whether or not it is beaconing.
+    <br><br>
+    Two things that stop it working, both on the phone:
+    <br>&bull; <b>2.4 GHz.</b> The unit has no 5 GHz radio. On iPhone turn on
+    <i>Personal Hotspot &rarr; Maximize Compatibility</i>; on Android set the hotspot band to 2.4 GHz.
+    <br>&bull; <b>The hotspot has to be awake.</b> Leave the Personal Hotspot screen open while pairing.
+    <br><br>
+    A phone cannot serve its hotspot and stay joined to the Tern AP at the same time, so save the
+    credentials first, then leave this page, switch the hotspot on, and the unit picks it up within
+    about a minute. From a second device, <i>Try now</i> forces the attempt immediately.
+  </div>
 </div>
 <script>
 // Files recoverable via the calibration retry-upload flow (see
@@ -367,6 +403,39 @@ async function delWp(name) {
     document.getElementById('wplon').value = m[2];
   });
 });
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// Rows are built with DOM calls, not innerHTML: an SSID is arbitrary text the
+// unit read off the air, and the old string-concatenated onclick broke on any
+// name holding a quote.
+function savedNetRow(n) {
+  const tr = document.createElement('tr');
+  const name = document.createElement('td');
+  name.style.padding = '.4rem .5rem';
+  name.textContent = n.ssid;
+  if (n.hidden) {
+    const tag = document.createElement('span');
+    tag.className = 'tag';
+    tag.textContent = 'hidden';
+    name.appendChild(tag);
+  }
+  const acts = document.createElement('td');
+  acts.style.cssText = 'padding:.4rem .5rem;text-align:right';
+  const tryb = document.createElement('button');
+  tryb.className = 'btn';
+  tryb.textContent = 'Try now';
+  tryb.title = 'Connect to this network right away instead of waiting for the next retry';
+  tryb.addEventListener('click', () => connectNow(n.ssid));
+  const del = document.createElement('button');
+  del.className = 'btn btn-del';
+  del.textContent = 'Remove';
+  del.addEventListener('click', () => removeNet(n.ssid));
+  acts.appendChild(tryb);
+  acts.appendChild(del);
+  tr.appendChild(name);
+  tr.appendChild(acts);
+  return tr;
+}
 async function loadWifi() {
   try {
     const [nets, status] = await Promise.all([
@@ -378,35 +447,133 @@ async function loadWifi() {
       ? 'STA: connected to "' + status.sta_ssid + '" \u2014 ' + status.sta_ip
       : 'STA: not connected (AP: ' + status.ap_ip + ')';
     const tb = document.getElementById('netbody');
+    tb.textContent = '';
     if (!nets.length) {
-      tb.innerHTML = '<tr><td colspan="2" style="padding:.4rem .5rem;color:#aaa">No networks configured</td></tr>';
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.colSpan = 2;
+      td.style.cssText = 'padding:.4rem .5rem;color:#aaa';
+      td.textContent = 'No networks configured';
+      tr.appendChild(td);
+      tb.appendChild(tr);
       return;
     }
-    tb.innerHTML = nets.map(n =>
-      '<tr>' +
-      '<td style="padding:.4rem .5rem">' + n.ssid + '</td>' +
-      '<td style="padding:.4rem .5rem"><button class="btn btn-del" onclick="removeNet(\'' +
-        n.ssid.replace(/'/g, "\\'") + '\')">Remove</button></td>' +
-      '</tr>'
-    ).join('');
+    nets.forEach(n => tb.appendChild(savedNetRow(n)));
   } catch(e) { document.getElementById('wifista').textContent = 'Error loading WiFi info'; }
+}
+function rssiBars(r) {
+  const n = r >= -55 ? 4 : r >= -67 ? 3 : r >= -75 ? 2 : 1;
+  return '\u2588'.repeat(n) + '\u2591'.repeat(4 - n);
+}
+function pickSsid(n) {
+  document.getElementById('netssid').value = n.ssid;
+  document.getElementById('nethidden').checked = false;  // it was just seen, so it beacons
+  const pass = document.getElementById('netpass');
+  pass.value = '';
+  const s = document.getElementById('wifistat2');
+  if (n.open) {
+    s.textContent = 'Open network \u2014 leave the password blank and press Save.';
+  } else {
+    s.textContent = 'Enter the password for "' + n.ssid + '" and press Save.';
+    pass.focus();
+  }
+}
+function renderScan(res) {
+  const out = document.getElementById('scanout');
+  out.textContent = '';
+  if (res.state === 'failed') { out.textContent = 'Scan failed \u2014 try again.'; return; }
+  if (res.state !== 'done')   { out.textContent = 'Scan did not finish \u2014 try again.'; return; }
+  (res.nets || []).forEach(n => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'scanrow';
+    const name = document.createElement('span');
+    name.textContent = n.ssid + (n.open ? '' : ' \u{1F512}');
+    const sig = document.createElement('span');
+    sig.className = 'sig';
+    sig.textContent = rssiBars(n.rssi) + '  ' + n.rssi + ' dBm';
+    b.appendChild(name);
+    b.appendChild(sig);
+    b.addEventListener('click', () => pickSsid(n));
+    out.appendChild(b);
+  });
+  const note = document.createElement('div');
+  note.className = 'scannote';
+  if (!(res.nets || []).length && !res.hidden) {
+    note.textContent = 'No networks in range.';
+  } else if (res.hidden) {
+    note.textContent = res.hidden + ' network(s) in range are not broadcasting a name. If one is '
+      + 'your hotspot, type its name below and tick "Hidden network / phone hotspot".';
+  } else {
+    note.textContent = 'Hotspot missing from the list? See the note below \u2014 you can still add it by name.';
+  }
+  out.appendChild(note);
+}
+async function scanWifi() {
+  const btn = document.getElementById('scanbtn');
+  const out = document.getElementById('scanout');
+  btn.disabled = true;
+  btn.textContent = 'Scanning\u2026';
+  out.textContent = 'Sweeping the band. This page may freeze for a few seconds \u2014 the radio has '
+    + 'to leave the Tern AP to listen, and comes back on its own.';
+  try {
+    let res = await fetch('/api/wifi-scan', {method: 'POST'}).then(r => r.json());
+    // The AP is off-channel for most of the scan, so individual polls are
+    // expected to fail; keep asking rather than treating one loss as an error.
+    for (let i = 0; i < 25 && res.state === 'running'; i++) {
+      await sleep(1000);
+      try { res = await fetch('/api/wifi-scan').then(r => r.json()); } catch(e) { /* retry */ }
+    }
+    renderScan(res);
+  } catch(e) {
+    out.textContent = 'Could not reach the unit \u2014 rejoin the Tern network and try again.';
+  }
+  btn.disabled = false;
+  btn.textContent = 'Scan for networks';
 }
 async function addNet() {
   const ssid = document.getElementById('netssid').value.trim();
   const pass = document.getElementById('netpass').value;
+  const hidden = document.getElementById('nethidden').checked;
   const s = document.getElementById('wifistat2');
   if (!ssid) { s.textContent = 'Enter an SSID'; return; }
   const r = await fetch('/api/wifi-networks', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ssid, pass})
+    body: JSON.stringify({ssid, pass, hidden})
   });
-  s.textContent = r.ok ? 'Network saved' : 'Save failed';
+  s.textContent = r.ok
+    ? (hidden ? 'Saved. Switch the hotspot on \u2014 the unit retries about once a minute.'
+              : 'Network saved')
+    : 'Save failed';
   if (r.ok) {
     document.getElementById('netssid').value = '';
     document.getElementById('netpass').value = '';
+    document.getElementById('nethidden').checked = false;
     loadWifi();
   }
+}
+async function connectNow(ssid) {
+  const s = document.getElementById('wifistat2');
+  s.textContent = 'Trying "' + ssid + '"\u2026';
+  let r;
+  try { r = await fetch('/api/wifi-connect?ssid=' + encodeURIComponent(ssid), {method: 'POST'}); }
+  catch(e) { s.textContent = 'Could not reach the unit.'; return; }
+  if (!r.ok) { s.textContent = 'Could not start the attempt.'; return; }
+  for (let i = 0; i < 12; i++) {
+    await sleep(1000);
+    try {
+      const st = await fetch('/api/wifi-status').then(x => x.json());
+      if (st.sta_connected && st.sta_ssid === ssid) {
+        s.textContent = 'Connected \u2014 ' + st.sta_ip;
+        loadWifi();
+        return;
+      }
+    } catch(e) { /* radio busy mid-association */ }
+  }
+  s.textContent = 'Not connected yet. The unit keeps retrying about once a minute \u2014 '
+    + 'leave the hotspot switched on.';
+  loadWifi();
 }
 async function removeNet(ssid) {
   if (!confirm('Remove network "' + ssid + '"?')) return;
@@ -703,34 +870,58 @@ static void handleAddWifiNetwork() {
         server.send(400, "text/plain", "Missing body");
         return;
     }
-    String body = server.arg("plain");
 
-    // Extract ssid and pass from JSON body (simple manual parse — no full JSON lib needed here)
-    auto extractField = [&](const char* key) -> String {
-        String token = String("\"") + key + "\"";
-        int idx = body.indexOf(token);
-        if (idx < 0) return "";
-        int colon = body.indexOf(':', idx + token.length());
-        if (colon < 0) return "";
-        int start = body.indexOf('"', colon + 1);
-        if (start < 0) return "";
-        int end = body.indexOf('"', start + 1);
-        if (end < 0) return "";
-        return body.substring(start + 1, end);
-    };
+    // Parsed properly rather than scanned for quotes: SSIDs picked out of a
+    // scan routinely carry characters the old hand-rolled parser mangled --
+    // a curly apostrophe is standard in "<name>'s iPhone", and an embedded
+    // quote or backslash would have truncated the credential silently.
+    JsonDocument doc;
+    if (deserializeJson(doc, server.arg("plain"))) {
+        server.send(400, "text/plain", "Bad JSON");
+        return;
+    }
 
-    String ssid = extractField("ssid");
-    String pass = extractField("pass");
-    if (ssid.isEmpty()) {
+    const char* ssid   = doc["ssid"];
+    const char* pass   = doc["pass"] | "";
+    bool        hidden = doc["hidden"] | false;
+
+    if (!ssid || strlen(ssid) == 0) {
         server.send(400, "text/plain", "Missing ssid");
         return;
     }
-    if (ssid.length() > 63 || pass.length() > 63) {
+    if (strlen(ssid) > 63 || strlen(pass) > 63) {
         server.send(400, "text/plain", "ssid/pass too long");
         return;
     }
-    if (!wifi::addNetwork(ssid.c_str(), pass.c_str())) {
+    if (!wifi::addNetwork(ssid, pass, hidden)) {
         server.send(500, "text/plain", "Network list full");
+        return;
+    }
+    server.send(200, "text/plain", "OK");
+}
+
+// Kick off an async SSID scan.  Returns immediately with the current state --
+// the radio leaves the softAP channel for the duration of a scan, so a handler
+// that waited for results would stall the connection the diver is using.
+static void handleStartWifiScan() {
+    wifi::startScan();
+    server.send(200, "application/json", wifi::getScanJson());
+}
+
+static void handleGetWifiScan() {
+    server.send(200, "application/json", wifi::getScanJson());
+}
+
+// Try one saved network right now instead of waiting out the reconnect cycle.
+// This is the hotspot path: save the credentials, switch the phone's hotspot
+// on, press Try now.
+static void handleWifiConnectNow() {
+    if (!server.hasArg("ssid")) {
+        server.send(400, "text/plain", "Missing 'ssid' parameter");
+        return;
+    }
+    if (!wifi::connectNow(server.arg("ssid").c_str())) {
+        server.send(404, "text/plain", "Not a saved network");
         return;
     }
     server.send(200, "text/plain", "OK");
@@ -871,6 +1062,9 @@ void init() {
     server.on("/api/wifi-networks", HTTP_POST,   handleAddWifiNetwork);
     server.on("/api/wifi-networks", HTTP_DELETE, handleRemoveWifiNetwork);
     server.on("/api/wifi-status",   HTTP_GET,    handleWifiStatus);
+    server.on("/api/wifi-scan",     HTTP_POST,   handleStartWifiScan);
+    server.on("/api/wifi-scan",     HTTP_GET,    handleGetWifiScan);
+    server.on("/api/wifi-connect",  HTTP_POST,   handleWifiConnectNow);
     server.on("/api/cloud-status",     HTTP_GET,  handleCloudStatus);
     server.on("/api/dive-logs/upload", HTTP_POST, handleDiveLogUpload);
     server.on("/api/cal/retry-upload", HTTP_POST, handleCalRetryUpload);

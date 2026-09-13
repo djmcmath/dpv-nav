@@ -2,7 +2,45 @@
 
 ## Overview
 
-The logging system provides persistent CSV-format data logging to ESP32 LittleFS flash storage. Each log entry contains raw sensor readings, calibrated values, and processed orientation data.
+The logging system provides persistent CSV-format data logging to ESP32 LittleFS flash storage. What each row contains depends on the log level (below): position and depth telemetry always, sensor and attitude data only at the higher levels.
+
+## Log Levels
+
+Cycled from the display with `CONFIG > Log`: OFF → LOW → MID → HIGH → OFF. Each
+level writes its own header, so a file's schema is fixed when it opens
+(`getActiveLevel()`), not when the diver next changes the selection.
+
+| Level | Wire/NVS value | Interval | Columns | Cost |
+|---|---|---|---|---|
+| OFF | 0 | — | nothing is open | — |
+| LOW | 1 | `LOG_LOW_INTERVAL_MS` (1 s) | timestamp, local time, heading, speed + source, position, lat/lon + source, GPS sats/HDOP, depth, water temp | ~97 B/row, ~340 KiB/hour |
+| MID | 3 | `LOG_MID_INTERVAL_MS` (1.5 s) | LOW's columns plus `mag_x/y/z_cal`, `pitch_deg`, `roll_deg`, `mag_temp_c` | ~140 B/row, ~330 KiB/hour |
+| HIGH | 2 | `LOG_HIGH_INTERVAL_MS` (1 s) | MID's columns plus raw mag/accel/gyro and calibrated accel/gyro | ~241 B/row, ~850 KiB/hour |
+
+`mag_temp_c` is the **LIS3MDL's own die temperature**, enabled 2026-09-11
+(`CTRL_REG1` TEMP_EN). It exists because the magnetometer's hard-iron offset
+moves with temperature — measured around 1.3 µT/°C on a slow cooling curve —
+while `water_temp_c` comes from the MS5837 in the nose and lags what the
+magnetometer feels by roughly 23 s. Its absolute value is not factory-trimmed,
+so use it for change, not as a room thermometer. It logs as `nan` if the read
+fails, and on MARK rows, whose sensor columns aren't sampled.
+
+**MID exists because HIGH cannot cover a dive.** The LittleFS partition is 768 KiB
+(`partitions_nav.csv`), so HIGH fills it in under an hour while MID runs about 2.3
+hours — and MID still carries everything a heading post-mortem needs
+(`tools/circle_audit.py` reads exactly these columns). `cleanupOldLogs()` prunes
+oldest-first to a 32 KiB floor, so overrunning costs you your *older* logs.
+
+**MID is value 3, not 2.** It was appended rather than inserted so that existing
+NVS records and the 2-bit `FLAG_LOG_LEVEL` field keep their meanings across a
+firmware update, since the nav and display boards are flashed separately. The
+display's level badge reads `L0`/`L1`/`LM`/`L2` for OFF/LOW/MID/HIGH.
+
+> **The rest of this document is stale** (2026-09-11): it describes a
+> `logEntry()`/`LogEntry`/`rotateLog()` API and a `log_<minutes>_<seconds>.csv`
+> filename scheme that no longer exist. The real API is in
+> [src/util/logging.h](../src/util/logging.h) — `log()`, `LogData`, `cycleLevel()`,
+> `setLevel()`, `tick()` — and files are `/logs/NNN.csv`.
 
 ## API
 

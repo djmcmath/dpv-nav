@@ -5,9 +5,17 @@
 
 namespace logging {
 
-enum class LogLevel : uint8_t { LEVEL_OFF = 0, LEVEL_LOW, LEVEL_HIGH };
+// MID is appended as 3 rather than inserted between LOW and HIGH on purpose: the
+// numeric value is persisted in NVS (`log_level`) and shipped in NavPacket's
+// 2-bit FLAG_LOG_LEVEL field, and the two boards are flashed separately. Renumber
+// HIGH and a saved setting — or a display board still running the previous build —
+// silently means a different level. The diver-facing cycle order is still
+// OFF -> LOW -> MID -> HIGH; see cycleLevel().
+enum class LogLevel : uint8_t { LEVEL_OFF = 0, LEVEL_LOW, LEVEL_HIGH, LEVEL_MID };
 
-// All data needed for a log entry. HIGH-only fields are ignored when level == LOW.
+// All data needed for a log entry. mag_cal/pitch_deg/roll_deg are written at MID
+// as well as HIGH; the raw and accel/gyro fields are HIGH-only. Everything past
+// the common set is ignored at LOW.
 struct LogData {
     uint32_t timestamp_ms;
     float heading_deg;
@@ -22,6 +30,9 @@ struct LogData {
     float   gps_hdop;       // HDOP (0.0 if no GPS fix)
     float   depth_m;        // depth below surface, meters (0 if sensor absent)
     float   water_temp_c;   // water temperature, degrees C (0 if sensor absent)
+    // MID and HIGH: LIS3MDL die temperature, degrees C. NaN (logged as "nan")
+    // when the read fails, rather than 0, which would read as a real value.
+    float   mag_temp_c;
     // HIGH-level fields
     imu::Vec3f mag_raw, accel_raw, gyro_raw;
     imu::Vec3f mag_cal, accel_cal, gyro_cal;
@@ -37,14 +48,28 @@ bool init();
 // Shutdown logging system (close file if open).
 void shutdown();
 
-// Current log level.
+// The level the diver has selected. Changes the instant cycleLevel() is called,
+// which is what the menu label and the NavPacket log-level flags report — the
+// file it names may not be open yet (see LOG_COMMIT_DELAY_MS).
 LogLevel getLevel();
 
-// Cycle OFF -> LOW -> HIGH -> OFF. Opens/closes files as needed.
+// The level actually in effect: what the open file's schema is, or LEVEL_OFF
+// while nothing is open. Equals getLevel() once a selection has settled.
+LogLevel getActiveLevel();
+
+// Cycle OFF -> LOW -> MID -> HIGH -> OFF. Selecting OFF closes the open file at once.
+// Selecting LOW or HIGH only records the choice and (re)starts the settle timer;
+// tick() opens the file once it has held still for LOG_COMMIT_DELAY_MS.
 void cycleLevel();
 
-// Set level directly (e.g. to restore from NVS on boot). No-op if already at that level.
+// Set level directly (e.g. to restore from NVS on boot). Takes effect at once —
+// a level restored from NVS was already committed on a previous power cycle.
+// No-op if already at that level.
 void setLevel(LogLevel level);
+
+// Call from the main loop. Opens the file for a pending LOW/HIGH selection once
+// it has been stable for LOG_COMMIT_DELAY_MS. (OFF never gets this far.)
+void tick();
 
 // Log one entry. No-op if level == OFF. Respects the per-level rate limit.
 void log(const LogData& d);

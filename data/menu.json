@@ -54,7 +54,6 @@
     {
       "title": "Display",
       "items": [
-        { "label": "Mode",    "act": 12 },
         { "label": "Spd/ETA", "act": 13 },
         { "label": "Units",   "act": 14 },
         { "label": "Heading", "act": 15 }

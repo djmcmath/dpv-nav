@@ -49,7 +49,6 @@ static bool gWifiEnabled = true;
 static bool gSaltWater   = true;
 
 static DisplaySettings gSettings = {
-    .debugMode   = false,
     .showETA     = false,
     .imperial    = false,
     .headingMode = nvs_disp::HEADING_TRUE,
@@ -178,17 +177,15 @@ static void loadDefaults() {
     // DISPLAY submenu (index 4)
     auto& dsp = submenus[4];
     strncpy(dsp.title, "Display", MENU_LABEL_LEN);
-    dsp.count = 5;
-    strncpy(dsp.items[0].label, "Mode", MENU_LABEL_LEN);
-    dsp.items[0].action = Action::DISP_MODE; dsp.items[0].submenuIdx = -1;
-    strncpy(dsp.items[1].label, "Spd/ETA", MENU_LABEL_LEN);
-    dsp.items[1].action = Action::DISP_SPD_ETA; dsp.items[1].submenuIdx = -1;
-    strncpy(dsp.items[2].label, "Units", MENU_LABEL_LEN);
-    dsp.items[2].action = Action::DISP_UNITS; dsp.items[2].submenuIdx = -1;
-    strncpy(dsp.items[3].label, "Heading", MENU_LABEL_LEN);
-    dsp.items[3].action = Action::DISP_HDG_TYPE; dsp.items[3].submenuIdx = -1;
-    strncpy(dsp.items[4].label, "..", MENU_LABEL_LEN);
-    dsp.items[4].action = Action::BACK; dsp.items[4].submenuIdx = -1;
+    dsp.count = 4;  // 3 items + ".."
+    strncpy(dsp.items[0].label, "Spd/ETA", MENU_LABEL_LEN);
+    dsp.items[0].action = Action::DISP_SPD_ETA; dsp.items[0].submenuIdx = -1;
+    strncpy(dsp.items[1].label, "Units", MENU_LABEL_LEN);
+    dsp.items[1].action = Action::DISP_UNITS; dsp.items[1].submenuIdx = -1;
+    strncpy(dsp.items[2].label, "Heading", MENU_LABEL_LEN);
+    dsp.items[2].action = Action::DISP_HDG_TYPE; dsp.items[2].submenuIdx = -1;
+    strncpy(dsp.items[3].label, "..", MENU_LABEL_LEN);
+    dsp.items[3].action = Action::BACK; dsp.items[3].submenuIdx = -1;
 }
 
 // ---------------------------------------------------------------------------
@@ -282,13 +279,14 @@ static void getDisplayLabel(const MenuItem& item, char* buf, size_t bufLen) {
             suffix = gWifiEnabled ? "ON" : "OFF";
             break;
         case Action::INPUT_LOG_CYCLE:
-            suffix = gLogLevel == 0 ? "OFF" : (gLogLevel == 1 ? "LOW" : "HI");
+            // Wire values, not cycle order: MID is 3 (appended, see logging.h).
+            suffix = gLogLevel == 0 ? "OFF"
+                   : gLogLevel == 1 ? "LOW"
+                   : gLogLevel == 3 ? "MID"
+                   : "HI";
             break;
         case Action::INPUT_WATER:
             suffix = gSaltWater ? "SALT" : "FRESH";
-            break;
-        case Action::DISP_MODE:
-            suffix = gSettings.debugMode ? "DBG" : "NAV";
             break;
         case Action::DISP_SPD_ETA:
             suffix = gSettings.showETA ? "ETA" : "SPD";
@@ -392,20 +390,15 @@ static void executeAction(Action act) {
             Serial.println("[MENU] TOGGLE_WATER_DENSITY");
             break;
         // Local display settings
-        case Action::DISP_MODE:
-            gSettings.debugMode = !gSettings.debugMode;
-            Serial.print("[MENU] Mode: "); Serial.println(gSettings.debugMode ? "DEBUG" : "NAV");
-            nvs_disp::save({gSettings.debugMode, gSettings.showETA, gSettings.imperial, gSettings.headingMode});
-            break;
         case Action::DISP_SPD_ETA:
             gSettings.showETA = !gSettings.showETA;
             Serial.print("[MENU] Show: "); Serial.println(gSettings.showETA ? "ETA" : "SPEED");
-            nvs_disp::save({gSettings.debugMode, gSettings.showETA, gSettings.imperial, gSettings.headingMode});
+            nvs_disp::save({gSettings.showETA, gSettings.imperial, gSettings.headingMode});
             break;
         case Action::DISP_UNITS:
             gSettings.imperial = !gSettings.imperial;
             Serial.print("[MENU] Units: "); Serial.println(gSettings.imperial ? "ft" : "m");
-            nvs_disp::save({gSettings.debugMode, gSettings.showETA, gSettings.imperial, gSettings.headingMode});
+            nvs_disp::save({gSettings.showETA, gSettings.imperial, gSettings.headingMode});
             break;
         case Action::DISP_HDG_TYPE:
             // TRUE -> MAG -> RAW -> TRUE. RAW is deliberately in the cycle
@@ -414,7 +407,7 @@ static void executeAction(Action act) {
             gSettings.headingMode = (gSettings.headingMode + 1) % 3;
             Serial.print("[MENU] Heading: ");
             Serial.println(headingModeLabel(gSettings.headingMode));
-            nvs_disp::save({gSettings.debugMode, gSettings.showETA, gSettings.imperial, gSettings.headingMode});
+            nvs_disp::save({gSettings.showETA, gSettings.imperial, gSettings.headingMode});
             break;
         case Action::NAV_OP_MODE:
             // Not optimistically toggled locally — dive mode can now also be
@@ -449,13 +442,12 @@ void init(SendCmdFn sendFn) {
 
     // Restore display settings from NVS
     nvs_disp::State nvsDisp = nvs_disp::load();
-    gSettings.debugMode   = nvsDisp.debug_mode;
     gSettings.showETA     = nvsDisp.show_eta;
     gSettings.imperial    = nvsDisp.imperial;
     gSettings.headingMode = nvsDisp.heading_mode;  // never RAW on boot (nvs_disp::load)
-    Serial.printf("[NVS] Disp restored: debug=%d eta=%d imperial=%d hdg=%s\n",
-                  gSettings.debugMode, gSettings.showETA,
-                  gSettings.imperial, headingModeLabel(gSettings.headingMode));
+    Serial.printf("[NVS] Disp restored: eta=%d imperial=%d hdg=%s\n",
+                  gSettings.showETA, gSettings.imperial,
+                  headingModeLabel(gSettings.headingMode));
 
     stackDepth = 0;  // closed
     invalidateMenuCache();

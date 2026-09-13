@@ -96,6 +96,13 @@ void showSpeedCalWaiting();
 void showSpeedCalCountdown(int secondsRemaining);
 // Run in progress — show large elapsed-time counter.
 void showSpeedCalRunning(uint16_t elapsed_s, uint16_t dist_ft);
+
+// Current hold: hold station pointing upstream while the flow sensor reads the
+// water. showCurrentHoldRunning shows the live flow as well as the clock -- a
+// diver who is losing station needs to see it happening, not find out at the end.
+void showCurrentHoldCountdown(int secondsRemaining);
+void showCurrentHoldRunning(uint8_t remaining_s, float heading_deg, float flow_ms);
+void showCurrentHoldResult(float current_ms, float toward_deg);
 // Accept/reject result screen.
 //   choice: 0 = RESET+ACCEPT, 1 = ACCEPT, 2 = REJECT  (highlighted item)
 void showSpeedCalResult(uint16_t dist_ft, uint16_t elapsed_s,

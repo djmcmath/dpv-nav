@@ -59,6 +59,7 @@ MENU
 │   ├── Select WP  — open waypoint selector: navigate TO a named waypoint
 │   ├── Arrive WP  — open waypoint selector: snap current position to a known waypoint
 │   ├── Mark       — mark current position in logs
+│   ├── Current    — measure the current: hold station pointing upstream for 60 s
 │   └── Op Mode    — toggle dive/surface mode (shows DIVE or SURF)
 ├── CAL
 │   ├── Baseline   — magnetometer calibration, device off DPV (full sphere coverage), cloud-fit on completion
@@ -80,7 +81,7 @@ MENU
 └── Close          — leave the menu, change nothing
 ```
 
-Toggle items show their current state (e.g., "Units: m", "Op Mode: SURF") and stay open after toggling. Non-toggle items (Baseline, Fill gaps, Mounted, Hdg cal, Mark) execute and close the menu. Select WP and Arrive WP open the waypoint selector UI.
+Toggle items show their current state (e.g., "Units: m", "Op Mode: SURF") and stay open after toggling. Non-toggle items (Baseline, Fill gaps, Mounted, Hdg cal, Mark, Current) execute and close the menu. Select WP and Arrive WP open the waypoint selector UI.
 
 **Logging starts on a delay and stops immediately.** The cycle is off → low →
 high → off, so getting to any level means passing through the others. The menu
@@ -186,6 +187,46 @@ all 12 points — a small web form fills just the gap:
    for updates** — this is the step that actually pulls the accepted result onto
    the device. Skipping it means the website shows an accepted calibration that
    the unit still isn't using.
+
+### Measuring the Current (NAV > Current)
+
+Sixty seconds of holding still, and it is worth more to a dive report than almost anything
+else you can do underwater.
+
+**Why.** The flow sensor measures your speed *through the water*, not over the ground. That
+is the right thing for navigation and it is why drifting reads zero — but it also means the
+unit is blind to a current, and a current it cannot see gets silently absorbed into your
+position. On the 2026-09-12 Harpoon dive that cost 205 m over a deco hang, with no
+indication on the screen at any point.
+
+There is no way to measure a current at depth by difference: no GPS, and usually no second
+known position. But if you *hold station* against it, the water still runs past the
+impeller — and that reading is the current itself.
+
+**Workflow:**
+
+1. Select **NAV > Current**. The menu closes and a 5-second countdown appears.
+2. Get **pointed upstream** and stop swimming. Hold position over a fixed point on the
+   bottom — a rock, a piece of wreck, anything that isn't moving.
+3. The countdown ends and a 60-second hold begins. The screen shows the seconds remaining
+   and the **live flow reading**. Watch it: if you are slipping, you will see the number
+   wander, and you still have time to fix your position.
+4. At the end, the result shows in m/s and m/min, with the direction the current is flowing
+   *toward*. It is written to the log automatically. Press either button to dismiss.
+5. **BTN1 cancels** at any point. A hold you could not actually hold is worse than no
+   measurement — it records your swimming, not the water.
+
+**Requirements and gotchas:**
+
+- **Logging must be on.** The measurement is written to the dive log, and nowhere else. If
+  logging is off the screen still shows the number, but nothing is saved and the serial
+  console says so.
+- Point *upstream*, not downstream. The unit adds 180° for you, so the logged direction is
+  where the water is going.
+- Position does not advance during the hold, by design — you are not making way over the
+  ground, and the displayed speed reads 0.0 throughout.
+- It is worth doing on the bottom, not only during deco. A current measured at 6 m tells
+  you very little about 40 m, which is exactly the ambiguity the Harpoon dive ran into.
 
 ### Speed Calibration (CAL > Speed cal)
 

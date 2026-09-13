@@ -28,6 +28,7 @@
         { "label": "Select WP", "act": 19 },
         { "label": "Arrive WP", "act": 20 },
         { "label": "Mark",      "act": 4 },
+        { "label": "Current",   "act": 25 },
         { "label": "Op Mode",   "act": 16 }
       ]
     },

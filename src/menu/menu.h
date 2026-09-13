@@ -55,6 +55,7 @@ enum class Action : uint8_t {
     INPUT_WATER          = 22,  // toggle salt/fresh water density (depth calc)
     CAL_GAPFILL          = 23,  // guided gap-fill pass over the cells the server flagged
     BACK                 = 24,  // leave submenu, or close the menu at root
+    NAV_CURRENT          = 25,  // 60 s station-keeping measurement of the current
 };
 
 // ---------------------------------------------------------------------------
@@ -163,5 +164,11 @@ void clearWaypointArrivePending();
 // Cleared by clearCloudLinkPending().
 bool isPendingCloudLink();
 void clearCloudLinkPending();
+
+// Returns true if the user just selected "Current" — display should enter the
+// current-hold UI (countdown, then a 60 s station-keeping measurement).
+// Cleared by clearCurrentHoldPending().
+bool isPendingCurrentHold();
+void clearCurrentHoldPending();
 
 }  // namespace menu

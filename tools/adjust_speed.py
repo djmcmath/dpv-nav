@@ -83,6 +83,23 @@ def main():
 
         adj_speed = speed_ms * speed_factor
 
+        if pos_src in ("M", "C"):
+            # Annotation rows, written out of cadence. A mark zeroes heading and
+            # speed; a current hold's speed and heading describe the WATER, not
+            # the scooter. Integrating either as a DR step invents a leg -- for a
+            # current hold, a whole minute of travel at the current's speed. Hold
+            # the position from the previous row and let the next real row own
+            # the interval.
+            if adj_x is not None:
+                adj_lat, adj_lon = xy_to_latlon(adj_x, adj_y, BASELINE_LAT, BASELINE_LON)
+                row["adjusted_speed_ms"] = f"{speed_ms:.4f}"
+                row["adjusted_pos_x_m"] = f"{adj_x:.2f}"
+                row["adjusted_pos_y_m"] = f"{adj_y:.2f}"
+                row["adjusted_lat"] = f"{adj_lat:.8f}"
+                row["adjusted_lon"] = f"{adj_lon:.8f}"
+                output_rows.append(row)
+                continue
+
         if pos_src == "G":
             # GPS truth: snap adjusted track to GPS fix (ground truth, speed-independent)
             adj_x, adj_y = latlon_to_xy(orig_lat, orig_lon, BASELINE_LAT, BASELINE_LON)

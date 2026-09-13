@@ -387,6 +387,15 @@ Menu structure is loaded from `/menu.json` on the **display** board's LittleFS a
 4. Handle the command in `handleDisplayCmd()` in [src/nav_main.cpp](src/nav_main.cpp)
 5. Add the item to the hardcoded default menu and to [data/menu.json](data/menu.json)
 
+**Next free values:** `menu::Action` 26, `DisplayCmd` 41, `cal_mode` 10. `cal_mode` is the
+one that bites — 0 quick mag cal, 1 full mag cal, 2/3/4 speed cal, 5 baseline, 6 mounted,
+7 gap-fill, 8/9 current hold. It is easy to read the code and conclude 7 is free; it is not.
+
+A menu action that runs a timed routine should copy `Cal > Speed cal` end to end: the
+**nav** device owns the clock and the sampling, the display runs the pre-roll countdown and
+advances its own phase forward-only by watching `cal_mode`. `Nav > Current` is the smaller
+worked example of the same shape.
+
 ## Display Rendering Architecture (ST7789 Direct Writes)
 
 The display driver uses a 320×240 ST7789 TFT with direct hardware writes via the Adafruit ST7789 library. There is no offscreen framebuffer; drawing calls go directly to the display.

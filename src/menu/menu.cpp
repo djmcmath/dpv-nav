@@ -30,6 +30,7 @@ static bool gPowerOffPending        = false;
 static bool gWaypointSelectPending  = false;
 static bool gWaypointArrivePending  = false;
 static bool gCloudLinkPending       = false;
+static bool gCurrentHoldPending     = false;
 
 // POWER_OFF is the one menu action that cannot be undone underwater, so it
 // takes two BTN2 presses: the first arms it and relabels the item, the second
@@ -124,17 +125,19 @@ static void loadDefaults() {
     // NAV submenu (index 1)
     auto& nav = submenus[1];
     strncpy(nav.title, "Nav", MENU_LABEL_LEN);
-    nav.count = 5;  // 4 items + back
+    nav.count = 6;  // 5 items + back
     strncpy(nav.items[0].label, "Select WP", MENU_LABEL_LEN);
     nav.items[0].action = Action::NAV_SELECT_WAYPOINT; nav.items[0].submenuIdx = -1;
     strncpy(nav.items[1].label, "Arrive WP", MENU_LABEL_LEN);
     nav.items[1].action = Action::NAV_ARRIVE_WAYPOINT; nav.items[1].submenuIdx = -1;
     strncpy(nav.items[2].label, "Mark", MENU_LABEL_LEN);
     nav.items[2].action = Action::NAV_MARK; nav.items[2].submenuIdx = -1;
-    strncpy(nav.items[3].label, "Op Mode", MENU_LABEL_LEN);
-    nav.items[3].action = Action::NAV_OP_MODE; nav.items[3].submenuIdx = -1;
-    strncpy(nav.items[4].label, "..", MENU_LABEL_LEN);
-    nav.items[4].action = Action::BACK; nav.items[4].submenuIdx = -1;
+    strncpy(nav.items[3].label, "Current", MENU_LABEL_LEN);
+    nav.items[3].action = Action::NAV_CURRENT; nav.items[3].submenuIdx = -1;
+    strncpy(nav.items[4].label, "Op Mode", MENU_LABEL_LEN);
+    nav.items[4].action = Action::NAV_OP_MODE; nav.items[4].submenuIdx = -1;
+    strncpy(nav.items[5].label, "..", MENU_LABEL_LEN);
+    nav.items[5].action = Action::BACK; nav.items[5].submenuIdx = -1;
 
     // CAL submenu (index 2)
     auto& cal = submenus[2];
@@ -365,6 +368,10 @@ static void executeAction(Action act) {
         case Action::CAL_SPEED:
             gSpeedCalPending = true;  // signal display_main to enter distance selection
             Serial.println("[MENU] CAL_SPEED: entering distance selection");
+            break;
+        case Action::NAV_CURRENT:
+            gCurrentHoldPending = true;  // display_main runs the countdown, nav runs the clock
+            Serial.println("[MENU] NAV_CURRENT: entering current hold");
             break;
         case Action::CAL_HDG:
             gHdgCalPending = true;
@@ -682,6 +689,14 @@ bool isPendingCloudLink() {
 
 void clearCloudLinkPending() {
     gCloudLinkPending = false;
+}
+
+bool isPendingCurrentHold() {
+    return gCurrentHoldPending;
+}
+
+void clearCurrentHoldPending() {
+    gCurrentHoldPending = false;
 }
 
 }  // namespace menu

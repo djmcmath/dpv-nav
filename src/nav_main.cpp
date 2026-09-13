@@ -289,6 +289,22 @@ CalRetryResult retryCalibrationUpload(const char* filename) {
 // ---- Speed calibration state ------------------------------------------------
 static uint16_t gSpeedCalDist_ft     = 300;    // target distance selected by user
 static uint32_t gSpeedCalStartMs     = 0;      // millis() when run started
+
+// ---- Current hold state ---------------------------------------------------
+// The diver holds station pointing upstream; the flow sensor then reads the
+// water going past rather than the scooter going through it. Averaged over the
+// hold, that IS the current -- the only measurement of it available at depth,
+// where there is no GPS to difference and no bottom fix to drift between.
+static constexpr uint32_t CURRENT_HOLD_DURATION_MS = 60000;
+static constexpr uint16_t CURRENT_HOLD_MIN_SAMPLES = 20;   // a short hold measured nothing
+static bool     gCurrentHoldActive   = false;  // also suppresses DR — see the gate below
+static uint32_t gCurrentHoldStartMs  = 0;
+static double   gCurrentHoldFlowSum  = 0.0;    // mean flow over the hold, m/s
+static double   gCurrentHoldSinSum   = 0.0;    // circular mean of heading
+static double   gCurrentHoldCosSum   = 0.0;
+static uint16_t gCurrentHoldSamples  = 0;
+static float    gCurrentHoldResultMs = 0.0f;
+static float    gCurrentHoldToward   = 0.0f;
 static uint32_t gSpeedCalPulseTotal  = 0;      // pulses accumulated during run
 static float    gSpeedCalHdgSinEMA   = 0.0f;
 static float    gSpeedCalHdgCosEMA   = 0.0f;
@@ -336,6 +352,8 @@ static nvs_nav::State currentNavNvsState() {
 
 // ---- Forward declarations --------------------------------------------------
 static void loadCalibration();
+static void finishCurrentHold();
+static void cancelCurrentHold();
 static void sendNavPacket(float heading, float headingRaw, float pitch, float roll,
                           float speed, bool gpsSpeed,
                           float distHome, float bearHome,
@@ -866,7 +884,20 @@ void loop() {
     // --- Dead-reckoning position update ------------------------------------
     // Suppress DR integration when flow speed is below threshold (treats sensor
     // noise and near-stationary drift as zero rather than accumulating error).
-    if (!useGpsSpeed && speed < DR_MIN_FLOW_SPEED_MS) speed = 0.0f;
+    //
+    // ...and for the whole of a current hold, whatever the flow reads. The diver
+    // is deliberately holding station against the water, so that flow is a
+    // measurement of the CURRENT, not of travel over the ground. A current over
+    // 0.10 m/s would otherwise clear the threshold and integrate a minute of
+    // movement that never happened -- corrupting the very leg the measurement
+    // exists to clean up.
+    //
+    // Both conditions share this one assignment on purpose: `speed` feeds DR,
+    // NavPacket.speed_ms (the displayed speed and ETA) and the log's speed_ms
+    // column all at once, so a second zeroing site would inevitably drift from
+    // this one. The measurement itself reads flow::getSpeed_ms() directly,
+    // upstream of here, because this line would zero that too.
+    if (gCurrentHoldActive || (!useGpsSpeed && speed < DR_MIN_FLOW_SPEED_MS)) speed = 0.0f;
     nav::updateDR(headingDeg, speed, dt);
 
     // --- Commit any settled log-level change --------------------------------
@@ -1211,6 +1242,20 @@ void loop() {
                 sysState = SystemState::READY;
                 Serial.println("[CAL] Full cal collection done, returning to READY");
             }
+        } else if (gCalMode == 8) {
+            // Current hold — RUNNING. Sample the raw flow reading (NOT the main
+            // loop's `speed`, which the gate above has already zeroed) and the
+            // heading, then average both over the hold.
+            gCurrentHoldFlowSum += flow::getSpeed_ms();
+            float hdgRad = headingDeg * (float)(M_PI / 180.0);
+            gCurrentHoldSinSum += sinf(hdgRad);
+            gCurrentHoldCosSum += cosf(hdgRad);
+            if (gCurrentHoldSamples < 0xFFFF) gCurrentHoldSamples++;
+
+            uint32_t heldMs = millis() - gCurrentHoldStartMs;
+            if (heldMs >= CURRENT_HOLD_DURATION_MS) {
+                finishCurrentHold();
+            }
         } else if (gCalMode == 2) {
             // Speed cal — WAITING: watch for flow to exceed start threshold
             float flowFreq = flow::getFrequency_hz();
@@ -1462,6 +1507,81 @@ static void updateBattMv() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Current hold
+// ---------------------------------------------------------------------------
+// End a hold and write the measurement as a 'C' row.
+//
+// heading_deg carries the direction the water flows TOWARD, not the heading the
+// diver held. The diver points UPSTREAM, so the compass reads where the current
+// comes FROM; turning it round here means every downstream consumer -- the log,
+// track-processor, the website -- reads one convention, and none of them has to
+// know the upstream one ever existed.
+static void finishCurrentHold() {
+    gCurrentHoldActive = false;
+
+    if (gCurrentHoldSamples < CURRENT_HOLD_MIN_SAMPLES) {
+        Serial.printf("[CURRENT] too few samples (%u) — discarded\n",
+                      (unsigned)gCurrentHoldSamples);
+        gInCal   = false;
+        gCalMode = 0;
+        sysState = SystemState::READY;
+        return;
+    }
+
+    float meanFlow = (float)(gCurrentHoldFlowSum / gCurrentHoldSamples);
+    float upstream = atan2f((float)gCurrentHoldSinSum, (float)gCurrentHoldCosSum)
+                     * (float)(180.0 / M_PI);
+    gCurrentHoldResultMs = meanFlow;
+    gCurrentHoldToward   = fmodf(upstream + 180.0f + 360.0f, 360.0f);
+
+    Serial.printf("[CURRENT] %.3f m/s (%.1f m/min) toward %.1f (held %03d) over %u samples\n",
+                  (double)gCurrentHoldResultMs, (double)(gCurrentHoldResultMs * 60.0f),
+                  (double)gCurrentHoldToward,
+                  (int)fmodf(upstream + 360.0f, 360.0f), (unsigned)gCurrentHoldSamples);
+
+    if (logging::isLogging()) {
+        nav::Position pos = nav::getPosition();
+        GpsFix fix = gps::getFix();
+        logging::LogData ld{};
+        ld.timestamp_ms   = millis();
+        ld.heading_deg    = gCurrentHoldToward;
+        ld.speed_ms       = gCurrentHoldResultMs;
+        ld.gpsSpeed       = false;
+        ld.pos_x_m        = pos.x_m;
+        ld.pos_y_m        = pos.y_m;
+        ld.lat            = pos.lat;
+        ld.lon            = pos.lon;
+        ld.pos_src        = 'C';
+        ld.gps_satellites = fix.has_fix ? fix.satellites : 0;
+        ld.gps_hdop       = fix.has_fix ? fix.hdop       : 0.0f;
+        ld.depth_m        = depth::isPresent() ? depth::getDepth_m() : 0.0f;
+        ld.water_temp_c   = depth::isPresent() ? depth::getTemp_c()  : 0.0f;
+        // Same convention as a MARK row: the sensor fields are not sampled here,
+        // and a zero die temperature would read as a real -25 degC offset.
+        ld.mag_temp_c     = NAN;
+        logging::logImmediate(ld);
+    } else {
+        Serial.println("[CURRENT] WARNING: not logging — measurement shown but not saved");
+    }
+
+    // gInCal deliberately stays set: the NavPacket cal fields are gated on it,
+    // so clearing it here would stop the packet that carries the result. The
+    // display clears both by sending END_CURRENT_HOLD when the diver dismisses,
+    // exactly as speed cal's accept/reject ends cal_mode 4.
+    gCalMode = 9;
+}
+
+// Ends the hold UI on the nav side: aborting a run in progress, or releasing the
+// result once the diver has seen it. Both are the same state change.
+static void cancelCurrentHold() {
+    gCurrentHoldActive = false;
+    gInCal   = false;
+    gCalMode = 0;
+    sysState = SystemState::READY;
+    Serial.println("[CURRENT] hold ended");
+}
+
 static void sendNavPacket(float heading, float headingRaw, float pitch, float roll,
                           float speed, bool gpsSpeed,
                           float distHome, float bearHome,
@@ -1530,6 +1650,21 @@ static void sendNavPacket(float heading, float headingRaw, float pitch, float ro
             uint32_t remaining_ms = mag_cal::getRemainingMs();
             pkt.cal_remaining_s   = (uint8_t)(remaining_ms / 1000);
             pkt.cal_coverage_pct  = mag_cal::getSpatialCoverage();
+        } else if (gCalMode == 8 || gCalMode == 9) {
+            // Current hold: seconds left on the 60 s clock, and the measurement
+            // once there is one.
+            if (gCalMode == 8) {
+                uint32_t heldMs = millis() - gCurrentHoldStartMs;
+                uint32_t leftMs = (heldMs >= CURRENT_HOLD_DURATION_MS)
+                                  ? 0 : (CURRENT_HOLD_DURATION_MS - heldMs);
+                pkt.cal_remaining_s = (uint8_t)((leftMs + 999) / 1000);
+                // Live flow, so the diver can watch themselves hold station.
+                pkt.current_ms      = flow::getSpeed_ms();
+            } else {
+                pkt.cal_remaining_s = 0;
+                pkt.current_ms      = gCurrentHoldResultMs;
+            }
+            pkt.current_toward_deg = gCurrentHoldToward;
         } else {
             // Speed cal (cal_mode 2/3/4): pack run data
             pkt.speed_cal_dist_ft    = gSpeedCalDist_ft;
@@ -1764,6 +1899,24 @@ static void handleDisplayCmd() {
                         gBinCalCsvPath = "/mag_mounted_samples.csv";
                         gLastCalProgressMs = 0;
                         imu::magBinCalBegin(imu::BinCalMode::MOUNTED);
+                        break;
+                    case DisplayCmd::START_CURRENT_HOLD:
+                        Serial.println("CMD: START_CURRENT_HOLD (60s station keeping)");
+                        gCurrentHoldActive  = true;
+                        gCurrentHoldStartMs = millis();
+                        gCurrentHoldFlowSum = 0.0;
+                        gCurrentHoldSinSum  = 0.0;
+                        gCurrentHoldCosSum  = 0.0;
+                        gCurrentHoldSamples = 0;
+                        // cal_mode 8/9: 0-7 are taken (0 quick, 1 full, 2/3/4
+                        // speed cal, 5 baseline, 6 mounted, 7 gap-fill).
+                        gCalMode  = 8;
+                        gInCal    = true;   // gates BOTH the tick and the NavPacket cal fields
+                        sysState  = SystemState::CALIBRATION;  // gates the display's cal_mode dispatch
+                        break;
+                    case DisplayCmd::END_CURRENT_HOLD:
+                        Serial.println("CMD: END_CURRENT_HOLD");
+                        cancelCurrentHold();
                         break;
                     case DisplayCmd::START_GAPFILL_CAL: {
                         Serial.println("CMD: START_GAPFILL_CAL (guided, targets from cloud)");

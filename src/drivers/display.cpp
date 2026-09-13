@@ -1123,6 +1123,109 @@ void showSpeedCalCountdown(int secondsRemaining) {
 }
 
 // ---------------------------------------------------------------------------
+// Current hold — "point upstream and stop swimming for 60 s"
+//
+// The running screen shows the live flow reading beside the clock on purpose.
+// Station-keeping against a current is hard, and a diver who is slipping needs
+// to watch the number wander while there is still time to fix it, rather than
+// find out afterwards that they measured their own swimming.
+// ---------------------------------------------------------------------------
+void showCurrentHoldCountdown(int secondsRemaining) {
+    if (!tftReady) return;
+    invalidateNavCache();
+    tft.fillScreen(COLOR_BLACK);
+
+    tft.setTextSize(2);
+    tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
+    tft.setCursor(4, 4);
+    tft.print("CURRENT");
+
+    tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
+    tft.setCursor(4, 36);
+    tft.print("POINT UPSTREAM");
+    tft.setCursor(4, 60);
+    tft.print("HOLD STATION");
+
+    tft.setTextSize(5);
+    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+    char buf[4];
+    snprintf(buf, sizeof(buf), "%d", secondsRemaining);
+    int charW = 5 * 6;
+    int x = (320 - (int)strlen(buf) * charW) / 2;
+    tft.setCursor(x, 110);
+    tft.print(buf);
+
+    tft.setTextSize(2);
+    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+    tft.setCursor(4, 210);
+    tft.print("BTN1=cancel");
+}
+
+void showCurrentHoldRunning(uint8_t remaining_s, float heading_deg, float flow_ms) {
+    if (!tftReady) return;
+    invalidateNavCache();
+    tft.fillScreen(COLOR_BLACK);
+
+    tft.setTextSize(2);
+    tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
+    tft.setCursor(4, 4);
+    tft.print("CURRENT");
+
+    tft.setTextColor(COLOR_GREEN, COLOR_BLACK);
+    tft.setCursor(4, 32);
+    tft.print("HOLDING");
+
+    tft.setTextSize(5);
+    tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%u", (unsigned)remaining_s);
+    int charW = 5 * 6;
+    int x = (320 - (int)strlen(buf) * charW) / 2;
+    tft.setCursor(x, 80);
+    tft.print(buf);
+
+    tft.setTextSize(2);
+    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+    tft.setCursor(4, 160);
+    tft.printf("Flow %.2f m/s", (double)flow_ms);
+    tft.setCursor(4, 184);
+    tft.printf("Hdg  %03d", (int)(heading_deg + 0.5f) % 360);
+
+    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+    tft.setCursor(4, 212);
+    tft.print("BTN1=cancel");
+}
+
+void showCurrentHoldResult(float current_ms, float toward_deg) {
+    if (!tftReady) return;
+    invalidateNavCache();
+    tft.fillScreen(COLOR_BLACK);
+
+    tft.setTextSize(2);
+    tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
+    tft.setCursor(4, 4);
+    tft.print("CURRENT");
+
+    tft.setTextSize(3);
+    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+    tft.setCursor(4, 48);
+    tft.printf("%.2f m/s", (double)current_ms);
+    tft.setCursor(4, 88);
+    tft.printf("%.1f m/min", (double)(current_ms * 60.0f));
+
+    tft.setTextSize(2);
+    tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
+    tft.setCursor(4, 140);
+    tft.printf("Toward %03d", (int)(toward_deg + 0.5f) % 360);
+
+    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+    tft.setCursor(4, 180);
+    tft.print("Logged.");
+    tft.setCursor(4, 210);
+    tft.print("Any btn=done");
+}
+
+// ---------------------------------------------------------------------------
 // Run in progress — big elapsed timer
 // Layout (320×240):
 //   y=  4  "SPEED CAL"              cyan, size 2

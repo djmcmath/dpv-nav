@@ -119,6 +119,25 @@ static uint8_t       gSpeedCalChoice     = 0;    // 0=RESET+ACCEPT, 1=ACCEPT, 2=
 static uint32_t      gCountdownStartMs   = 0;    // millis() when countdown begins
 static constexpr uint32_t COUNTDOWN_TOTAL_MS = 5000;  // 5 second countdown
 
+// ---- Current hold UI state ------------------------------------------------
+// "Hold station pointing upstream for 60 s": the diver stops fighting the water
+// and lets the flow sensor read it directly. The measurement is the only one
+// available at depth, where there is no GPS to difference and no bottom fix to
+// drift between.
+//
+// Same split as speed cal: the display runs the pre-roll countdown, the NAV
+// device owns the 60 s clock and the sampling (cal_mode 7 -> 8), and the display
+// advances forward-only by watching cal_mode. Anything else would have two
+// clocks that disagree over a dropped packet.
+enum class CurrentHoldPhase : uint8_t {
+    NONE,       // not in a current hold
+    COUNTDOWN,  // pre-roll: get pointed upstream and stop swimming
+    RUNNING,    // nav is timing and sampling (cal_mode = 7)
+    RESULT,     // nav has a measurement (cal_mode = 8)
+};
+static CurrentHoldPhase gCurrentHoldPhase     = CurrentHoldPhase::NONE;
+static uint32_t         gCurrentHoldCountdown = 0;
+
 // ---- Cloud calibration UI state (docs/cloud-calibration-plan.md) -----------
 // Entered automatically when a bin-coverage cal's DONE-hold ends. The nav
 // device then blocks on its own upload+fit call (see net/cloud_client.h), so
@@ -435,6 +454,13 @@ void loop() {
             Serial.println("[SPEED_CAL] entering distance selection");
         }
 
+        if (menu::isPendingCurrentHold()) {
+            menu::clearCurrentHoldPending();
+            gCurrentHoldPhase     = CurrentHoldPhase::COUNTDOWN;
+            gCurrentHoldCountdown = millis();
+            Serial.println("[CURRENT] entering hold countdown");
+        }
+
         if (menu::isPendingHdgCal()) {
             menu::clearHdgCalPending();
             sendCmd(DisplayCmd::START_HDG_FOURIER_CAL);
@@ -692,6 +718,20 @@ void loop() {
                 return;
             }
 
+            // Current hold pre-roll: entirely display-side, like the speed-cal
+            // countdown, because the nav device is not involved until START.
+            if (gCurrentHoldPhase == CurrentHoldPhase::COUNTDOWN) {
+                uint32_t elapsedMs = now - gCurrentHoldCountdown;
+                if (elapsedMs >= COUNTDOWN_TOTAL_MS) {
+                    sendCmd(DisplayCmd::START_CURRENT_HOLD);
+                    gCurrentHoldPhase = CurrentHoldPhase::RUNNING;
+                    Serial.println("[CURRENT] countdown complete, sent START_CURRENT_HOLD");
+                } else {
+                    uint32_t remainingMs = COUNTDOWN_TOTAL_MS - elapsedMs;
+                    display::showCurrentHoldCountdown((int)((remainingMs + 999) / 1000));
+                }
+            } else
+
             // Speed cal distance selection overrides everything (pre-nav-device)
             if (gSpeedCalPhase == SpeedCalPhase::DIST_SELECT) {
                 display::showSpeedCalDistSelect(gSpeedCalDist_ft);
@@ -731,6 +771,17 @@ void loop() {
                                                 lastNav.speed_cal_k_existing,
                                                 lastNav.speed_cal_k_proposed,
                                                 gSpeedCalChoice);
+                } else if (lastNav.cal_mode == 8) {
+                    // The live flow reading matters as much as the clock: a diver
+                    // who cannot hold station needs to watch it failing. It comes
+                    // from current_ms, not speed_ms -- the DR gate has already
+                    // zeroed speed_ms for the whole hold, by design.
+                    display::showCurrentHoldRunning(lastNav.cal_remaining_s,
+                                                    lastNav.heading_deg,
+                                                    lastNav.current_ms);
+                } else if (lastNav.cal_mode == 9) {
+                    display::showCurrentHoldResult(lastNav.current_ms,
+                                                   lastNav.current_toward_deg);
                 }
                 // cal_mode 5/6 (bin cal): rendered via CalProgressPacket above
             } else if (menu::isOpen()) {
@@ -750,7 +801,7 @@ void loop() {
                 display::showNav(applyHeadingMode(lastNav));
 #endif
             }
-            } // end else (not DIST_SELECT)
+            } // end else (not a display-owned modal)
         }
     } else {
         // Link dropped
@@ -798,6 +849,12 @@ static void processNavLine() {
                     gSpeedCalPhase   = SpeedCalPhase::RESULT;
                     gSpeedCalChoice  = 0;
                     Serial.println("[SPEED_CAL] result ready — showing accept/reject");
+                } else if (lastNav.cal_mode == 9 &&
+                           gCurrentHoldPhase == CurrentHoldPhase::RUNNING) {
+                    // Forward-only, same as speed cal: the nav device owns the
+                    // clock, and a dropped packet must never walk the UI back.
+                    gCurrentHoldPhase = CurrentHoldPhase::RESULT;
+                    Serial.println("[CURRENT] measurement ready");
                 }
             }
             // If nav device returns to READY after bin cal, clear our cal state
@@ -1114,6 +1171,49 @@ static bool handleModalButtons() {
     }
 
     // --- Speed cal: distance selection mode ----------------------------------
+    // --- Current hold ---------------------------------------------------------
+    // Claims BOTH buttons for the whole modal and returns true, so
+    // consumePendingReleases() runs -- otherwise the release of whichever button
+    // is still down fires into the menu the instant this modal exits. That
+    // invariant cost a real dive in Aug 2026; see CLAUDE.md.
+    if (gCurrentHoldPhase != CurrentHoldPhase::NONE) {
+        if (gCurrentHoldPhase == CurrentHoldPhase::RESULT) {
+            // Either button dismisses: the measurement is already in the log,
+            // so there is nothing here to accept or reject.
+            if ((!btn1.pressed && !btn1.fired && btn1.pressStartMs > 0) ||
+                (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0)) {
+                btn1.fired = true;
+                btn2.fired = true;
+                // Tell nav we are done: it holds cal_mode 9 (and CALIBRATION
+                // state) until told, so that the packet carrying the result
+                // keeps being sent.
+                sendCmd(DisplayCmd::END_CURRENT_HOLD);
+                gCurrentHoldPhase = CurrentHoldPhase::NONE;
+                display::clear();
+                Serial.println("[CURRENT] result dismissed");
+            }
+            return true;
+        }
+
+        // BTN1 aborts, during the pre-roll or the run itself. A hold the diver
+        // could not actually hold is worse than no measurement at all.
+        if (!btn1.pressed && !btn1.fired && btn1.pressStartMs > 0) {
+            btn1.fired = true;
+            if (gCurrentHoldPhase == CurrentHoldPhase::RUNNING) {
+                sendCmd(DisplayCmd::END_CURRENT_HOLD);
+            }
+            gCurrentHoldPhase = CurrentHoldPhase::NONE;
+            display::clear();
+            Serial.println("[CURRENT] cancelled");
+        }
+        // BTN2 is claimed and deliberately inert: there is nothing to confirm
+        // mid-hold, and leaving it unclaimed would leak its release to the menu.
+        if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
+            btn2.fired = true;
+        }
+        return true;
+    }
+
     if (gSpeedCalPhase == SpeedCalPhase::DIST_SELECT) {
         // BTN1: cycle distance (150→200→…→500→150)
         if (!btn1.pressed && !btn1.fired && btn1.pressStartMs > 0) {

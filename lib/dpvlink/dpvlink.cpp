@@ -54,11 +54,16 @@ size_t navPacketToBytes(const NavPacket& pkt, char* buf, size_t bufLen) {
         doc["cm"] = pkt.cal_mode;
     }
     // Speed cal fields — only serialize during speed calibration (cal_mode 2/3/4)
-    if (pkt.cal_mode >= 2) {
+    if (pkt.cal_mode >= 2 && pkt.cal_mode <= 4) {
         doc["sd"] = pkt.speed_cal_dist_ft;
         doc["se"] = pkt.speed_cal_elapsed_s;
         doc["sk"] = pkt.speed_cal_k_existing;
         doc["sp"] = pkt.speed_cal_k_proposed;
+    }
+    // Current hold fields — only during a current hold (cal_mode 8/9)
+    if (pkt.cal_mode == 8 || pkt.cal_mode == 9) {
+        doc["cms"] = pkt.current_ms;
+        doc["ctd"] = pkt.current_toward_deg;
     }
     // Boot flags — always send (display needs them for boot status screen)
     if (pkt.boot_flags) doc["bf"] = pkt.boot_flags;
@@ -109,6 +114,8 @@ bool bytesToNavPacket(const char* buf, size_t len, NavPacket& out) {
     out.speed_cal_elapsed_s  = doc["se"]  | (uint16_t)0;
     out.speed_cal_k_existing = doc["sk"]  | 0.0f;
     out.speed_cal_k_proposed = doc["sp"]  | 0.0f;
+    out.current_ms           = doc["cms"] | 0.0f;
+    out.current_toward_deg   = doc["ctd"] | 0.0f;
     out.boot_flags           = doc["bf"]  | (uint8_t)0;
     // heading_raw_deg: fall back to heading_deg if not present (no hdg_cal active)
     out.heading_raw_deg      = doc["hr"]  | out.heading_deg;

@@ -37,6 +37,9 @@ struct NavPacket {
     //   2 = speed cal — waiting for flow to start
     //   3 = speed cal — run in progress (timer running)
     //   4 = speed cal — result ready, awaiting accept/reject
+    //   5/6/7 = bin-aware baseline / mounted / gap-fill mag cal
+    //   8 = current hold — 60 s station-keeping measurement running
+    //   9 = current hold — result ready, awaiting dismissal
     uint8_t  cal_mode;
 
     // Speed calibration result fields (only populated when cal_mode == 2/3/4)
@@ -44,6 +47,13 @@ struct NavPacket {
     uint16_t speed_cal_elapsed_s;    // elapsed run time (seconds)
     float    speed_cal_k_existing;   // k-factor before this calibration run
     float    speed_cal_k_proposed;   // computed k-factor from this run
+
+    // Current hold result (only populated when cal_mode == 8/9). Deliberately
+    // NOT folded into the speed_cal_* fields above: they mean something else,
+    // and a reader who found a current in a field named k_proposed would be
+    // right to distrust everything else here.
+    float    current_ms;             // measured current magnitude, m/s
+    float    current_toward_deg;     // direction the water flows TOWARD, degrees true
 
     // Raw *magnetic* heading: pre-Fourier, pre-motor-offset, declination NOT
     // added (nav_main.cpp passes headingMagDeg). This is the exact value
@@ -316,6 +326,8 @@ enum class DisplayCmd : uint8_t {
     TOGGLE_WATER_DENSITY   = 36, // toggle salt/fresh water density used for depth calculation
     LINK_HELLO             = 37, // reply to a BOOT_PING — proves the display->nav direction is alive
     START_GAPFILL_CAL      = 38, // begin a guided gap-fill baseline pass (requires an installed baseline cal + synced targets)
+    START_CURRENT_HOLD     = 39, // begin a 60 s station-keeping current measurement
+    END_CURRENT_HOLD       = 40, // abort an in-progress current hold, or dismiss its result
 };
 
 // ---------------------------------------------------------------------------

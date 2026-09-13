@@ -23,7 +23,37 @@ moves with temperature — measured around 1.3 µT/°C on a slow cooling curve �
 while `water_temp_c` comes from the MS5837 in the nose and lags what the
 magnetometer feels by roughly 23 s. Its absolute value is not factory-trimmed,
 so use it for change, not as a room thermometer. It logs as `nan` if the read
-fails, and on MARK rows, whose sensor columns aren't sampled.
+fails, and on MARK and CURRENT rows, whose sensor columns aren't sampled.
+
+## `pos_src` — where a row's position came from
+
+| Value | Meaning |
+|---|---|
+| `G` | GPS fix |
+| `E` | dead-reckoning estimate |
+| `W` | waypoint snap — the diver snapped position to a known waypoint in real time |
+| `M` | diver mark. Written out of cadence by `logImmediate()`, with heading and speed left at zero. An annotation on the track, not a step of it. |
+| `C` | **current hold.** A 60 s station-keeping measurement (`Nav > Current`). |
+| `L` | a landmark or position fix added *after* the dive. Never written by firmware — the website splices it in before correction. |
+
+A `'C'` row **reuses two existing columns to carry something else**, which is the one thing
+to know about it: `speed_ms` is the measured current magnitude in m/s, and `heading_deg` is
+the direction the water flows **toward**. The diver points *upstream* during the hold, so
+the compass reads where the current comes *from*; the firmware turns it round before
+logging so that every consumer downstream reads one convention.
+
+Nothing may integrate a `'C'` row as a step of the track. Its speed and heading are a
+current vector, not a motion vector, and treating it as DR injects a leg at the current's
+speed for the row's whole interval. `track-processor` holds it out exactly as it holds out
+a mark.
+
+Dead reckoning is suppressed for the whole hold (`nav_main.cpp`, the
+`DR_MIN_FLOW_SPEED_MS` gate), so the surrounding `'E'` rows correctly log
+`speed_ms = 0.000` — the scooter really is not making way over the ground.
+
+**Adding a new `pos_src` value requires a coordinated dive-map change first.**
+`validate_blocks` in `tracklib/correct.py` hard-fails on an unrecognised value, so a single
+unknown row makes an entire dive uncorrectable.
 
 **MID exists because HIGH cannot cover a dive.** The LittleFS partition is 768 KiB
 (`partitions_nav.csv`), so HIGH fills it in under an hour while MID runs about 2.3

@@ -478,7 +478,9 @@ def main():
         print(f"  level-only fit bias ({bx:6.2f}, {by:6.2f})  scale ({sx:.3f}, {sy:.3f})   [{len(lvl)} samples]"
               f"  = counts ({bx * LIS3MDL_LSB_PER_UT:.1f}, {by * LIS3MDL_LSB_PER_UT:.1f})")
         print("  A lopsided installed scale with a round level fit means the mounted cal's tilted circles were")
-        print("  fit as if level (fit_mounted has no tilt compensation): vertical field leaks into x when an end is raised.")
+        print("  fit as if level: vertical field leaks into x when an end is raised. That was how every mounted")
+        print("  cal was fit before 2026-09-13; fit_mounted now uses the near-level subset, so a cal showing this")
+        print("  predates the fix and wants refitting from its CSV (mag_calibration.py --mode mounted).")
 
 
 if __name__ == "__main__":

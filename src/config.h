@@ -345,7 +345,7 @@ constexpr float DEPTH_SURFACE_REVERT_DWELL_S = 30.0f;  // ...for this long befor
 // ---------------------------------------------------------------------------
 
 // divemap backend host. No scheme -- cloud_client builds the full HTTPS URL.
-constexpr const char* CLOUD_API_HOST     = "divemap.diverdaniel.com";
+constexpr const char* CLOUD_API_HOST     = "map.terndiving.com";
 constexpr uint16_t    CLOUD_API_PORT     = 443;
 constexpr uint32_t    CLOUD_HTTP_TIMEOUT_MS = 15000;  // per-request timeout
 

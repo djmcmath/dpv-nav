@@ -5,5 +5,5 @@ set -e
 cd "$(dirname "$0")"
 JSON_INC="../../.pio/libdeps/nav/ArduinoJson/src"
 [ -d "$JSON_INC" ] || JSON_INC="../../.pio/libdeps/display/ArduinoJson/src"
-g++ -std=c++17 -O1 -I"$JSON_INC" -o roundtrip roundtrip.cpp ../../lib/dpvlink/dpvlink.cpp
+g++ -std=c++17 -O1 -I"$JSON_INC" -o roundtrip roundtrip.cpp ../../lib/dpvlink/dpvlink.cpp ../../lib/dpvlink/ota_link.cpp
 ./roundtrip

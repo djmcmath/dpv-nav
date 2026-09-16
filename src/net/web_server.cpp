@@ -2,6 +2,7 @@
 #include "wifi_manager.h"
 #include "cal_sync.h"
 #include "cloud_client.h"
+#include "ota.h"
 #include "../util/waypoints.h"
 #include "../nav_main.h"
 #include <ArduinoJson.h>
@@ -109,6 +110,15 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
   .hotspothelp b { color: #ffd166; font-weight: bold; }
   .wifisec .chk { font-size: .85rem; color: #ccc; }
   .wifisec .chk input { vertical-align: middle; margin-right: .3rem; }
+  #fwversions { font-size: .9rem; color: #aaa; margin: .5rem 0; }
+  #fwavail { font-size: .95rem; color: #ffd166; margin: .5rem 0 .2rem; }
+  #fwchanges { font-size: .88rem; color: #e0e0e0; margin: .2rem 0 .6rem; }
+  #fwchanges ul { margin: .2rem 0 .5rem 1.3rem; }
+  #fwchanges .ver { color: #4cc9f0; font-weight: bold; }
+  #fwbar { height: .6rem; background: #1a1a2e; border-radius: 3px; overflow: hidden; margin: .4rem 0; }
+  #fwbarfill { height: 100%; width: 0; background: #4cc9f0; }
+  #fwaction { font-size: .9rem; color: #72efdd; margin-top: .3rem; min-height: 1.2em; }
+  .calsync button:disabled { background: #333; color: #777; cursor: not-allowed; }
 </style>
 </head>
 <body>
@@ -159,6 +169,18 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
     <button onclick="restoreCal('gyro')">Gyro</button>
     <button onclick="restoreCal('speed')">Speed</button>
   </div>
+</div>
+<div class="calsync">
+  <b>Firmware</b>
+  <div id="fwversions">Loading...</div>
+  <div id="fwavail" hidden></div>
+  <div id="fwchanges"></div>
+  <div id="fwbar" hidden><div id="fwbarfill"></div></div>
+  <div>
+    <button id="fwcheck" onclick="checkFirmware()">Check for firmware updates</button>
+    <button id="fwstart" onclick="startFirmware()" hidden>Update now</button>
+  </div>
+  <div id="fwaction"></div>
 </div>
 <div class="waypoints">
   <b>Waypoints</b>
@@ -634,8 +656,92 @@ async function loadCloudStatus() {
     document.getElementById('uploadselected').disabled = !cloudLinked;
   } catch (e) { el.textContent = 'Could not check link status.'; }
 }
+const FW_STATE_TEXT = {
+  idle: 'Not checked yet (checks automatically once the unit is on a network with internet).',
+  checking: 'Checking...',
+  up_to_date: 'Up to date.',
+  available: '',
+  display_transfer: 'Sending firmware to the display (its screen shows progress too)...',
+  display_verify: 'Display installed it and is restarting -- waiting for it to report the new version...',
+  nav_download: 'Downloading and installing nav firmware...',
+  rebooting: 'Installed. The unit is rebooting -- reload this page in about 30 seconds.',
+  done: '',
+  failed: ''
+};
+const FW_BUSY = ['checking', 'display_transfer', 'display_verify', 'nav_download', 'rebooting'];
+let fwPollTimer = null;
+function esc(t) { const d = document.createElement('div'); d.textContent = t; return d.innerHTML; }
+function renderFirmware(s) {
+  const disp = s.current_display ? s.current_display : 'not reported (older build, needs USB flash)';
+  let v = 'Nav ' + s.current_nav + '  ·  Display ' + disp;
+  if (s.current_display && s.current_display !== s.current_nav) v += '  ·  MISMATCH';
+  document.getElementById('fwversions').textContent = v;
+
+  const targets = s.targets || [];
+  const hasNewer = !!s.update_available;
+  const avail = document.getElementById('fwavail');
+  avail.hidden = !hasNewer;
+  if (hasNewer) {
+    avail.textContent = 'Version ' + s.latest + ' available' +
+      (targets.length === 1 ? ' (' + targets[0] + ' only -- the other board already has it).' : '.');
+  }
+  document.getElementById('fwchanges').innerHTML = !hasNewer ? '' : (s.releases || []).map(r =>
+    '<div><span class="ver">' + esc(r.version) + '</span>' +
+    (r.date ? ' <span style="color:#888">(' + esc(r.date) + ')</span>' : '') +
+    '<ul>' + (r.changes || []).map(c => '<li>' + esc(c) + '</li>').join('') + '</ul></div>'
+  ).join('');
+
+  const busy = FW_BUSY.includes(s.state);
+  const start = document.getElementById('fwstart');
+  start.hidden = !hasNewer || s.state === 'rebooting';
+  start.disabled = busy || !!s.blocked_reason;
+  start.title = s.blocked_reason || '';
+  document.getElementById('fwcheck').disabled = busy;
+
+  const moving = s.state === 'display_transfer' || s.state === 'nav_download';
+  document.getElementById('fwbar').hidden = !moving;
+  document.getElementById('fwbarfill').style.width = s.progress + '%';
+
+  const act = document.getElementById('fwaction');
+  if (s.state === 'failed') act.textContent = s.error;
+  else if (s.state === 'done') act.textContent = s.message;
+  else if (moving) act.textContent = FW_STATE_TEXT[s.state] + ' ' + s.progress + '%';
+  else if (hasNewer && s.blocked_reason && !busy) act.textContent = 'Can\'t update right now: ' + s.blocked_reason;
+  else act.textContent = FW_STATE_TEXT[s.state] || '';
+
+  const wantPoll = busy || s.state === 'idle';
+  clearTimeout(fwPollTimer);
+  if (wantPoll) fwPollTimer = setTimeout(loadFirmware, s.state === 'idle' ? 10000 : 1000);
+}
+async function loadFirmware() {
+  try {
+    renderFirmware(await fetch('/api/ota/status').then(r => r.json()));
+  } catch (e) {
+    // Expected while the unit reboots after an install; keep trying.
+    document.getElementById('fwversions').textContent = 'Unit not responding (rebooting?)...';
+    clearTimeout(fwPollTimer);
+    fwPollTimer = setTimeout(loadFirmware, 3000);
+  }
+}
+async function checkFirmware() {
+  const act = document.getElementById('fwaction');
+  act.textContent = 'Checking...';
+  document.getElementById('fwcheck').disabled = true;
+  const r = await fetch('/api/ota/check', { method: 'POST' });
+  const msg = await r.text();
+  await loadFirmware();
+  act.textContent = msg;
+}
+async function startFirmware() {
+  const latest = document.getElementById('fwavail').textContent;
+  if (!confirm(latest + ' Install it now?\n\nThe display is updated first (about a minute; the nav screen is replaced by a progress screen), then nav, which reboots the unit. Keep it powered and on WiFi until the page says it is done.')) return;
+  const r = await fetch('/api/ota/start', { method: 'POST' });
+  if (!r.ok) document.getElementById('fwaction').textContent = await r.text();
+  loadFirmware();
+}
 load();
 loadWaypoints();
+loadFirmware();
 loadWifi();
 loadCalSyncStatus();
 loadCloudStatus();
@@ -1021,6 +1127,28 @@ static void handleCalRetryUpload() {
     server.send(r.ok ? 200 : 502, "application/json", json);
 }
 
+// --------------- firmware update ---------------
+// /api/ota/start returns as soon as the download has begun; the page polls
+// /api/ota/status for progress. /api/ota/check blocks for one manifest
+// request, same tradeoff as /api/cal-sync/check.
+
+static void handleOtaStatus() {
+    server.send(200, "application/json", ota::statusJson());
+}
+
+static void handleOtaCheck() {
+    server.send(200, "text/plain", ota::checkNow());
+}
+
+static void handleOtaStart() {
+    String err;
+    if (!ota::start(err)) {
+        server.send(409, "text/plain", err);
+        return;
+    }
+    server.send(200, "text/plain", "Started");
+}
+
 // --------------- public API ---------------
 
 void init() {
@@ -1073,6 +1201,9 @@ void init() {
     server.on("/api/cloud-status",     HTTP_GET,  handleCloudStatus);
     server.on("/api/dive-logs/upload", HTTP_POST, handleDiveLogUpload);
     server.on("/api/cal/retry-upload", HTTP_POST, handleCalRetryUpload);
+    server.on("/api/ota/status", HTTP_GET,  handleOtaStatus);
+    server.on("/api/ota/check",  HTTP_POST, handleOtaCheck);
+    server.on("/api/ota/start",  HTTP_POST, handleOtaStart);
     server.onNotFound([]() {
         Serial.printf("[Web] 404: %s %s\n", server.method() == HTTP_GET ? "GET" : "POST",
                       server.uri().c_str());

@@ -33,3 +33,16 @@ struct CalRetryResult {
 // can trigger it without reaching into nav_main.cpp's private cal-tracking
 // state.
 CalRetryResult retryCalibrationUpload(const char* filename);
+
+// Why a firmware update must not start right now, or nullptr if it may.
+// Covers what only nav_main.cpp can see: dive mode, depth, logging, a running
+// calibration or current hold. (WiFi connectivity is net/ota.cpp's own check.)
+const char* otaBlockedReason();
+
+// FW_VERSION the display reported in its boot LINK_HELLO; "" if it never did
+// (link failed, or a pre-OTA display build that doesn't send one).
+const char* displayFwVersion();
+
+// Clears it, so the next LINK_HELLO decides -- ota.cpp uses this to confirm a
+// just-updated display restarted on the new version rather than rolling back.
+void forgetDisplayFwVersion();

@@ -3,6 +3,7 @@
 // builds on host), so this exercises the shipping encoder/decoder, not a copy.
 //   see tools/dpvlink_test/run.sh
 #include "../../lib/dpvlink/dpvlink.h"
+#include "../../lib/dpvlink/ota_link.h"
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -188,6 +189,136 @@ int main() {
             if (rx.current_bin_roll_counts[k] != 0) { check(false, "roll counts default to zero when absent"); break; }
         }
         check(rx.current_roll_sector == -1, "roll sector defaults to -1 when absent");
+    }
+
+    // 9. LINK_HELLO carries the display FW_VERSION; still decodes as LINK_HELLO,
+    //    and a pre-OTA bare LINK_HELLO yields an empty version.
+    {
+        char small[96];  // the display's real txBuf size
+        size_t n = displayLinkHelloToBytes("12.345.6789", small, sizeof(small));
+        check(n > 0, "LINK_HELLO with version fits 96-byte txBuf");
+        DisplayCmd cmd = DisplayCmd::NONE;
+        check(bytesToDisplayCmd(small, n, cmd) && cmd == DisplayCmd::LINK_HELLO,
+              "versioned LINK_HELLO still decodes as LINK_HELLO");
+        char ver[16];
+        parseLinkVersion(small, n, ver, sizeof(ver));
+        check(strcmp(ver, "12.345.6789") == 0, "LINK_HELLO version round-trips");
+
+        n = displayCmdToBytes(DisplayCmd::LINK_HELLO, small, sizeof(small));
+        strcpy(ver, "poison");
+        parseLinkVersion(small, n, ver, sizeof(ver));
+        check(ver[0] == '\0', "bare (pre-OTA) LINK_HELLO yields empty version");
+    }
+
+    // 10. BOOT_PING carries nav's FW_VERSION the same way, still identifies as
+    //     a BOOT_PING, and fits nav's 32-byte pingBuf.
+    {
+        char ping[32];  // nav_main.cpp's real pingBuf size
+        size_t n = bootPingToBytes("12.345.6789", ping, sizeof(ping));
+        check(n > 0, "versioned BOOT_PING fits 32-byte pingBuf");
+        check(identifyPacket(ping, n) == PacketType::BOOT_PING,
+              "versioned BOOT_PING still identifies as BOOT_PING");
+        char ver[16];
+        parseLinkVersion(ping, n, ver, sizeof(ver));
+        check(strcmp(ver, "12.345.6789") == 0, "BOOT_PING version round-trips");
+    }
+
+    // 11. Display firmware transfer: CRC, frames, ACKs, and the U/V/reply lines.
+    {
+        // Standard CRC-32 check value, and the running form agrees with one pass.
+        const uint8_t digits[] = {'1','2','3','4','5','6','7','8','9'};
+        check(otalink::crc32(digits, 9) == 0xCBF43926u, "crc32 matches the IEEE check value");
+        check(otalink::crc32(digits + 4, 5, otalink::crc32(digits, 4)) == 0xCBF43926u,
+              "crc32 can be continued across calls");
+
+        uint8_t payload[otalink::MAX_PAYLOAD];
+        for (size_t i = 0; i < sizeof(payload); i++) payload[i] = (uint8_t)(i * 7 + 3);
+        uint8_t frame[otalink::MAX_FRAME_LEN];
+        size_t fn = otalink::encodeFrame(513, payload, otalink::MAX_PAYLOAD, frame, sizeof(frame));
+        check(fn == otalink::MAX_FRAME_LEN, "full frame encodes to MAX_FRAME_LEN");
+        check(otalink::encodeFrame(0, payload, otalink::MAX_PAYLOAD + 1, frame, sizeof(frame)) == 0,
+              "oversize payload refused");
+
+        // Leading garbage (a stray JSON line, a lone magic byte) is skipped.
+        otalink::FrameParser fp;
+        const char junk[] = "{\"t\":\"N\"}\n\xA5";
+        for (size_t i = 0; i + 1 < sizeof(junk); i++)
+            check(fp.feed((uint8_t)junk[i]) == otalink::FrameParser::Result::NONE, "junk yields nothing");
+        otalink::FrameParser::Result r = otalink::FrameParser::Result::NONE;
+        size_t frames = 0;
+        for (size_t i = 0; i < fn; i++) {
+            r = fp.feed(frame[i]);
+            if (r != otalink::FrameParser::Result::NONE) frames++;
+        }
+        check(frames == 1 && r == otalink::FrameParser::Result::FRAME, "frame decodes after junk");
+        check(fp.seq() == 513 && fp.len() == otalink::MAX_PAYLOAD &&
+              memcmp(fp.payload(), payload, otalink::MAX_PAYLOAD) == 0, "frame fields round-trip");
+
+        // One flipped payload bit -> BAD_CRC, and the parser recovers for the next frame.
+        frame[100] ^= 0x10;
+        for (size_t i = 0; i < fn; i++) r = fp.feed(frame[i]);
+        check(r == otalink::FrameParser::Result::BAD_CRC, "corrupted payload reports BAD_CRC");
+        frame[100] ^= 0x10;
+        for (size_t i = 0; i < fn; i++) r = fp.feed(frame[i]);
+        check(r == otalink::FrameParser::Result::FRAME, "parser recovers after a bad frame");
+
+        // End-of-image and abort frames carry no payload.
+        uint8_t endf[otalink::HEADER_LEN + otalink::CRC_LEN];
+        size_t en = otalink::encodeFrame(otalink::SEQ_ABORT, nullptr, 0, endf, sizeof(endf));
+        for (size_t i = 0; i < en; i++) r = fp.feed(endf[i]);
+        check(r == otalink::FrameParser::Result::FRAME && fp.seq() == otalink::SEQ_ABORT && fp.len() == 0,
+              "zero-length abort frame decodes");
+
+        // A header claiming more than MAX_PAYLOAD is not a frame: resync, then decode the real one.
+        const uint8_t fake[] = {otalink::MAGIC0, otalink::MAGIC1, 0, 0, 0xFF, 0x7F};
+        for (uint8_t b : fake) fp.feed(b);
+        for (size_t i = 0; i < en; i++) r = fp.feed(endf[i]);
+        check(r == otalink::FrameParser::Result::FRAME, "oversize length header resyncs");
+
+        // ACKs: round-trip, and resync past garbage including a false 'A' start.
+        uint8_t ack[otalink::ACK_LEN];
+        otalink::AckParser ap;
+        const uint8_t noise[] = {'x', 'A', 0x00};
+        for (uint8_t b : noise) check(!ap.feed(b), "ack noise yields nothing");
+        otalink::encodeAck(false, 0x1234, ack, sizeof(ack));
+        bool got = false;
+        for (uint8_t b : ack) got = ap.feed(b) || got;
+        check(got && !ap.ok() && ap.seq() == 0x1234, "NAK decodes after noise");
+        otalink::encodeAck(true, 7, ack, sizeof(ack));
+        got = false;
+        for (uint8_t b : ack) got = ap.feed(b);
+        check(got && ap.ok() && ap.seq() == 7, "ACK decodes");
+
+        // JSON lines.
+        OtaBeginPacket ub{};
+        ub.pv = otalink::PROTOCOL_VERSION;
+        ub.size = 1310719;
+        memset(ub.sha256, 'a', 64);
+        strcpy(ub.version, "123.456.789");
+        char line[160];
+        size_t ln = otaBeginPacketToBytes(ub, line, sizeof(line));
+        check(ln > 0 && identifyPacket(line, ln) == PacketType::OTA_BEGIN, "U packet identifies");
+        OtaBeginPacket ub2{};
+        check(bytesToOtaBeginPacket(line, ln, ub2) && ub2.pv == 1 && ub2.size == 1310719 &&
+              strcmp(ub2.sha256, ub.sha256) == 0 && strcmp(ub2.version, ub.version) == 0,
+              "U packet round-trips");
+
+        ln = updateHintToBytes("0.7.2", line, sizeof(line));
+        char ver[16];
+        parseLinkVersion(line, ln, ver, sizeof(ver));
+        check(identifyPacket(line, ln) == PacketType::UPDATE_HINT && strcmp(ver, "0.7.2") == 0,
+              "V packet identifies and carries the version");
+
+        char small[96];  // the display's real txBuf size
+        ln = otaReplyToBytes(DisplayCmd::OTA_DONE, false, "Checksum mismatch", small, sizeof(small));
+        DisplayCmd dc = DisplayCmd::NONE;
+        bool ok = true;
+        char err[64];
+        check(ln > 0 && bytesToDisplayCmd(small, ln, dc) && dc == DisplayCmd::OTA_DONE, "OTA_DONE decodes");
+        check(parseOtaReply(small, ln, ok, err, sizeof(err)) && !ok && strcmp(err, "Checksum mismatch") == 0,
+              "OTA reply carries ok + err");
+        ln = otaReplyToBytes(DisplayCmd::OTA_READY, true, nullptr, small, sizeof(small));
+        check(parseOtaReply(small, ln, ok, err, sizeof(err)) && ok && err[0] == '\0', "OTA_READY ok");
     }
 
     if (failures == 0) printf("  all dpvlink GAP_FILL target round-trip checks passed\n");

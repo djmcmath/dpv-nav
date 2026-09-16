@@ -282,7 +282,9 @@ struct WaypointListPacket {
 // ---------------------------------------------------------------------------
 // Packet type discriminator (JSON "t" field)
 // ---------------------------------------------------------------------------
-enum class PacketType : uint8_t { UNKNOWN = 0, NAV, DEBUG, CAL_PROGRESS, WAYPOINT_LIST, CAL_CLOUD_RESULT, CLOUD_LINK_RESULT, BOOT_PING };
+enum class PacketType : uint8_t { UNKNOWN = 0, NAV, DEBUG, CAL_PROGRESS, WAYPOINT_LIST, CAL_CLOUD_RESULT, CLOUD_LINK_RESULT, BOOT_PING,
+                                  OTA_BEGIN,     // "U": start a display firmware transfer (see ota_link.h)
+                                  UPDATE_HINT }; // "V": a firmware update is available
 
 PacketType identifyPacket(const char* buf, size_t len);
 
@@ -328,6 +330,8 @@ enum class DisplayCmd : uint8_t {
     START_GAPFILL_CAL      = 38, // begin a guided gap-fill baseline pass (requires an installed baseline cal + synced targets)
     START_CURRENT_HOLD     = 39, // begin a 60 s station-keeping current measurement
     END_CURRENT_HOLD       = 40, // abort an in-progress current hold, or dismiss its result
+    OTA_READY              = 41, // reply to an OTA_BEGIN packet: "ok", and "err" when refused (ota_link.h)
+    OTA_DONE               = 42, // image received: "ok" = verified and installed, restarting; else "err"
 };
 
 // ---------------------------------------------------------------------------
@@ -346,9 +350,37 @@ bool   bytesToNavPacket(const char* buf, size_t len, NavPacket& out);
 
 // Boot-time display-link round-trip check: nav sends this repeatedly for a
 // few seconds during self-test; display replies with DisplayCmd::LINK_HELLO
-// the instant it sees one. No payload — identifyPacket() on the "t" tag is
-// all a receiver needs.
-size_t bootPingToBytes(char* buf, size_t bufLen);
+// the instant it sees one. Carries nav's FW_VERSION as "v" so the display can
+// show both versions on its boot status screen -- identifyPacket() still only
+// needs the "t" tag, so a pre-OTA display echoes this fine.
+size_t bootPingToBytes(const char* fwVersion, char* buf, size_t bufLen);
+
+// LINK_HELLO carrying the display's FW_VERSION as "v", so nav (and tern.local)
+// can tell which display build is attached. A pre-OTA display sends a bare
+// LINK_HELLO with no "v"; parseLinkVersion() then yields "".
+size_t displayLinkHelloToBytes(const char* fwVersion, char* buf, size_t bufLen);
+
+// Reads the "v" field of a BOOT_PING or LINK_HELLO. Yields "" when the sender
+// is a pre-OTA build that doesn't send one.
+void   parseLinkVersion(const char* buf, size_t len, char* verOut, size_t verOutLen);
+
+// ---- Display firmware update (protocol in ota_link.h) ----------------------
+struct OtaBeginPacket {
+    uint8_t  pv;          // otalink::PROTOCOL_VERSION the sender speaks
+    uint32_t size;        // image bytes
+    char     sha256[65];  // lowercase hex
+    char     version[16]; // release being installed
+};
+size_t otaBeginPacketToBytes(const OtaBeginPacket& pkt, char* buf, size_t bufLen);
+bool   bytesToOtaBeginPacket(const char* buf, size_t len, OtaBeginPacket& out);
+
+// {"t":"V","v":"x.y.z"}: nav found a newer release at boot. The display only
+// mentions it -- installing happens from tern.local.
+size_t updateHintToBytes(const char* version, char* buf, size_t bufLen);
+
+// Display replies OTA_READY / OTA_DONE. err may be null/"" when ok.
+size_t otaReplyToBytes(DisplayCmd cmd, bool ok, const char* err, char* buf, size_t bufLen);
+bool   parseOtaReply(const char* buf, size_t len, bool& ok, char* errOut, size_t errOutLen);
 
 size_t calProgressPacketToBytes(const CalProgressPacket& pkt, char* buf, size_t bufLen);
 bool   bytesToCalProgressPacket(const char* buf, size_t len, CalProgressPacket& out);

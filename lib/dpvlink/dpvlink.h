@@ -52,6 +52,7 @@ struct NavPacket {
     // NOT folded into the speed_cal_* fields above: they mean something else,
     // and a reader who found a current in a field named k_proposed would be
     // right to distrust everything else here.
+    // In cal_mode 9, cal_remaining_s carries the seconds averaged (0 = no data).
     float    current_ms;             // measured current magnitude, m/s
     float    current_toward_deg;     // direction the water flows TOWARD, degrees true
 
@@ -329,9 +330,10 @@ enum class DisplayCmd : uint8_t {
     LINK_HELLO             = 37, // reply to a BOOT_PING — proves the display->nav direction is alive
     START_GAPFILL_CAL      = 38, // begin a guided gap-fill baseline pass (requires an installed baseline cal + synced targets)
     START_CURRENT_HOLD     = 39, // begin a 60 s station-keeping current measurement
-    END_CURRENT_HOLD       = 40, // abort an in-progress current hold, or dismiss its result
+    END_CURRENT_HOLD       = 40, // dismiss a current-hold result (or abort with nothing saved)
     OTA_READY              = 41, // reply to an OTA_BEGIN packet: "ok", and "err" when refused (ota_link.h)
     OTA_DONE               = 42, // image received: "ok" = verified and installed, restarting; else "err"
+    FINISH_CURRENT_HOLD    = 43, // diver ends a current hold early: average what was held and save it
 };
 
 // ---------------------------------------------------------------------------

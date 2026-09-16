@@ -59,7 +59,7 @@ MENU
 │   ├── Select WP  — open waypoint selector: navigate TO a named waypoint
 │   ├── Arrive WP  — open waypoint selector: snap current position to a known waypoint
 │   ├── Mark       — mark current position in logs
-│   ├── Current    — measure the current: hold station pointing upstream for 60 s
+│   ├── Current    — measure the current: hold station pointing upstream (up to 60 s)
 │   └── Op Mode    — toggle dive/surface mode (shows DIVE or SURF)
 ├── CAL
 │   ├── Baseline   — magnetometer calibration, device off DPV (full sphere coverage), cloud-fit on completion
@@ -208,21 +208,28 @@ impeller — and that reading is the current itself.
 1. Select **NAV > Current**. The menu closes and a 5-second countdown appears.
 2. Get **pointed upstream** and stop swimming. Hold position over a fixed point on the
    bottom — a rock, a piece of wreck, anything that isn't moving.
-3. The countdown ends and a 60-second hold begins. The screen shows the seconds remaining
-   and the **live flow reading**. Watch it: if you are slipping, you will see the number
-   wander, and you still have time to fix your position.
+3. The countdown ends and a 60-second hold begins. The screen shows a large countdown of
+   the seconds remaining, with the **live flow reading** and heading below it. Watch the
+   flow: if you are slipping, you will see the number wander, and you still have time to
+   fix your position.
 4. At the end, the result shows in m/s and m/min, with the direction the current is flowing
-   *toward*. It is written to the log automatically. Press either button to dismiss.
-5. **BTN1 cancels** at any point. A hold you could not actually hold is worse than no
-   measurement — it records your swimming, not the water.
+   *toward*, and how many seconds went into the average. Press either button to dismiss.
+5. **BTN1 finishes early.** Pressing it during the hold ends it now and keeps what you held:
+   the firmware drops the unsteady seconds at the start and end and averages the rest.
+   Use it when you can't hold station any longer — a 25-second hold is still a measurement.
+   BTN1 during the 5-second countdown cancels outright, since nothing has been measured yet.
 
 **Requirements and gotchas:**
 
-- **Logging must be on.** The measurement is written to the dive log, and nowhere else. If
-  logging is off the screen still shows the number, but nothing is saved and the serial
-  console says so.
+- **Every measurement is saved, logging or not**, to `/currents.csv` on the unit —
+  download it from `tern.local`. If logging is on it is *also* written into the dive log
+  as a `C` row. See the [data logging guide](data-logging-guide.md) for the file format
+  and exactly how the ends are trimmed.
 - Point *upstream*, not downstream. The unit adds 180° for you, so the logged direction is
   where the water is going.
+- Headings on the hold screens follow your **Display > Heading** setting and carry the
+  same T / M / R suffix as the nav screen. What gets *saved* is always true north,
+  whatever the screen shows.
 - Position does not advance during the hold, by design — you are not making way over the
   ground, and the displayed speed reads 0.0 throughout.
 - It is worth doing on the bottom, not only during deco. A current measured at 6 m tells

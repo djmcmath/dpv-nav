@@ -396,6 +396,16 @@ static NavPacket applyHeadingMode(NavPacket pkt) {
     return pkt;
 }
 
+// Suffix for a heading that went through applyHeadingMode(): the same letters
+// the nav screen uses.
+static char headingSuffix() {
+    switch (menu::settings().headingMode) {
+        case nvs_disp::HEADING_TRUE: return 'T';
+        case nvs_disp::HEADING_RAW:  return 'R';
+        default:                     return 'M';
+    }
+}
+
 // ===========================================================================
 void loop() {
     // --- Firmware update from nav: owns the link and the screen -------------
@@ -830,12 +840,26 @@ void loop() {
                     // who cannot hold station needs to watch it failing. It comes
                     // from current_ms, not speed_ms -- the DR gate has already
                     // zeroed speed_ms for the whole hold, by design.
+                    //
+                    // Heading goes through the diver's own TRUE/MAG/RAW choice,
+                    // same as the nav screen: a hold screen reading 15 deg off
+                    // the one they steer by is worse than no heading.
+                    NavPacket shown = applyHeadingMode(lastNav);
                     display::showCurrentHoldRunning(lastNav.cal_remaining_s,
-                                                    lastNav.heading_deg,
+                                                    shown.heading_deg,
+                                                    headingSuffix(),
                                                     lastNav.current_ms);
                 } else if (lastNav.cal_mode == 9) {
-                    display::showCurrentHoldResult(lastNav.current_ms,
-                                                   lastNav.current_toward_deg);
+                    // cal_remaining_s = seconds averaged; 0 = no data.
+                    // The measurement itself is logged TRUE (current_toward_deg);
+                    // only the display converts. RAW has no uncorrected
+                    // "toward" to show, so it gets the corrected magnetic one.
+                    bool showTrue = menu::settings().headingMode == nvs_disp::HEADING_TRUE;
+                    float toward  = lastNav.current_toward_deg;
+                    if (!showTrue) toward = fmodf(toward - DEFAULT_DECLINATION_DEG + 360.0f, 360.0f);
+                    display::showCurrentHoldResult(lastNav.current_ms, toward,
+                                                   showTrue ? 'T' : 'M',
+                                                   lastNav.cal_remaining_s);
                 }
                 // cal_mode 5/6 (bin cal): rendered via CalProgressPacket above
             } else if (menu::isOpen()) {
@@ -1250,8 +1274,8 @@ static bool handleModalButtons() {
     // invariant cost a real dive in Aug 2026; see CLAUDE.md.
     if (gCurrentHoldPhase != CurrentHoldPhase::NONE) {
         if (gCurrentHoldPhase == CurrentHoldPhase::RESULT) {
-            // Either button dismisses: the measurement is already in the log,
-            // so there is nothing here to accept or reject.
+            // Either button dismisses: the measurement is already saved, so
+            // there is nothing here to accept or reject.
             if ((!btn1.pressed && !btn1.fired && btn1.pressStartMs > 0) ||
                 (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0)) {
                 btn1.fired = true;
@@ -1267,16 +1291,21 @@ static bool handleModalButtons() {
             return true;
         }
 
-        // BTN1 aborts, during the pre-roll or the run itself. A hold the diver
-        // could not actually hold is worse than no measurement at all.
+        // BTN1 during the pre-roll cancels: nothing has been sampled yet.
+        // BTN1 during the run FINISHES early -- nav trims the ends, averages
+        // what was held and saves it. The phase stays RUNNING and advances to
+        // RESULT on cal_mode 9 like a full-length hold, so a lost command
+        // just means the diver sees the full 60 s instead.
         if (!btn1.pressed && !btn1.fired && btn1.pressStartMs > 0) {
             btn1.fired = true;
             if (gCurrentHoldPhase == CurrentHoldPhase::RUNNING) {
-                sendCmd(DisplayCmd::END_CURRENT_HOLD);
+                sendCmd(DisplayCmd::FINISH_CURRENT_HOLD);
+                Serial.println("[CURRENT] finish early requested");
+            } else {
+                gCurrentHoldPhase = CurrentHoldPhase::NONE;
+                display::clear();
+                Serial.println("[CURRENT] cancelled before the hold began");
             }
-            gCurrentHoldPhase = CurrentHoldPhase::NONE;
-            display::clear();
-            Serial.println("[CURRENT] cancelled");
         }
         // BTN2 is claimed and deliberately inert: there is nothing to confirm
         // mid-hold, and leaving it unclaimed would leak its release to the menu.

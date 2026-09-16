@@ -1263,7 +1263,7 @@ void showCurrentHoldCountdown(int secondsRemaining) {
     tft.print("BTN1=cancel");
 }
 
-void showCurrentHoldRunning(uint8_t remaining_s, float heading_deg, float flow_ms) {
+void showCurrentHoldRunning(uint8_t remaining_s, float heading_deg, char hdg_suffix, float flow_ms) {
     if (!tftReady) return;
     invalidateNavCache();
     tft.fillScreen(COLOR_BLACK);
@@ -1277,13 +1277,14 @@ void showCurrentHoldRunning(uint8_t remaining_s, float heading_deg, float flow_m
     tft.setCursor(4, 32);
     tft.print("HOLDING");
 
-    tft.setTextSize(5);
+    // The clock is the thing to read at a glance: size 8 (48x64 px per char).
+    tft.setTextSize(8);
     tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
     char buf[8];
     snprintf(buf, sizeof(buf), "%u", (unsigned)remaining_s);
-    int charW = 5 * 6;
+    int charW = 8 * 6;
     int x = (320 - (int)strlen(buf) * charW) / 2;
-    tft.setCursor(x, 80);
+    tft.setCursor(x, 64);
     tft.print(buf);
 
     tft.setTextSize(2);
@@ -1291,14 +1292,14 @@ void showCurrentHoldRunning(uint8_t remaining_s, float heading_deg, float flow_m
     tft.setCursor(4, 160);
     tft.printf("Flow %.2f m/s", (double)flow_ms);
     tft.setCursor(4, 184);
-    tft.printf("Hdg  %03d", (int)(heading_deg + 0.5f) % 360);
+    tft.printf("Hdg  %03d%c", (int)(heading_deg + 0.5f) % 360, hdg_suffix);
 
     tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
     tft.setCursor(4, 212);
-    tft.print("BTN1=cancel");
+    tft.print("BTN1=finish now");
 }
 
-void showCurrentHoldResult(float current_ms, float toward_deg) {
+void showCurrentHoldResult(float current_ms, float toward_deg, char toward_suffix, uint8_t averaged_s) {
     if (!tftReady) return;
     invalidateNavCache();
     tft.fillScreen(COLOR_BLACK);
@@ -1307,6 +1308,20 @@ void showCurrentHoldResult(float current_ms, float toward_deg) {
     tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
     tft.setCursor(4, 4);
     tft.print("CURRENT");
+
+    if (averaged_s == 0) {
+        tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+        tft.setCursor(4, 60);
+        tft.print("Not held long");
+        tft.setCursor(4, 84);
+        tft.print("enough to measure.");
+        tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+        tft.setCursor(4, 180);
+        tft.print("Nothing saved.");
+        tft.setCursor(4, 210);
+        tft.print("Any btn=done");
+        return;
+    }
 
     tft.setTextSize(3);
     tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
@@ -1318,11 +1333,11 @@ void showCurrentHoldResult(float current_ms, float toward_deg) {
     tft.setTextSize(2);
     tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
     tft.setCursor(4, 140);
-    tft.printf("Toward %03d", (int)(toward_deg + 0.5f) % 360);
+    tft.printf("Toward %03d%c", (int)(toward_deg + 0.5f) % 360, toward_suffix);
 
     tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
     tft.setCursor(4, 180);
-    tft.print("Logged.");
+    tft.printf("Avg of %us. Saved.", (unsigned)averaged_s);
     tft.setCursor(4, 210);
     tft.print("Any btn=done");
 }

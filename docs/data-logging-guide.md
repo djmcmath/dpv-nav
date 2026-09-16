@@ -29,6 +29,27 @@ die temperature's absolute value is not factory-trimmed, so use it for change,
 not as a room thermometer. It logs as `nan` until a plausible reading has been
 captured, and on MARK and CURRENT rows, whose sensor columns aren't sampled.
 
+## Headings in logs are TRUE
+
+Every heading the firmware writes is **true**, whatever the diver has chosen
+under `Display > Heading`. That setting changes only what the screen shows, never
+what is logged.
+
+- `heading_deg` in every dive-log row is the fully corrected heading: AHRS
+  heading → Fourier heading cal (applied in magnetic) → **+ `DEFAULT_DECLINATION_DEG`**
+  → + motor offset ([nav_main.cpp](../src/nav_main.cpp), "Extract Euler angles").
+- A `'C'` row's `heading_deg` (direction the current flows toward) is true.
+- `/currents.csv` `toward_deg` and `held_deg` are true.
+- `'M'` mark rows log `heading_deg = 0`, which is not a heading.
+
+**The declination is a compile-time constant, not a lookup.** `DEFAULT_DECLINATION_DEG`
+in [config.h](../src/config.h) is 14.7° E (southern Oregon). So:
+
+- Magnetic is always recoverable exactly: `magnetic = heading_deg − 14.7`, mod 360.
+- "True" is only true where the local declination is 14.7° E. For a dive somewhere
+  else, correct with `true = heading_deg − 14.7 + local_declination`. If that
+  constant ever changes, logs from before the change used the old value.
+
 ## `pos_src` — where a row's position came from
 
 | Value | Meaning |
@@ -37,12 +58,12 @@ captured, and on MARK and CURRENT rows, whose sensor columns aren't sampled.
 | `E` | dead-reckoning estimate |
 | `W` | waypoint snap — the diver snapped position to a known waypoint in real time |
 | `M` | diver mark. Written out of cadence by `logImmediate()`, with heading and speed left at zero. An annotation on the track, not a step of it. |
-| `C` | **current hold.** A 60 s station-keeping measurement (`Nav > Current`). |
+| `C` | **current hold.** A station-keeping measurement (`Nav > Current`) of up to 60 s; the diver can finish it early. |
 | `L` | a landmark or position fix added *after* the dive. Never written by firmware — the website splices it in before correction. |
 
 A `'C'` row **reuses two existing columns to carry something else**, which is the one thing
 to know about it: `speed_ms` is the measured current magnitude in m/s, and `heading_deg` is
-the direction the water flows **toward**. The diver points *upstream* during the hold, so
+the direction the water flows **toward**, in degrees **true** (see "Headings in logs are TRUE" above). The diver points *upstream* during the hold, so
 the compass reads where the current comes *from*; the firmware turns it round before
 logging so that every consumer downstream reads one convention.
 
@@ -54,6 +75,34 @@ a mark.
 Dead reckoning is suppressed for the whole hold (`nav_main.cpp`, the
 `DR_MIN_FLOW_SPEED_MS` gate), so the surrounding `'E'` rows correctly log
 `speed_ms = 0.000` — the scooter really is not making way over the ground.
+
+### `/currents.csv` — every current hold, logging on or off
+
+A `'C'` row only exists if a dive log is open. Every hold that produced a number is
+**also** appended to `/currents.csv` on the nav filesystem, whether or not logging is on,
+so a measurement is never lost to a forgotten Log toggle. Download it from the file list
+at `tern.local`. At 64 KiB it rotates to `/currents.old.csv` (one generation kept).
+
+| Column | Meaning |
+|---|---|
+| `timestamp_ms` | `millis()` at the finish — same clock as the dive log |
+| `utc` | wall-clock UTC, empty if GPS/NTP never set the clock this power cycle |
+| `current_ms`, `current_m_min` | averaged current magnitude |
+| `toward_deg` | direction the water flows toward, **true** (same as the `'C'` row) |
+| `held_deg` | circular mean of the heading the diver held (upstream), **true** |
+| `held_s` | seconds from start to finish |
+| `kept_s` | seconds that went into the average after edge trimming |
+| `ended_early` | 1 if the diver pressed BTN1 to finish before 60 s |
+| `lat`, `lon`, `pos_x_m`, `pos_y_m` | DR position at the finish |
+| `depth_m`, `water_temp_c` | 0 if no depth sensor |
+| `log_file` | the dive log open at the time, or empty — joins the row to its `'C'` row |
+
+**How the average is formed.** Samples are binned per second. The second a finish-early
+press lands in is dropped (it is the press). The median and MAD of the per-second means
+set a limit of `max(0.05 m/s, 3 × 1.4826 × MAD)`; seconds beyond it are trimmed from
+**each end only**, walking inward until the first in-limit second. Wobbles mid-hold stay
+in — they are part of what was held. The result is the sample-weighted mean of what is
+left. A hold with no complete second saves nothing, and the display says so.
 
 **Adding a new `pos_src` value requires a coordinated dive-map change first.**
 `validate_blocks` in `tracklib/correct.py` hard-fails on an unrecognised value, so a single

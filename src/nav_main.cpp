@@ -325,16 +325,32 @@ static uint32_t gSpeedCalStartMs     = 0;      // millis() when run started
 // water going past rather than the scooter going through it. Averaged over the
 // hold, that IS the current -- the only measurement of it available at depth,
 // where there is no GPS to difference and no bottom fix to drift between.
+//
+// Samples go into one-second bins rather than a single running sum, so the
+// finish can trim the ends: the first seconds while the diver is still settling,
+// and the last ones where a cancel press knocks them off station. A cancelled
+// hold is finished, not discarded -- whatever was held is still a measurement.
 static constexpr uint32_t CURRENT_HOLD_DURATION_MS = 60000;
-static constexpr uint16_t CURRENT_HOLD_MIN_SAMPLES = 20;   // a short hold measured nothing
-static bool     gCurrentHoldActive   = false;  // also suppresses DR — see the gate below
-static uint32_t gCurrentHoldStartMs  = 0;
-static double   gCurrentHoldFlowSum  = 0.0;    // mean flow over the hold, m/s
-static double   gCurrentHoldSinSum   = 0.0;    // circular mean of heading
-static double   gCurrentHoldCosSum   = 0.0;
-static uint16_t gCurrentHoldSamples  = 0;
-static float    gCurrentHoldResultMs = 0.0f;
-static float    gCurrentHoldToward   = 0.0f;
+static constexpr uint8_t  CURRENT_HOLD_BINS        = CURRENT_HOLD_DURATION_MS / 1000;
+// An edge second is trimmed when its mean flow sits further than this from the
+// hold's median, or 3 robust sigmas (1.4826 * MAD) if that is wider. The floor
+// stops a very steady hold from trimming seconds over sensor noise.
+static constexpr float    CURRENT_TRIM_MIN_DEV_MS  = 0.05f;   // 3 m/min
+static constexpr const char* CURRENT_FILE_PATH     = "/currents.csv";
+static constexpr const char* CURRENT_FILE_OLD_PATH = "/currents.old.csv";
+static constexpr size_t   CURRENT_FILE_MAX_BYTES   = 64 * 1024;  // then rotated to .old
+struct CurrentHoldBin {
+    double   flowSum;
+    double   sinSum;    // circular mean of heading
+    double   cosSum;
+    uint16_t n;
+};
+static bool           gCurrentHoldActive   = false;  // also suppresses DR — see the gate below
+static uint32_t       gCurrentHoldStartMs  = 0;
+static CurrentHoldBin gCurrentHoldBins[CURRENT_HOLD_BINS];
+static float          gCurrentHoldResultMs = 0.0f;
+static float          gCurrentHoldToward   = 0.0f;
+static uint8_t        gCurrentHoldKeptS    = 0;      // seconds averaged after trimming; 0 = no data
 static uint32_t gSpeedCalPulseTotal  = 0;      // pulses accumulated during run
 static float    gSpeedCalHdgSinEMA   = 0.0f;
 static float    gSpeedCalHdgCosEMA   = 0.0f;
@@ -366,7 +382,14 @@ static bool     gDepthZeroed        = false;  // one-shot: surface pressure capt
 static uint32_t gDepthSurfaceSinceMs = 0;      // 0 = not currently shallow; else millis() we became shallow
 
 // ---- Serial link buffer ----------------------------------------------------
-static char linkBuf[256];
+// NavPacket is JSON and variable-length: every optional field and every float's
+// digit count changes its size. A realistic packet with the depth sensor fitted
+// is ~250 bytes at rest and ~320 during speed cal or a current hold. The old
+// 256-byte buffer made navPacketToBytes() return 0 there, so NOTHING was sent
+// and the display went NO LINK (found 2026-09-16 on the first current hold).
+// The display's rxBuf is 4096, so this side is the limit that matters.
+static char linkBuf[512];
+static uint32_t gLinkOverflowLogMs = 0;  // rate-limits the too-big warning
 static char wpBuf[3200];  // waypoint list packet — up to 50 waypoints in JSON
 
 // ---- OTA gating (see nav_main.h / net/ota.cpp) -----------------------------
@@ -406,7 +429,7 @@ static nvs_nav::State currentNavNvsState() {
 
 // ---- Forward declarations --------------------------------------------------
 static void loadCalibration();
-static void finishCurrentHold();
+static void finishCurrentHold(bool early);
 static void cancelCurrentHold();
 static void sendNavPacket(float heading, float headingRaw, float pitch, float roll,
                           float speed, bool gpsSpeed,
@@ -1320,15 +1343,16 @@ void loop() {
             // Current hold — RUNNING. Sample the raw flow reading (NOT the main
             // loop's `speed`, which the gate above has already zeroed) and the
             // heading, then average both over the hold.
-            gCurrentHoldFlowSum += flow::getSpeed_ms();
-            float hdgRad = headingDeg * (float)(M_PI / 180.0);
-            gCurrentHoldSinSum += sinf(hdgRad);
-            gCurrentHoldCosSum += cosf(hdgRad);
-            if (gCurrentHoldSamples < 0xFFFF) gCurrentHoldSamples++;
-
             uint32_t heldMs = millis() - gCurrentHoldStartMs;
             if (heldMs >= CURRENT_HOLD_DURATION_MS) {
-                finishCurrentHold();
+                finishCurrentHold(false);
+            } else {
+                CurrentHoldBin& b = gCurrentHoldBins[heldMs / 1000];
+                b.flowSum += flow::getSpeed_ms();
+                float hdgRad = headingDeg * (float)(M_PI / 180.0);
+                b.sinSum += sinf(hdgRad);
+                b.cosSum += cosf(hdgRad);
+                if (b.n < 0xFFFF) b.n++;
             }
         } else if (gCalMode == 2) {
             // Speed cal — WAITING: watch for flow to exceed start threshold
@@ -1589,65 +1613,168 @@ static void updateBattMv() {
 // ---------------------------------------------------------------------------
 // Current hold
 // ---------------------------------------------------------------------------
-// End a hold and write the measurement as a 'C' row.
+// End a hold: trim the edges, average what is left, and save it.
 //
 // heading_deg carries the direction the water flows TOWARD, not the heading the
 // diver held. The diver points UPSTREAM, so the compass reads where the current
 // comes FROM; turning it round here means every downstream consumer -- the log,
 // track-processor, the website -- reads one convention, and none of them has to
 // know the upstream one ever existed.
-static void finishCurrentHold() {
-    gCurrentHoldActive = false;
+//
+// early = the diver ended it (FINISH_CURRENT_HOLD) before the 60 s were up.
 
-    if (gCurrentHoldSamples < CURRENT_HOLD_MIN_SAMPLES) {
-        Serial.printf("[CURRENT] too few samples (%u) — discarded\n",
-                      (unsigned)gCurrentHoldSamples);
-        gInCal   = false;
-        gCalMode = 0;
-        sysState = SystemState::READY;
-        return;
+static float medianOf(float* v, int n) {
+    // n <= 60: insertion sort is fine.
+    for (int i = 1; i < n; i++) {
+        float x = v[i]; int j = i - 1;
+        while (j >= 0 && v[j] > x) { v[j + 1] = v[j]; j--; }
+        v[j + 1] = x;
+    }
+    return (n % 2) ? v[n / 2] : 0.5f * (v[n / 2 - 1] + v[n / 2]);
+}
+
+// Written whether or not the dive log is running: a measurement taken with
+// logging off must still land somewhere. Download it from tern.local.
+static void saveCurrentToFile(uint8_t heldS, bool early, float upstreamDeg) {
+    File probe = LittleFS.open(CURRENT_FILE_PATH, "r");
+    size_t size = probe ? probe.size() : 0;
+    if (probe) probe.close();
+    if (size >= CURRENT_FILE_MAX_BYTES) {
+        LittleFS.remove(CURRENT_FILE_OLD_PATH);
+        LittleFS.rename(CURRENT_FILE_PATH, CURRENT_FILE_OLD_PATH);
+        size = 0;
     }
 
-    float meanFlow = (float)(gCurrentHoldFlowSum / gCurrentHoldSamples);
-    float upstream = atan2f((float)gCurrentHoldSinSum, (float)gCurrentHoldCosSum)
-                     * (float)(180.0 / M_PI);
-    gCurrentHoldResultMs = meanFlow;
-    gCurrentHoldToward   = fmodf(upstream + 180.0f + 360.0f, 360.0f);
+    File f = LittleFS.open(CURRENT_FILE_PATH, "a");
+    if (!f) {
+        Serial.println("[CURRENT] ERROR: could not open " + String(CURRENT_FILE_PATH));
+        return;
+    }
+    if (size == 0) {
+        f.println("timestamp_ms,utc,current_ms,current_m_min,toward_deg,held_deg,"
+                  "held_s,kept_s,ended_early,lat,lon,pos_x_m,pos_y_m,depth_m,"
+                  "water_temp_c,log_file");
+    }
 
-    Serial.printf("[CURRENT] %.3f m/s (%.1f m/min) toward %.1f (held %03d) over %u samples\n",
-                  (double)gCurrentHoldResultMs, (double)(gCurrentHoldResultMs * 60.0f),
-                  (double)gCurrentHoldToward,
-                  (int)fmodf(upstream + 360.0f, 360.0f), (unsigned)gCurrentHoldSamples);
+    // The clock is set from GPS or NTP; an unsynced ESP32 sits near epoch 0.
+    char utcBuf[24] = "";
+    time_t now_t = time(nullptr);
+    if (now_t >= 1700000000L) {
+        struct tm tm_info{};
+        gmtime_r(&now_t, &tm_info);
+        strftime(utcBuf, sizeof(utcBuf), "%Y-%m-%dT%H:%M:%SZ", &tm_info);
+    }
 
-    if (logging::isLogging()) {
-        nav::Position pos = nav::getPosition();
-        GpsFix fix = gps::getFix();
-        logging::LogData ld{};
-        ld.timestamp_ms   = millis();
-        ld.heading_deg    = gCurrentHoldToward;
-        ld.speed_ms       = gCurrentHoldResultMs;
-        ld.gpsSpeed       = false;
-        ld.pos_x_m        = pos.x_m;
-        ld.pos_y_m        = pos.y_m;
-        ld.lat            = pos.lat;
-        ld.lon            = pos.lon;
-        ld.pos_src        = 'C';
-        ld.gps_satellites = fix.has_fix ? fix.satellites : 0;
-        ld.gps_hdop       = fix.has_fix ? fix.hdop       : 0.0f;
-        ld.depth_m        = depth::isPresent() ? depth::getDepth_m() : 0.0f;
-        ld.water_temp_c   = depth::isPresent() ? depth::getTemp_c()  : 0.0f;
-        // Same convention as a MARK row: the sensor fields are not sampled here,
-        // and a zero die temperature would read as a real -25 degC offset.
-        ld.mag_temp_c     = NAN;
-        logging::logImmediate(ld);
+    nav::Position pos = nav::getPosition();
+    bool hasDepth = depth::isPresent();
+    f.printf("%lu,%s,%.3f,%.1f,%.1f,%.1f,%u,%u,%d,%.8f,%.8f,%.2f,%.2f,%.2f,%.2f,%s\n",
+             (unsigned long)millis(), utcBuf,
+             (double)gCurrentHoldResultMs, (double)(gCurrentHoldResultMs * 60.0f),
+             (double)gCurrentHoldToward, (double)upstreamDeg,
+             (unsigned)heldS, (unsigned)gCurrentHoldKeptS, early ? 1 : 0,
+             (double)pos.lat, (double)pos.lon, (double)pos.x_m, (double)pos.y_m,
+             hasDepth ? (double)depth::getDepth_m() : 0.0,
+             hasDepth ? (double)depth::getTemp_c()  : 0.0,
+             logging::getLogPath());
+    f.close();
+}
+
+static void finishCurrentHold(bool early) {
+    gCurrentHoldActive = false;
+
+    uint32_t heldMs = millis() - gCurrentHoldStartMs;
+    uint8_t  heldS  = (uint8_t)std::min<uint32_t>(heldMs / 1000, CURRENT_HOLD_BINS);
+
+    // Per-second means, over the seconds that got any samples. An early finish
+    // drops the second it happened in: that is the button press itself.
+    int lastBin = early ? (int)(heldMs / 1000) - 1 : CURRENT_HOLD_BINS - 1;
+    if (lastBin >= CURRENT_HOLD_BINS) lastBin = CURRENT_HOLD_BINS - 1;
+    int   idx[CURRENT_HOLD_BINS];
+    float mean[CURRENT_HOLD_BINS];
+    float scratch[CURRENT_HOLD_BINS];
+    int   n = 0;
+    for (int i = 0; i <= lastBin; i++) {
+        if (gCurrentHoldBins[i].n == 0) continue;
+        idx[n]  = i;
+        mean[n] = (float)(gCurrentHoldBins[i].flowSum / gCurrentHoldBins[i].n);
+        n++;
+    }
+
+    gCurrentHoldResultMs = 0.0f;
+    gCurrentHoldToward   = 0.0f;
+    gCurrentHoldKeptS    = 0;
+
+    if (n == 0) {
+        Serial.printf("[CURRENT] no full second held (%lu ms) — nothing to save\n",
+                      (unsigned long)heldMs);
     } else {
-        Serial.println("[CURRENT] WARNING: not logging — measurement shown but not saved");
+        // Robust spread: median and MAD of the per-second means.
+        memcpy(scratch, mean, n * sizeof(float));
+        float med = medianOf(scratch, n);
+        for (int i = 0; i < n; i++) scratch[i] = fabsf(mean[i] - med);
+        float mad = medianOf(scratch, n);
+        float limit = std::max(CURRENT_TRIM_MIN_DEV_MS, 3.0f * 1.4826f * mad);
+
+        // Walk in from each end while the edge second is an outlier. Only the
+        // ends: a wobble mid-hold is part of what was held, and the average
+        // should carry it.
+        int lo = 0, hi = n - 1;
+        while (lo < hi && fabsf(mean[lo] - med) > limit) lo++;
+        while (hi > lo && fabsf(mean[hi] - med) > limit) hi--;
+
+        double flowSum = 0.0, sinSum = 0.0, cosSum = 0.0;
+        uint32_t samples = 0;
+        for (int k = lo; k <= hi; k++) {
+            const CurrentHoldBin& b = gCurrentHoldBins[idx[k]];
+            flowSum += b.flowSum; sinSum += b.sinSum; cosSum += b.cosSum;
+            samples += b.n;
+        }
+        float upstream = atan2f((float)sinSum, (float)cosSum) * (float)(180.0 / M_PI);
+        upstream = fmodf(upstream + 360.0f, 360.0f);
+        gCurrentHoldResultMs = (float)(flowSum / samples);
+        gCurrentHoldToward   = fmodf(upstream + 180.0f, 360.0f);
+        gCurrentHoldKeptS    = (uint8_t)(hi - lo + 1);
+
+        Serial.printf("[CURRENT] %.3f m/s (%.1f m/min) toward %.1f (held %03d); "
+                      "%u s averaged of %u s held (trimmed %d front, %d back)%s\n",
+                      (double)gCurrentHoldResultMs, (double)(gCurrentHoldResultMs * 60.0f),
+                      (double)gCurrentHoldToward, (int)upstream,
+                      (unsigned)gCurrentHoldKeptS, (unsigned)heldS, lo, n - 1 - hi,
+                      early ? ", ended early" : "");
+
+        saveCurrentToFile(heldS, early, upstream);
+
+        if (logging::isLogging()) {
+            nav::Position pos = nav::getPosition();
+            GpsFix fix = gps::getFix();
+            logging::LogData ld{};
+            ld.timestamp_ms   = millis();
+            ld.heading_deg    = gCurrentHoldToward;
+            ld.speed_ms       = gCurrentHoldResultMs;
+            ld.gpsSpeed       = false;
+            ld.pos_x_m        = pos.x_m;
+            ld.pos_y_m        = pos.y_m;
+            ld.lat            = pos.lat;
+            ld.lon            = pos.lon;
+            ld.pos_src        = 'C';
+            ld.gps_satellites = fix.has_fix ? fix.satellites : 0;
+            ld.gps_hdop       = fix.has_fix ? fix.hdop       : 0.0f;
+            ld.depth_m        = depth::isPresent() ? depth::getDepth_m() : 0.0f;
+            ld.water_temp_c   = depth::isPresent() ? depth::getTemp_c()  : 0.0f;
+            // Same convention as a MARK row: the sensor fields are not sampled here,
+            // and a zero die temperature would read as a real -25 degC offset.
+            ld.mag_temp_c     = NAN;
+            logging::logImmediate(ld);
+        } else {
+            Serial.println("[CURRENT] not logging — saved to " + String(CURRENT_FILE_PATH) + " only");
+        }
     }
 
     // gInCal deliberately stays set: the NavPacket cal fields are gated on it,
     // so clearing it here would stop the packet that carries the result. The
     // display clears both by sending END_CURRENT_HOLD when the diver dismisses,
-    // exactly as speed cal's accept/reject ends cal_mode 4.
+    // exactly as speed cal's accept/reject ends cal_mode 4. A no-data finish
+    // still goes to 9, so the display can say so rather than silently vanish.
     gCalMode = 9;
 }
 
@@ -1740,7 +1867,9 @@ static void sendNavPacket(float heading, float headingRaw, float pitch, float ro
                 // Live flow, so the diver can watch themselves hold station.
                 pkt.current_ms      = flow::getSpeed_ms();
             } else {
-                pkt.cal_remaining_s = 0;
+                // cal_remaining_s is reused in the result: seconds actually
+                // averaged. 0 means nothing was held long enough to measure.
+                pkt.cal_remaining_s = gCurrentHoldKeptS;
                 pkt.current_ms      = gCurrentHoldResultMs;
             }
             pkt.current_toward_deg = gCurrentHoldToward;
@@ -1764,6 +1893,12 @@ static void sendNavPacket(float heading, float headingRaw, float pitch, float ro
     size_t n = navPacketToBytes(pkt, linkBuf, sizeof(linkBuf));
     if (n > 0) {
         Serial1.write(linkBuf, n);
+    } else if (millis() - gLinkOverflowLogMs > 5000) {
+        // Never drop the link silently: a packet that doesn't fit looks
+        // exactly like a dead cable from the display's side.
+        gLinkOverflowLogMs = millis();
+        Serial.printf("[LINK] ERROR: NavPacket did not fit in %u bytes (cal_mode %u) — not sent\n",
+                      (unsigned)sizeof(linkBuf), (unsigned)pkt.cal_mode);
     }
 }
 
@@ -1983,15 +2118,20 @@ static void handleDisplayCmd() {
                         Serial.println("CMD: START_CURRENT_HOLD (60s station keeping)");
                         gCurrentHoldActive  = true;
                         gCurrentHoldStartMs = millis();
-                        gCurrentHoldFlowSum = 0.0;
-                        gCurrentHoldSinSum  = 0.0;
-                        gCurrentHoldCosSum  = 0.0;
-                        gCurrentHoldSamples = 0;
+                        memset(gCurrentHoldBins, 0, sizeof(gCurrentHoldBins));
+                        gCurrentHoldKeptS   = 0;
                         // cal_mode 8/9: 0-7 are taken (0 quick, 1 full, 2/3/4
                         // speed cal, 5 baseline, 6 mounted, 7 gap-fill).
                         gCalMode  = 8;
                         gInCal    = true;   // gates BOTH the tick and the NavPacket cal fields
                         sysState  = SystemState::CALIBRATION;  // gates the display's cal_mode dispatch
+                        break;
+                    case DisplayCmd::FINISH_CURRENT_HOLD:
+                        // Only meaningful mid-hold. If the 60 s ran out while
+                        // the press was on its way, the result already exists
+                        // and this must not dismiss it.
+                        Serial.println("CMD: FINISH_CURRENT_HOLD");
+                        if (gInCal && gCalMode == 8) finishCurrentHold(true);
                         break;
                     case DisplayCmd::END_CURRENT_HOLD:
                         Serial.println("CMD: END_CURRENT_HOLD");

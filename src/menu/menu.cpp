@@ -3,7 +3,6 @@
 #include "../util/nvs_state.h"
 #include <Arduino.h>
 #include <LittleFS.h>
-#include <ArduinoJson.h>
 
 namespace menu {
 
@@ -116,9 +115,9 @@ static void invalidateMenuCache() {
 }
 
 // ---------------------------------------------------------------------------
-// Hardcoded default menu
+// Menu definition -- the only one. Change the menu here and reflash (or OTA).
 // ---------------------------------------------------------------------------
-static void loadDefaults() {
+static void buildMenu() {
     submenuCount = 5;
 
     // Root menu (index 0)
@@ -215,74 +214,20 @@ static void loadDefaults() {
 }
 
 // ---------------------------------------------------------------------------
-// JSON loading
+// Stale menu file cleanup
 // ---------------------------------------------------------------------------
-static bool loadFromJSON() {
-    if (!LittleFS.begin(true)) return false;
-
-    File f = LittleFS.open("/menu.json", "r");
-    if (!f) return false;
-
-    JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, f);
-    f.close();
-    if (err) {
-        Serial.print("[MENU] JSON parse error: ");
-        Serial.println(err.c_str());
-        return false;
+// The menu used to be overridable by /menu.json on this board's LittleFS. OTA
+// and firmware flashes never touch the filesystem, so a file left by an old
+// `uploadfs` silently hid every menu item added since (NAV > Current, Sept
+// 2026). The firmware menu above is now the only menu; this removes any
+// leftover file so nobody later reads it and assumes it is live.
+static void removeStaleMenuFile() {
+    if (!LittleFS.begin(false)) return;  // never format: nothing here needs a filesystem
+    if (LittleFS.exists("/menu.json")) {
+        LittleFS.remove("/menu.json");
+        Serial.println("[MENU] Removed stale /menu.json (menu is built into firmware)");
     }
-
-    JsonArray menus = doc["menus"];
-    if (menus.isNull() || menus.size() == 0) return false;
-
-    submenuCount = 0;
-    for (JsonObject menuObj : menus) {
-        if (submenuCount >= MAX_SUBMENUS) break;
-        auto& sm = submenus[submenuCount];
-
-        const char* title = menuObj["title"] | "???";
-        strncpy(sm.title, title, MENU_LABEL_LEN);
-        sm.title[MENU_LABEL_LEN] = '\0';
-
-        sm.count = 0;
-        JsonArray items = menuObj["items"];
-        for (JsonObject itemObj : items) {
-            if (sm.count >= MAX_ITEMS - 1) break;  // leave room for the back item
-            auto& it = sm.items[sm.count];
-
-            const char* label = itemObj["label"] | "???";
-            strncpy(it.label, label, MENU_LABEL_LEN);
-            it.label[MENU_LABEL_LEN] = '\0';
-
-            if (itemObj["sub"].is<int>()) {
-                it.action = Action::SUBMENU;
-                it.submenuIdx = itemObj["sub"].as<int8_t>();
-            } else {
-                it.action = static_cast<Action>(itemObj["act"].as<uint8_t>());
-                it.submenuIdx = -1;
-            }
-            sm.count++;
-        }
-
-        // Every menu gets an explicit exit, root included. Without one at the
-        // root the only ways out were the idle timeout or executing something,
-        // which is what made "I just wanted to look" so expensive.
-        if (sm.count < MAX_ITEMS) {
-            auto& back = sm.items[sm.count];
-            strncpy(back.label, submenuCount > 0 ? ".." : "Close", MENU_LABEL_LEN);
-            back.label[MENU_LABEL_LEN] = '\0';
-            back.action = Action::BACK;
-            back.submenuIdx = -1;
-            sm.count++;
-        }
-
-        submenuCount++;
-    }
-
-    Serial.print("[MENU] Loaded ");
-    Serial.print(submenuCount);
-    Serial.println(" submenus from JSON");
-    return true;
+    LittleFS.end();
 }
 
 // ---------------------------------------------------------------------------
@@ -483,10 +428,8 @@ static void executeAction(Action act) {
 
 void init(SendCmdFn sendFn) {
     gSendCmd = sendFn;
-    if (!loadFromJSON()) {
-        Serial.println("[MENU] Using hardcoded default menu");
-        loadDefaults();
-    }
+    removeStaleMenuFile();
+    buildMenu();
 
     // Restore display settings from NVS
     nvs_disp::State nvsDisp = nvs_disp::load();

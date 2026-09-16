@@ -92,7 +92,7 @@ using SendCmdFn = void (*)(DisplayCmd cmd);
 // ---------------------------------------------------------------------------
 
 // Initialize menu system.  Call once during setup.
-// Attempts to load menu.json from LittleFS; falls back to hardcoded default.
+// The menu structure is built into firmware (buildMenu() in menu.cpp).
 void init(SendCmdFn sendFn);
 
 // Returns true if the menu is currently visible.

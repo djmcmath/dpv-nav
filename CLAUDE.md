@@ -35,14 +35,11 @@ pio device monitor
 
 ### Upload LittleFS Filesystem
 
-**Know which board you are flashing.** Both environments share the one `data/`
-directory, but only one of them is safe to overwrite:
+Neither board needs it. There is no `data/` directory: every file on the nav
+board's filesystem is written at runtime (cal results, dive logs, `/currents.csv`),
+and the display board's filesystem is unused.
 
 ```bash
-pio run -e display -t uploadfs   # SAFE. The display board's FS holds only
-                                 # /menu.json, and nothing on that board ever
-                                 # writes to LittleFS. Nothing is lost.
-
 pio run -e nav -t uploadfs       # DESTRUCTIVE. Erases dive logs, mag_base.json,
                                  # mag_mount.json, hdg_fourier.json, motor_cal.json,
                                  # speed_cal.json, cal_targets.json and the cal
@@ -50,11 +47,11 @@ pio run -e nav -t uploadfs       # DESTRUCTIVE. Erases dive logs, mag_base.json,
                                  # tern.local first.
 ```
 
-`data/menu.json` is read by the **display** board (`loadFromJSON()` in
-[menu.cpp](src/menu/menu.cpp)). The web UI's file upload lives on the **nav**
-board — `net/` is in `[env:nav]` only and the display env has no network stack
-at all — so there is no way to push menu.json over WiFi. It needs
-`-e display -t uploadfs` with that board on USB.
+The menu is **not** a file. It used to be overridable by `/menu.json` on the
+display board's LittleFS, which OTA and firmware flashes never update, so a
+stale file silently hid every item added after it (NAV > Current, Sept 2026).
+It is now compiled in only (`buildMenu()` in [menu.cpp](src/menu/menu.cpp)),
+and the display deletes any leftover `/menu.json` at boot.
 
 ### Clean Build
 ```bash
@@ -73,7 +70,7 @@ Code is organized into namespaces by subsystem:
 - `gps::` - GPS driver (Adafruit Ultimate GPS, NMEA parsing)
 - `flow::` - Flow sensor driver (hall-effect pulse, speed calculation)
 - `display::` - TFT display driver (ST7789 320×240, direct hardware writes, nav + debug screen rendering)
-- `menu::` - Hierarchical menu system (JSON-configurable, button-driven, on display device)
+- `menu::` - Hierarchical menu system (compiled in, button-driven, on display device)
 - `logging::` - Data logging system (LittleFS-based)
 - `storage::` - Calibration persistence (JSON files in LittleFS)
 - `hdg_cal::` - Fourier heading calibration (load hdg_fourier.json, apply Fourier-series correction)
@@ -104,7 +101,7 @@ src/
 │   ├── ui_controller.cpp/h    # Display updates and user interface
 │   └── state.h                # State machine definitions (BOOT/CAL/NAV/ERROR)
 ├── menu/                      # Menu system (display device only)
-│   ├── menu.cpp/h             # Hierarchical menu: state machine, rendering, JSON load, actions
+│   ├── menu.cpp/h             # Hierarchical menu: definition, state machine, rendering, actions
 ├── util/                      # Utilities
 │   ├── logging.cpp/h          # Data logging to LittleFS
 │   ├── storage.cpp/h          # Calibration save/load (JSON)
@@ -118,8 +115,6 @@ src/
 lib/
 └── dpvlink/
     └── dpvlink.h/cpp          # Inter-device packet format (NavPacket, DebugPacket, DisplayCmd, JSON wire format)
-data/
-└── menu.json                  # Menu definition (uploaded to LittleFS on display device)
 ```
 
 ### Data Flow Pipeline (Nav Device)
@@ -409,16 +404,16 @@ the same two things: a display-side indication, and a `linkAlive` override.
 - **y=120–239**: Menu area (separator line, title, up to visible items with scroll)
 
 ### Menu Definition
-Menu structure is loaded from `/menu.json` on the **display** board's LittleFS at boot. If the file is missing, `loadDefaults()` is used — keep the two in sync, or the menu a given unit shows depends on whether its filesystem was ever flashed. The JSON maps action IDs to `menu::Action` enum values. To customize the menu, edit [data/menu.json](data/menu.json) and upload with `pio run -e display -t uploadfs`.
+The menu structure is defined in `buildMenu()` in [src/menu/menu.cpp](src/menu/menu.cpp) and nowhere else. Changing it means a firmware update, which OTA delivers. Do not reintroduce a filesystem override: see the LittleFS section above for what that cost.
 
 ### Adding New Menu Actions
 1. Add a new `menu::Action` enum value in [src/menu/menu.h](src/menu/menu.h)
 2. Add a corresponding `DisplayCmd` value in [lib/dpvlink/dpvlink.h](lib/dpvlink/dpvlink.h) (for nav-device actions)
 3. Wire the action in `executeAction()` in [src/menu/menu.cpp](src/menu/menu.cpp)
 4. Handle the command in `handleDisplayCmd()` in [src/nav_main.cpp](src/nav_main.cpp)
-5. Add the item to the hardcoded default menu and to [data/menu.json](data/menu.json)
+5. Add the item to `buildMenu()` in [src/menu/menu.cpp](src/menu/menu.cpp), bumping that submenu's `count` (max `MAX_ITEMS` = 8 including the back item)
 
-**Next free values:** `menu::Action` 26, `DisplayCmd` 41, `cal_mode` 10. `cal_mode` is the
+**Next free values:** `menu::Action` 26, `DisplayCmd` 44, `cal_mode` 10. `cal_mode` is the
 one that bites — 0 quick mag cal, 1 full mag cal, 2/3/4 speed cal, 5 baseline, 6 mounted,
 7 gap-fill, 8/9 current hold. It is easy to read the code and conclude 7 is free; it is not.
 
@@ -517,8 +512,7 @@ To force recalibration, delete the JSON files from LittleFS and reboot. Preferre
 - [src/nav_main.cpp](src/nav_main.cpp) — Nav device entry point: sensor init, AHRS, GPS, flow, position estimation, serial link
 - [src/display_main.cpp](src/display_main.cpp) — Display device entry point: TFT rendering, buttons, menu integration, serial link receive
 - [src/menu/menu.h](src/menu/menu.h) — Menu system API: data structures, state machine, display settings
-- [src/menu/menu.cpp](src/menu/menu.cpp) — Menu implementation: rendering, navigation, JSON loading, action dispatch
-- [data/menu.json](data/menu.json) — Menu definition file (uploaded to display device LittleFS)
+- [src/menu/menu.cpp](src/menu/menu.cpp) — Menu implementation: menu definition, rendering, navigation, action dispatch
 - [src/nav/nav_model.h](src/nav/nav_model.h) — Position estimation API (dead reckoning + GPS truth + home waypoint)
 - [src/nav/nav_model.cpp](src/nav/nav_model.cpp) — Position estimation implementation (flat-earth local XY)
 - [src/sensors/imu.cpp](src/sensors/imu.cpp) — Unified IMU driver (LSM6DS33 + LIS3MDL), I2C read/write, calibration routines

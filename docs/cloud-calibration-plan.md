@@ -122,7 +122,7 @@ existing "DONE" screen and CSV save):
   of every unit in the field — this bit us for real on 2026-08-22.** `cloud_client.cpp`
   hardcodes `CLOUD_ROOT_CA_PEM` as a compile-time constant, and there's no OTA update
   path (`ArduinoOTA`/`Update.begin()`) anywhere in this firmware — only LittleFS
-  *data* files (`menu.json`, `mag_base.json`, `hdg_fourier.json`, ...) can be pushed
+  *data* files on the nav board (`mag_base.json`, `hdg_fourier.json`, ...) can be pushed
   via the existing web upload UI ([net/web_server.cpp](../src/net/web_server.cpp)),
   not the firmware binary itself. When `divemap.diverdaniel.com`'s cert chain moved
   to Let's Encrypt's new "Generation Y" root hierarchy after their 2026-05-13 default-profile
@@ -154,6 +154,9 @@ existing "DONE" screen and CSV save):
   token from the device-auth flow below, checked server-side against a DB-stored
   hash (`DeviceAuth` in dive-map's `auth.rs`), independent of how or whether the TLS
   layer validates the server's identity.
+  **Also superseded since (2026-09):** the "no OTA path" premise above is no longer
+  true. Both boards now take firmware updates over WiFi from `tern.local`, so a
+  compiled-in constant can be changed without USB.
 - **Where the current bin-aware collector's source lives wasn't pinned down precisely**
   during this planning pass (CLAUDE.md and calibration-guide.md describe its behavior,
   but the source file wasn't conclusively located — likely `menu.cpp`/`display_main.cpp`/

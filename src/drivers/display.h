@@ -117,8 +117,11 @@ void showSpeedCalRunning(uint16_t elapsed_s, uint16_t dist_ft);
 // water. showCurrentHoldRunning shows the live flow as well as the clock -- a
 // diver who is losing station needs to see it happening, not find out at the end.
 void showCurrentHoldCountdown(int secondsRemaining);
-void showCurrentHoldRunning(uint8_t remaining_s, float heading_deg, float flow_ms);
-void showCurrentHoldResult(float current_ms, float toward_deg);
+// Headings arrive already converted to the diver's display mode; hdg_suffix is
+// 'T', 'M' or 'R' to match.
+void showCurrentHoldRunning(uint8_t remaining_s, float heading_deg, char hdg_suffix, float flow_ms);
+// averaged_s = seconds that went into the average after trimming; 0 = no data.
+void showCurrentHoldResult(float current_ms, float toward_deg, char toward_suffix, uint8_t averaged_s);
 // Accept/reject result screen.
 //   choice: 0 = RESET+ACCEPT, 1 = ACCEPT, 2 = REJECT  (highlighted item)
 void showSpeedCalResult(uint16_t dist_ft, uint16_t elapsed_s,

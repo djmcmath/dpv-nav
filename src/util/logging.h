@@ -81,4 +81,8 @@ void logImmediate(const LogData& d);
 // True if level != OFF.
 bool isLogging();
 
+// Path of the open log file, or "" if none is open (logging off, or still
+// inside the LOG_COMMIT_DELAY_MS settle window).
+const char* getLogPath();
+
 }  // namespace logging

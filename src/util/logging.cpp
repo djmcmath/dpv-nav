@@ -257,6 +257,10 @@ void tick() {
     applyLevel(gLevel);
 }
 
+const char* getLogPath() {
+    return gLogPath;
+}
+
 bool isLogging() {
     return gReady && gActiveLevel != LogLevel::LEVEL_OFF;
 }

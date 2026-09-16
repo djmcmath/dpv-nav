@@ -27,6 +27,7 @@ DPV-Nav calibrates four sensors/subsystems: magnetometer, gyroscope, acceleromet
 /hdg_samples.csv    — Raw (target, indicated) pairs from heading cal collection run
 /hdg_fourier.json   — Fourier heading correction (n harmonics + coefficient array, optional)
 /motor_cal.json     — Motor-on heading offset (single float, optional)
+/mag_temp.json      — Magnetometer thermal-drift coefficients (µT/°C + reference temp, optional)
 /speed_cal.json     — Flow sensor k-factor history (rolling 6-run average)
 ```
 
@@ -67,6 +68,7 @@ For mag: try two-stage chain (mag_base.json + mag_mount.json)
 For gyro: load gyro_cal.json or run 10s stationary bias cal
 For accel: load accel_cal.json or run 6-point orientation cal
 For hdg: load hdg_fourier.json — silently skip if absent (optional)
+For mag temp: load mag_temp.json — compensation off if absent or invalid (optional)
 ```
 
 ## Magnetometer Calibration
@@ -128,6 +130,18 @@ Mounted keeps the original live bin-coverage grid — its narrower ±30° operat
 | Hard-iron bias (sensor, PCB) | ✓ | Refined |
 | Soft-iron coupling (PCB, enclosure) | ✓ | Refined |
 | DPV motor/battery magnetic signature | — | ✓ |
+| Offset drift with sensor temperature | — | — (see below) |
+
+### Temperature: calibrate near 21 °C
+
+Neither stage can correct temperature drift. The LIS3MDL's offset moves ~0.68 µT/°C with
+its die temperature, which is up to ~2°/°C of heading. That is handled separately by
+`/mag_temp.json`: every raw reading is normalized to the file's `ref_temp_c` (21 °C) before
+calibration is applied, and sample collection reads through the same correction, so a cal
+collected warm and a dive done cold still line up. Without that file, a calibration is only
+accurate near the temperature it was collected at. See
+[mag-temperature-compensation.md](./mag-temperature-compensation.md) for the measurement,
+the file format, and the per-heading error guideline.
 
 ### Forcing re-calibration
 

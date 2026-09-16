@@ -53,7 +53,23 @@ ImuStatus readMag_uT(Vec3f& out);         // µT (or "sensor units" if you don't
 // ABSOLUTE VALUE IS NOT TRUSTWORTHY: sensitivity is 8 LSB/°C with zero at 25 °C
 // per the datasheet, but the offset is not factory-trimmed and can be off by
 // several degrees. Use it for CHANGE, not as a room thermometer.
+//
+// Returns the value cached by the field read path (refreshed there every
+// MAG_TEMP_READ_INTERVAL_MS) -- the same value the thermal compensation used.
 ImuStatus readMagTemp_c(float& out);
+
+// --- Magnetometer thermal compensation ---
+// Every raw mag read (sensor frame and everything built on it) subtracts
+//   coeff * (die_temp - ref_c)
+// before any calibration is applied, so calibrations are fitted on, and applied
+// to, temperature-normalized data. coeff is µT/°C in the LOGICAL frame (the
+// frame of mag_*_raw and of mag_base.json / mag_mount.json). Loaded from
+// /mag_temp.json by util/mag_temp. Non-finite input clears it. Off by default,
+// and inert until a plausible die temperature has been read.
+// See docs/mag-temperature-compensation.md.
+void setMagTempCompensation(const Vec3f& coeffLogical_uT_per_c, float ref_c);
+void clearMagTempCompensation();
+bool magTempCompensationActive();
 
 // Converted units with both raw and calibrated outputs:
 ImuStatus readAccel_g_raw_cal(Vec3f& rawOut, Vec3f& calOut);  // g (raw = uncalibrated, cal = with bias/scale applied)

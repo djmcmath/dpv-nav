@@ -136,6 +136,30 @@ Check the stop-matching line first: it assumes the first stop is `--first-actual
 time and a direction-dependent effect look identical -- run two circles each way
 to separate them.
 
+## mag_temp_fit.py — magnetometer thermal-drift coefficients
+
+Fits µT/°C per axis against `mag_temp_c` from stationary heat/cool logs (heat the
+nav board, let it cool untouched; one log per cardinal is the consistency check,
+since a body-fixed drift must give the same answer at every heading) and writes
+the `/mag_temp.json` the firmware loads. Cooling leg only by default; skips any
+log whose die temperature moved under 3 °C; prints per-log slopes and the range
+the result is valid over.
+
+MID logs are in the calibrated frame, so `--base`/`--mount` must be the cal that
+was installed while logging -- the answer depends on it. HIGH logs carry
+`mag_*_raw` and need neither, so prefer HIGH for thermal tests. `--applied` adds
+back the coefficients that were active if the log was recorded with compensation
+on. Needs numpy.
+
+```bash
+python mag_temp_fit.py "../baseline cal jsons/thermal testing/"{north,east,south,west1,west2}.csv \
+    --base  "../baseline cal jsons/20260911 cal files/mag_base (2).json" \
+    --mount "../baseline cal jsons/20260911 level-fit mount v2/mag_mount.json" \
+    --out mag_temp.json
+```
+
+See [../docs/mag-temperature-compensation.md](../docs/mag-temperature-compensation.md).
+
 ## Future Tools
 
 - **log_analyzer.py**: Parse and visualize LittleFS data logs

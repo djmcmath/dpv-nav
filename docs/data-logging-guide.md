@@ -13,17 +13,21 @@ level writes its own header, so a file's schema is fixed when it opens
 | Level | Wire/NVS value | Interval | Columns | Cost |
 |---|---|---|---|---|
 | OFF | 0 | — | nothing is open | — |
-| LOW | 1 | `LOG_LOW_INTERVAL_MS` (1 s) | timestamp, local time, heading, speed + source, position, lat/lon + source, GPS sats/HDOP, depth, water temp | ~97 B/row, ~340 KiB/hour |
-| MID | 3 | `LOG_MID_INTERVAL_MS` (1.5 s) | LOW's columns plus `mag_x/y/z_cal`, `pitch_deg`, `roll_deg`, `mag_temp_c` | ~140 B/row, ~330 KiB/hour |
+| LOW | 1 | `LOG_LOW_INTERVAL_MS` (1 s) | timestamp, local time, heading, speed + source, position, lat/lon + source, GPS sats/HDOP, depth, water temp, `mag_temp_c` | ~103 B/row, ~360 KiB/hour |
+| MID | 3 | `LOG_MID_INTERVAL_MS` (1.5 s) | LOW's columns plus `mag_x/y/z_cal`, `pitch_deg`, `roll_deg` | ~140 B/row, ~330 KiB/hour |
 | HIGH | 2 | `LOG_HIGH_INTERVAL_MS` (1 s) | MID's columns plus raw mag/accel/gyro and calibrated accel/gyro | ~241 B/row, ~850 KiB/hour |
 
 `mag_temp_c` is the **LIS3MDL's own die temperature**, enabled 2026-09-11
-(`CTRL_REG1` TEMP_EN). It exists because the magnetometer's hard-iron offset
-moves with temperature — measured around 1.3 µT/°C on a slow cooling curve —
-while `water_temp_c` comes from the MS5837 in the nose and lags what the
-magnetometer feels by roughly 23 s. Its absolute value is not factory-trimmed,
-so use it for change, not as a room thermometer. It logs as `nan` if the read
-fails, and on MARK and CURRENT rows, whose sensor columns aren't sampled.
+(`CTRL_REG1` TEMP_EN) and written at every level since 2026-09-14. The
+magnetometer's offset moves with it — ~0.68 µT/°C horizontally on this unit —
+and the firmware compensates the mag readings with it when `/mag_temp.json` is
+installed (see [mag-temperature-compensation.md](./mag-temperature-compensation.md)).
+So logs recorded with compensation active hold **compensated** `mag_*_raw` and
+`mag_*_cal`. `water_temp_c` comes from the MS5837 in the nose, which barely sees a
+board-local temperature change; never use it for magnetometer thermal work. The
+die temperature's absolute value is not factory-trimmed, so use it for change,
+not as a room thermometer. It logs as `nan` until a plausible reading has been
+captured, and on MARK and CURRENT rows, whose sensor columns aren't sampled.
 
 ## `pos_src` — where a row's position came from
 

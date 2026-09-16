@@ -55,6 +55,10 @@ constexpr float DEFAULT_DECLINATION_DEG  = 14.7f;   // ~14.7°E for southern Ore
 #define DISPLAY_MODE 0
 #endif
 
+// How often the LIS3MDL die temperature is re-read (a separate I2C read; the
+// field is read every loop pass). Temperature moves over seconds.
+constexpr uint32_t MAG_TEMP_READ_INTERVAL_MS = 250;
+
 // Enable debug packet transmission from nav device (0 = off, 1 = on)
 #ifndef ENABLE_DEBUG_PACKET
 #define ENABLE_DEBUG_PACKET 0
@@ -69,7 +73,7 @@ constexpr uint32_t NVS_POS_SAVE_INTERVAL_MS = 30000;  // 30 seconds
 // Data logging intervals (ms) — minimum time between log entries per level
 constexpr uint32_t LOG_LOW_INTERVAL_MS  = 1000;   // 1 entry per second (LOW level)
 constexpr uint32_t LOG_HIGH_INTERVAL_MS = 1000;   // 1 entry per second (HIGH level)
-// MID: LOW's columns plus mag_*_cal, pitch/roll and mag_temp_c — enough to
+// MID: LOW's columns (which include mag_temp_c) plus mag_*_cal and pitch/roll — enough to
 // diagnose a heading problem on a real dive, which HIGH cannot cover. HIGH costs
 // ~241 B/row (~850 KiB/hour at 1 Hz) against a 768 KiB LittleFS partition
 // (partitions_nav.csv), so it runs dry in under an hour; MID is ~140 B/row, and

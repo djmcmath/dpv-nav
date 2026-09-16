@@ -36,6 +36,7 @@
 #include "util/hdg_cal.h"
 #include "util/waypoints.h"
 #include "util/motor_cal.h"
+#include "util/mag_temp.h"
 #include "util/ota_confirm.h"
 #include "version.h"
 #include <dpvlink.h>
@@ -78,10 +79,36 @@ static void dumpActiveCalibration(const char* tag) {
                       (double)magCal.softIron[i][1],
                       (double)magCal.softIron[i][2]);
     }
+    Serial.printf("[%s] mag   temp comp=%s\n", tag,
+                  imu::magTempCompensationActive() ? "on" : "off");
 }
 static hdg_cal::HdgCal  gHdgCal;
 static bool             gHdgCalValid = false;
 static motor_cal::MotorCal gMotorCal;
+
+// Load /mag_temp.json and hand it to the IMU, or turn compensation off. Shared
+// by boot and reload so an invalid or deleted file can never leave the previous
+// coefficients running.
+static void loadMagTempCompensation(const char* tag) {
+    mag_temp::MagTempCal mt;
+    switch (mag_temp::load(mt)) {
+        case mag_temp::LoadResult::Ok:
+            imu::setMagTempCompensation(mt.coeff_uT_per_c, mt.ref_temp_c);
+            Serial.printf("[%s] Mag temp comp loaded: (%.3f, %.3f, %.3f) uT/C, ref %.1f C\n", tag,
+                          (double)mt.coeff_uT_per_c.x, (double)mt.coeff_uT_per_c.y,
+                          (double)mt.coeff_uT_per_c.z, (double)mt.ref_temp_c);
+            break;
+        case mag_temp::LoadResult::Absent:
+            imu::clearMagTempCompensation();
+            Serial.printf("[%s] No mag temp comp file -- uncompensated\n", tag);
+            break;
+        case mag_temp::LoadResult::Invalid:
+            imu::clearMagTempCompensation();
+            Serial.printf("[%s] %s INVALID (missing field, non-finite, or out of range) -- "
+                          "uncompensated\n", tag, mag_temp::FILE_PATH);
+            break;
+    }
+}
 
 // Fourier heading cal sample collection (filled during CAPTURE_HDG_POINT commands)
 static constexpr int HDG_SAMPLE_MAX = 24;
@@ -983,12 +1010,10 @@ void loop() {
             ld.gyro_cal      = gyro;
             ld.pitch_deg     = pitchDeg;
             ld.roll_deg      = rollDeg;
-            // Die temperature is only written at MID/HIGH, so don't spend an
-            // I2C read per loop at LOW. NaN if the read fails — see logging.h.
+            // Every level. Free: it is the value captured with this loop's
+            // field read. NaN if no plausible reading yet — see logging.h.
             ld.mag_temp_c    = NAN;
-            if (logging::getActiveLevel() != logging::LogLevel::LEVEL_LOW) {
-                imu::readMagTemp_c(ld.mag_temp_c);
-            }
+            imu::readMagTemp_c(ld.mag_temp_c);
             logging::log(ld);
         }
     }
@@ -1435,6 +1460,10 @@ static void loadCalibration() {
         Serial.println("No mag calibration found — heading will be inaccurate until "
                         "CAL > Baseline (+ Mounted) is run from the menu");
     }
+    // Independent of whether a mag cal exists: cal sample collection reads
+    // through the same compensation, so a first-ever cal is fitted on
+    // temperature-normalized data too.
+    loadMagTempCompensation("CAL");
 
     // Gyroscope
     if (storage::loadCalib3("/gyro_cal.json", gyroCal)) {
@@ -1507,6 +1536,7 @@ void reloadCalibrationFiles() {
     } else {
         Serial.println("[Reload] No mag calibration found");
     }
+    loadMagTempCompensation("Reload");
 
     if (storage::loadCalib3("/gyro_cal.json", gyroCal)) {
         imu::setGyroCalibration(gyroCal);

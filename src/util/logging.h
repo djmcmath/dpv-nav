@@ -30,7 +30,7 @@ struct LogData {
     float   gps_hdop;       // HDOP (0.0 if no GPS fix)
     float   depth_m;        // depth below surface, meters (0 if sensor absent)
     float   water_temp_c;   // water temperature, degrees C (0 if sensor absent)
-    // MID and HIGH: LIS3MDL die temperature, degrees C. NaN (logged as "nan")
+    // All levels: LIS3MDL die temperature, degrees C. NaN (logged as "nan")
     // when the read fails, rather than 0, which would read as a real value.
     float   mag_temp_c;
     // HIGH-level fields

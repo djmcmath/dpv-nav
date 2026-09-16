@@ -35,6 +35,24 @@ static float g_accel_lsb_per_g = 0.0f;     // counts per g
 static float g_gyro_lsb_per_dps = 0.0f;    // counts per deg/s
 static float g_mag_lsb_per_uT = 0.0f;      // counts per µT (if known)
 
+// ----------- Magnetometer thermal compensation -----------
+// The LIS3MDL's zero-gauss offset moves with die temperature, and ST publish no
+// coefficient for it (the datasheet and AN4602 only claim sensitivity drift is
+// compensated on-chip). Measured on this unit, 2026-09-13/14: a body-fixed
+// ~0.65 µT/°C in the horizontal plane -- see docs/mag-temperature-compensation.md.
+//
+// Coefficients arrive in µT/°C in the LOGICAL frame (the frame of mag_*_raw and
+// the cal JSONs) and are applied in readMagRaw_SensorFrame(), below everything
+// else, so every reader -- nav, logs, cal sample collection, gap-fill -- sees
+// temperature-normalized counts. Converted to the sensor frame here, once.
+static bool  g_magTempCompOn     = false;
+static float g_magTempRef_c      = 21.0f;
+static Vec3f g_magTempCoeffSensor{0.0f, 0.0f, 0.0f};  // µT/°C, SENSOR frame
+// Most recent plausible die reading, captured in the same burst as the field.
+// Compensation stays off until one has arrived, rather than assuming a value.
+static bool  g_magTempSeen       = false;
+static float g_magTemp_c         = NAN;
+
 // The LSB-per-unit divisors below start at 0.0f and are only assigned at the
 // very end of initAccelGyro()/initMag(), after every register write succeeds.
 // A partial init therefore leaves a zero divisor, and dividing a raw count by
@@ -1620,6 +1638,23 @@ ImuStatus readGyroRaw_SensorFrame(Vec3i16& vecOut) {
   return ImuStatus::Ok;
 }
 
+// Die temperature from the two TEMP_OUT bytes. 8 LSB/°C, 0 = 25 °C (AN4602 §6).
+// Returns false for a value outside the LIS3MDL's -40..+85 °C operating range,
+// which can only be a bus fault.
+static bool decodeMagTemp(uint8_t lo, uint8_t hi, float& out) {
+  const int16_t raw = (int16_t)(hi << 8 | lo);
+  const float t = 25.0f + (float)raw / 8.0f;
+  if (!(t >= -40.0f && t <= 85.0f)) return false;
+  out = t;
+  return true;
+}
+
+static int16_t clampToI16(float v) {
+  if (v >  32767.0f) return  32767;
+  if (v < -32768.0f) return -32768;
+  return (int16_t)lroundf(v);
+}
+
 ImuStatus readMagRaw_SensorFrame(Vec3i16& vecOut) {
   if (!mag_inited) return ImuStatus::NotInitialized;
   uint8_t buffer[6];
@@ -1629,6 +1664,31 @@ ImuStatus readMagRaw_SensorFrame(Vec3i16& vecOut) {
   vecOut.x = (int16_t)(buffer[1] << 8 | buffer[0]);
   vecOut.y = (int16_t)(buffer[3] << 8 | buffer[2]);
   vecOut.z = (int16_t)(buffer[5] << 8 | buffer[4]);
+
+  // Die temperature: its OWN 2-byte read, never part of the field burst. An
+  // 8-byte burst 0x28-0x2F was tried and returned TEMP_OUT frozen at a garbage
+  // value (55.88 °C in a 23 °C room, 2026-09-15), while the separate 2-byte
+  // read (a32a491 firmware) tracked real temperature in every thermal log.
+  // Rate-limited: temperature moves over seconds, and the loop reads the field
+  // twice per pass at 100 Hz. A failed read keeps the previous value.
+  static uint32_t lastTempReadMs = 0;
+  const uint32_t nowMs = millis();
+  if (!g_magTempSeen || nowMs - lastTempReadMs >= MAG_TEMP_READ_INTERVAL_MS) {
+    lastTempReadMs = nowMs;
+    uint8_t tb[2];
+    float t;
+    if (magRead(LIS3MDL_REG_TEMP_OUT_L | 0x80, tb, 2) == 2 && decodeMagTemp(tb[0], tb[1], t)) {
+      g_magTemp_c   = t;
+      g_magTempSeen = true;
+    }
+  }
+
+  if (g_magTempCompOn && g_magTempSeen && scaleReady(g_mag_lsb_per_uT)) {
+    const float k = (g_magTemp_c - g_magTempRef_c) * g_mag_lsb_per_uT;  // counts per (µT/°C)
+    vecOut.x = clampToI16((float)vecOut.x - g_magTempCoeffSensor.x * k);
+    vecOut.y = clampToI16((float)vecOut.y - g_magTempCoeffSensor.y * k);
+    vecOut.z = clampToI16((float)vecOut.z - g_magTempCoeffSensor.z * k);
+  }
 
   return ImuStatus::Ok;
 }
@@ -1756,15 +1816,57 @@ ImuStatus readGyro_rad_s_raw_cal(Vec3f& rawOut, Vec3f& calOut) {
 
 ImuStatus readMagTemp_c(float& out) {
   if (!mag_inited) return ImuStatus::NotInitialized;
-  uint8_t buffer[2];
-  magRead(LIS3MDL_REG_TEMP_OUT_L | 0x80, buffer, 2); // 0x80 for auto-increment
+  // The nav loop reads the field every pass, and that read refreshes the
+  // temperature every MAG_TEMP_READ_INTERVAL_MS -- so this is normally free,
+  // and is exactly the value the thermal compensation used.
+  if (g_magTempSeen) {
+    out = g_magTemp_c;
+    return ImuStatus::Ok;
+  }
 
+  // Nothing captured yet (no field read so far): read the register directly.
   // Two's complement, little-endian. 8 LSB/degC, nominal zero at 25 degC. The
   // offset is not factory-trimmed, so treat the absolute value as indicative
   // and the CHANGE as the real measurement (see imu.h).
-  int16_t raw = (int16_t)(buffer[1] << 8 | buffer[0]);
-  out = 25.0f + (float)raw / 8.0f;
+  uint8_t buffer[2];
+  float t;
+  if (magRead(LIS3MDL_REG_TEMP_OUT_L | 0x80, buffer, 2) != 2 ||
+      !decodeMagTemp(buffer[0], buffer[1], t)) {
+    return ImuStatus::BusError;
+  }
+  out = t;
   return ImuStatus::Ok;
+}
+
+void setMagTempCompensation(const Vec3f& coeffLogical_uT_per_c, float ref_c) {
+  if (!isfinite(coeffLogical_uT_per_c.x) || !isfinite(coeffLogical_uT_per_c.y) ||
+      !isfinite(coeffLogical_uT_per_c.z) || !isfinite(ref_c)) {
+    clearMagTempCompensation();
+    return;
+  }
+  // Logical = axis-mapped sensor: logical[i] = sign * sensor[idx]. Invert it,
+  // so sensor[idx] = sign * logical[i]. Needs the mag map, which init() sets.
+  const float logical[3] = {coeffLogical_uT_per_c.x, coeffLogical_uT_per_c.y,
+                            coeffLogical_uT_per_c.z};
+  const int8_t codes[3]  = {g_magMap.x_axis, g_magMap.y_axis, g_magMap.z_axis};
+  float sensor[3] = {0.0f, 0.0f, 0.0f};
+  for (int i = 0; i < 3; i++) {
+    const int idx = (codes[i] < 0 ? -codes[i] : codes[i]) - 1;
+    if (idx < 0 || idx > 2) { clearMagTempCompensation(); return; }
+    sensor[idx] = (codes[i] < 0 ? -1.0f : 1.0f) * logical[i];
+  }
+  g_magTempCoeffSensor = {sensor[0], sensor[1], sensor[2]};
+  g_magTempRef_c       = ref_c;
+  g_magTempCompOn      = true;
+}
+
+void clearMagTempCompensation() {
+  g_magTempCompOn      = false;
+  g_magTempCoeffSensor = {0.0f, 0.0f, 0.0f};
+}
+
+bool magTempCompensationActive() {
+  return g_magTempCompOn;
 }
 
 ImuStatus readMag_uT(Vec3f& out) {

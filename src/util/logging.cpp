@@ -94,7 +94,7 @@ static void writeHeader() {
     if (gActiveLevel == LogLevel::LEVEL_LOW) {
         gLogFile.print("timestamp_ms,local_time,heading_deg,speed_ms,speed_src,"
                        "pos_x_m,pos_y_m,lat,lon,pos_src,"
-                       "gps_satellites,gps_hdop,depth_m,water_temp_c\n");
+                       "gps_satellites,gps_hdop,depth_m,water_temp_c,mag_temp_c\n");
     } else if (gActiveLevel == LogLevel::LEVEL_MID) {
         gLogFile.print("timestamp_ms,local_time,heading_deg,speed_ms,speed_src,"
                        "pos_x_m,pos_y_m,lat,lon,pos_src,"
@@ -266,7 +266,11 @@ bool isLogging() {
 // set, and a third copy of the per-level tail is how a header stops matching its
 // rows.
 static void writeLevelColumns(const LogData& d) {
-    if (gActiveLevel == LogLevel::LEVEL_MID) {
+    if (gActiveLevel == LogLevel::LEVEL_LOW) {
+        // Die temperature at every level: the mag readings are thermally
+        // compensated with it, so a dive log without it can't be re-examined.
+        gLogFile.printf(",%.2f", d.mag_temp_c);
+    } else if (gActiveLevel == LogLevel::LEVEL_MID) {
         gLogFile.printf(",%.3f,%.3f,%.3f,%.2f,%.2f,%.2f",
                         d.mag_cal.x, d.mag_cal.y, d.mag_cal.z,
                         d.pitch_deg, d.roll_deg, d.mag_temp_c);

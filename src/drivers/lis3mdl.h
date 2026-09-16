@@ -20,4 +20,4 @@ const uint8_t LIS3MDL_REG_OUT_X_L   = 0x28; // X_L, X_H, Y_L, Y_H, Z_L, Z_H
 const uint8_t LIS3MDL_REG_TEMP_OUT_L = 0x2E; // TEMP_L, TEMP_H
 
 bool magWrite(uint8_t reg, uint8_t value);
-void magRead(uint8_t startReg, uint8_t *buffer, uint8_t len);
+uint8_t magRead(uint8_t startReg, uint8_t *buffer, uint8_t len);  // returns bytes read

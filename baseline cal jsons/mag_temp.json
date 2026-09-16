@@ -1,0 +1,32 @@
+{
+  "ref_temp_c": 21.0,
+  "coeff_uT_per_c": {
+    "x": 0.5365,
+    "y": 0.4171,
+    "z": 0.2777
+  },
+  "notes": {
+    "fitted": "2026-09-14",
+    "logs": [
+      "north.csv",
+      "east.csv",
+      "south.csv",
+      "west1.csv",
+      "west2.csv"
+    ],
+    "fit_frame": "cal",
+    "base": "mag_base (2).json",
+    "mount": "mag_mount.json",
+    "applied": null,
+    "die_range_c": [
+      21.25,
+      61.25
+    ],
+    "leg": "cooling (peak + 15 s)",
+    "se_uT_per_c": {
+      "x": 0.0007,
+      "y": 0.0008,
+      "z": 0.0013
+    }
+  }
+}

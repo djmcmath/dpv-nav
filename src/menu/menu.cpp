@@ -49,6 +49,28 @@ static bool gGpsEnabled  = true;
 static bool gWifiEnabled = true;
 static bool gSaltWater   = true;
 
+// Turning WiFi on blocks the nav device inside wifi::init() (AP bring-up plus a
+// scan-and-connect), so NavPackets stop for seconds. This latch replaces the
+// menu row with "WiFi CONNECTING" and suppresses both the menu idle-close and
+// the display's NO LINK screen until nav starts talking again. Turning WiFi off
+// is immediate and sets none of this.
+static bool     gWifiConnecting   = false;
+static uint32_t gWifiConnectingMs = 0;
+// Ceiling on that wait. Generous: a scan across every channel plus connect
+// attempts to each stored network is the worst case, and the only cost of being
+// too patient is a stale row, while being too eager flashes NO LINK for nothing.
+static constexpr uint32_t WIFI_CONNECT_WAIT_MS = 45000;
+
+// Dive mode refuses a manual WiFi-on: underwater the radio cannot reach anything,
+// and paying for the attempt means up to ~28 s of blocked nav loop (a scan plus
+// MAX_BOOT_ATTEMPTS x CONNECT_TIMEOUT_MS in wifi_manager.cpp) with heading frozen
+// and a hole in the dead reckoning. Refused locally on the display, so the command
+// never reaches nav and nothing blocks at all. The way to get WiFi back is
+// NAV > Op Mode -> surface, which turns it on as part of surfacing.
+static bool     gWifiBlocked   = false;
+static uint32_t gWifiBlockedMs = 0;
+static constexpr uint32_t WIFI_BLOCKED_SHOW_MS = 2500;
+
 static DisplaySettings gSettings = {
     .showETA     = false,
     .imperial    = false,
@@ -79,6 +101,7 @@ constexpr uint16_t CLR_YELLOW = 0xFFE0;
 constexpr uint16_t CLR_WHITE  = 0xFFFF;
 constexpr uint16_t CLR_BLACK  = 0x0000;
 constexpr uint16_t CLR_GRAY   = 0x7BEF;
+constexpr uint16_t CLR_RED    = 0xF800;  // refusal messages only
 constexpr uint16_t CLR_BLUE   = 0x001F;
 
 // ---------------------------------------------------------------------------
@@ -382,6 +405,24 @@ static void executeAction(Action act) {
             Serial.println("[MENU] TOGGLE_GPS");
             break;
         case Action::INPUT_WIFI:
+            // Refuse a WiFi-on in dive mode (see gWifiBlocked). Turning it OFF
+            // stays allowed — that direction is instant and always safe.
+            if (!gWifiEnabled && gDiveMode) {
+                gWifiBlocked   = true;
+                gWifiBlockedMs = millis();
+                invalidateMenuCache();
+                Serial.println("[MENU] TOGGLE_WIFI refused — dive mode");
+                break;
+            }
+            // Latch before sending: nav blocks inside wifi::init() the moment it
+            // reads the command, so the row has to be claimed now or the diver
+            // watches a frozen menu with no explanation. gWifiEnabled is the
+            // last state nav reported, so !gWifiEnabled means this turns it on.
+            if (!gWifiEnabled) {
+                gWifiConnecting   = true;
+                gWifiConnectingMs = millis();
+                invalidateMenuCache();
+            }
             if (gSendCmd) gSendCmd(DisplayCmd::TOGGLE_WIFI);
             Serial.println("[MENU] TOGGLE_WIFI");
             break;
@@ -483,6 +524,7 @@ void open() {
     }
     savedDepth     = 0;
     gPowerOffArmed = false;
+    gWifiBlocked   = false;
     lastActivityMs = millis();
     invalidateMenuCache();
 }
@@ -491,6 +533,7 @@ void close() {
     stackDepth     = 0;
     savedDepth     = 0;   // an explicit close discards the resume point
     gPowerOffArmed = false;
+    gWifiBlocked   = false;
     Serial.println("[MENU] Closed");
 }
 
@@ -504,6 +547,12 @@ void next() {
         gPowerOffArmed = false;
         invalidateMenuCache();
         Serial.println("[MENU] Power-off disarmed");
+    }
+    // Navigating away dismisses the refusal early — the diver has clearly read
+    // it, and leaving it up would hide the item they just moved to.
+    if (gWifiBlocked) {
+        gWifiBlocked = false;
+        invalidateMenuCache();
     }
     lastActivityMs = millis();
 }
@@ -574,6 +623,28 @@ bool select() {
 
 void tick() {
     if (!isOpen()) return;
+
+    if (gWifiConnecting) {
+        if (millis() - gWifiConnectingMs >= WIFI_CONNECT_WAIT_MS) {
+            gWifiConnecting = false;
+            invalidateMenuCache();
+            Serial.println("[MENU] WiFi connect wait timed out — row released");
+        } else {
+            // Hold the menu open. A connect can outlast MENU_TIMEOUT_MS, and
+            // closing would take the only progress indication with it — leaving
+            // a diver staring at a nav screen that has stopped updating.
+            lastActivityMs = millis();
+        }
+    }
+
+    // Refusal message is transient — put the real menu back after a couple of
+    // seconds. Deliberately does NOT hold the menu open the way connecting does:
+    // nothing is in progress, so the normal idle timeout should still apply.
+    if (gWifiBlocked && millis() - gWifiBlockedMs >= WIFI_BLOCKED_SHOW_MS) {
+        gWifiBlocked = false;
+        invalidateMenuCache();
+    }
+
     if (millis() - lastActivityMs >= MENU_TIMEOUT_MS) {
         Serial.println("[MENU] Timeout — closing");
         // Capture before close(), which clears the resume point on purpose.
@@ -608,25 +679,45 @@ void render() {
     // Separator line
     display::drawHLine(0, MENU_SEP_Y, 320, CLR_CYAN);
 
-    // Title (cached) — size 2, pad to 25 chars to clear previous content
+    // Title (cached) — size 2, pad to 25 chars to clear previous content.
+    // A refusal borrows both rows: the title says what was refused, the item row
+    // says why. Neither cache keys on colour, but every override text here is
+    // distinct from any real title or label, so a stale colour cannot survive.
+    const char* title    = sm.title;
+    uint16_t    titleClr = CLR_CYAN;
+    if (gWifiBlocked) {
+        title    = "WiFi unavailable";
+        titleClr = CLR_RED;
+    }
     char titleBuf[27];
-    snprintf(titleBuf, sizeof(titleBuf), "%-25s", sm.title);
+    snprintf(titleBuf, sizeof(titleBuf), "%-25s", title);
     if (strcmp(titleBuf, prevTitle) != 0) {
-        display::drawText(1, TITLE_Y, titleBuf, CLR_CYAN, 2);
+        display::drawText(1, TITLE_Y, titleBuf, titleClr, 2);
         strncpy(prevTitle, titleBuf, sizeof(prevTitle));
     }
 
     // Current item — size 3 large text, one item at a time
     auto& item = sm.items[selectedItem];
     char labelBuf[22];
-    getDisplayLabel(item, labelBuf, sizeof(labelBuf));
+    uint16_t itemClr = CLR_YELLOW;
+    if (gWifiBlocked) {
+        snprintf(labelBuf, sizeof(labelBuf), "DIVE MODE");
+        itemClr = CLR_RED;
+    } else if (gWifiConnecting) {
+        // 15 chars, inside the 16 the size-3 row holds. Takes the item's place
+        // rather than adding a row: there is nowhere below it to put one, and
+        // the item underneath is exactly the thing that is mid-change anyway.
+        snprintf(labelBuf, sizeof(labelBuf), "WiFi CONNECTING");
+    } else {
+        getDisplayLabel(item, labelBuf, sizeof(labelBuf));
+    }
 
     // Pad to 16 chars (size 3 = 18px/char, 16 chars = 288px fits in 320px)
     char itemBuf[18];
     snprintf(itemBuf, sizeof(itemBuf), "%-16s", labelBuf);
 
     if (strcmp(itemBuf, prevItem) != 0) {
-        display::drawText(1, ITEM_Y, itemBuf, CLR_YELLOW, 3);
+        display::drawText(1, ITEM_Y, itemBuf, itemClr, 3);
         strncpy(prevItem, itemBuf, sizeof(prevItem));
     }
 }
@@ -636,8 +727,18 @@ const DisplaySettings& settings() {
 }
 
 void updateNavState(uint8_t flags, uint8_t flags2) {
+    const bool wifiNow = (flags & FLAG_WIFI_ENABLED) != 0;
+    // Packets only resume once nav is out of wifi::init(), and the flag it sends
+    // is the authoritative state — so the first packet agreeing that WiFi is up
+    // ends the wait. Anything else (a late packet queued before the block, a
+    // failed bring-up that left it off) leaves the latch to time out in tick().
+    if (gWifiConnecting && wifiNow) {
+        gWifiConnecting = false;
+        invalidateMenuCache();
+    }
+
     gGpsEnabled    = (flags & FLAG_GPS_ENABLED)     != 0;
-    gWifiEnabled   = (flags & FLAG_WIFI_ENABLED)    != 0;
+    gWifiEnabled   = wifiNow;
     gLogLevel      = (flags & FLAG_LOG_LEVEL_MASK) >> FLAG_LOG_LEVEL_SHIFT;
     gSaltWater     = (flags2 & FLAG2_SALT_WATER)    != 0;
     gDiveMode      = (flags2 & FLAG2_DIVE_MODE)     != 0;
@@ -689,6 +790,10 @@ bool isPendingCloudLink() {
 
 void clearCloudLinkPending() {
     gCloudLinkPending = false;
+}
+
+bool isWifiConnecting() {
+    return gWifiConnecting;
 }
 
 bool isPendingCurrentHold() {

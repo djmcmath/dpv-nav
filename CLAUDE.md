@@ -379,6 +379,30 @@ load-bearing, not cosmetic.
 
 **Op Mode (Dive/Surface):** Toggles operational mode. Surface mode (default at boot) keeps GPS and WiFi active. Dive mode disables both GPS processing and WiFi radio — suitable for underwater use where neither is available. Toggling back to surface re-initializes WiFi and GPS.
 
+**`Config > WiFi` actually switches the radio, and refuses to turn it on in dive mode.**
+Until 2026-09-16 `DisplayCmd::TOGGLE_WIFI` only flipped `gWifiEnabled` — the menu and
+status bar reported a radio state that was not real, and the change took effect one
+reboot later via the NVS restore in `setup()`. Any bench measurement that toggled WiFi
+from the menu before that date measured nothing; don't trust those logs. Now:
+- **On** calls `wifi::init()` + `web::init()`, which **blocks the nav loop** — ~5 s
+  measured on a good network, up to ~28 s worst case (scan plus `MAX_BOOT_ATTEMPTS` ×
+  `CONNECT_TIMEOUT_MS` in [wifi_manager.cpp](src/net/wifi_manager.cpp)). Heading freezes
+  and dead reckoning gets a hole for the duration. Accepted deliberately, and it is the
+  same tradeoff `setDiveMode()` already makes on a surface transition.
+- The display shows `WiFi CONNECTING` in the menu row meanwhile, and
+  `menu::isWifiConnecting()` joins the `linkAlive` overrides in display_main so the
+  5 s `NAV_TIMEOUT_MS` "NO LINK" screen does not fire during a legitimate connect —
+  same pattern as the cloud-cal overrides next to it.
+- **On is refused in dive mode**, shown as a 2.5 s red `WiFi unavailable / DIVE MODE`
+  in the menu rows. The radio cannot reach anything underwater, so the only thing an
+  attempt buys is a blocked nav loop. Guard lives on the display (the command never
+  reaches nav); nav_main re-checks it as a backstop. The way to get WiFi back is
+  `Nav > Op Mode` → surface. **Off is always allowed** — instant and always safe.
+
+A blocking call reachable from a button press is a deliberate exception to
+"heading must never be blocked", not a pattern to copy. If you add another one, give it
+the same two things: a display-side indication, and a `linkAlive` override.
+
 ### Display Layout When Menu Is Open (320×240 TFT)
 - **y=0–23**: Status bar (unchanged, live-updating)
 - **y=24–119**: Nav data (2×2 grid: BRG/RNG/HDG/SPD, live-updating)

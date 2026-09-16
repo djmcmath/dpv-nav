@@ -171,4 +171,10 @@ void clearCloudLinkPending();
 bool isPendingCurrentHold();
 void clearCurrentHoldPending();
 
+// True while the nav device is blocked inside wifi::init() after a WiFi-on
+// toggle. The menu row reads "WiFi CONNECTING" for the duration; display_main
+// must also treat the link as alive, since no NavPackets arrive meanwhile.
+// Self-clearing: on the first packet reporting WiFi up, or on a timeout.
+bool isWifiConnecting();
+
 }  // namespace menu

@@ -2111,10 +2111,36 @@ static void handleDisplayCmd() {
                         nvs_nav::save(currentNavNvsState());
                         break;
                     case DisplayCmd::TOGGLE_WIFI:
+                        // Backstop for the dive-mode refusal. The display holds
+                        // the real guard (menu.cpp, Action::INPUT_WIFI) so this
+                        // should never fire — but honouring the invariant here
+                        // too means nothing can block the nav loop for ~28 s
+                        // underwater, whatever ends up sending the command.
+                        if (!gWifiEnabled && gDiveMode) {
+                            Serial.println("CMD: TOGGLE_WIFI -> refused (dive mode)");
+                            break;
+                        }
                         gWifiEnabled = !gWifiEnabled;
                         Serial.print("CMD: TOGGLE_WIFI -> ");
                         Serial.println(gWifiEnabled ? "ON" : "OFF");
-                        // TODO: call wifi::stop() / wifi::init() based on state
+                        // Until 2026-09-16 this only flipped the flag, so the menu
+                        // and the status bar reported a radio state that was not
+                        // real and the change took effect one reboot later (the
+                        // NVS restore at setup() honours it). Any bench result
+                        // that toggled WiFi from the menu before that date was
+                        // measuring nothing.
+                        if (gWifiEnabled) {
+                            // Blocking: AP bring-up plus connectByScan(). Seconds
+                            // of frozen heading and a hole in the DR integration,
+                            // accepted deliberately — same tradeoff setDiveMode()
+                            // already makes on a surface transition. The display
+                            // shows "WiFi CONNECTING" and holds off its NO LINK
+                            // screen for the duration (menu::isWifiConnecting()).
+                            wifi::init();
+                            web::init();
+                        } else {
+                            wifi::stop();
+                        }
                         nvs_nav::save(currentNavNvsState());
                         break;
                     case DisplayCmd::CYCLE_LOG_LEVEL:

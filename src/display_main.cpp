@@ -608,8 +608,11 @@ void loop() {
     // FINISH_BASELINE_COLLECTION and nav's completion packet actually
     // arriving -- nav may already be mid CSV-dump by the time it gets to
     // sending that packet. Same reasoning as calCompleteHolding below.
+    // A WiFi-on toggle blocks nav inside wifi::init() for seconds, same shape as
+    // the cloud-cal case above: the link is fine, nav just cannot talk yet.
+    bool awaitingWifi = menu::isWifiConnecting();
     bool linkAlive = calCompleteHolding || gBaselineFinishPending ||
-                     awaitingCloudCal || awaitingCloudLink ||
+                     awaitingCloudCal || awaitingCloudLink || awaitingWifi ||
                      (navValid && (now - lastNavMs < NAV_TIMEOUT_MS));
 
     if (linkAlive) {

@@ -63,9 +63,25 @@ void showNavTop(const NavPacket& pkt);
 void showDebug(const DebugPacket& pkt);
 
 // Draw the nav-device boot status screen and flush to display.
-// Shows pass/fail for each subsystem (IMU, GPS, cal files).
+// Shows pass/fail for each subsystem (IMU, GPS, cal files), then a firmware
+// footer: one version when both boards agree, both when they don't (which is
+// what an OTA that updated only nav looks like).
 // boot_flags uses the BOOT_* bit constants from dpvlink.h.
-void showBootStatus(uint8_t boot_flags);
+// nav_fw is nav's FW_VERSION from its boot ping, or "" if it sent none.
+// update_version is a newer release nav found at boot ("" = none), shown as a
+// "tern.local" hint -- installing only ever happens from the web page.
+void showBootStatus(uint8_t boot_flags, const char* nav_fw, const char* update_version);
+
+// Firmware update in progress on this display (see src/display_ota.h).
+//   version  -- the release being installed
+//   pct      -- 0-100, or <0 to hide the progress bar
+//   message  -- status line; shown red when error is true
+//   full     -- repaint everything (first draw / message change); otherwise
+//               only the percentage and bar are updated, so it doesn't flicker
+void showFirmwareUpdate(const char* version, int pct, const char* message, bool error, bool full);
+
+// Short full-screen notice that a newer release is available at tern.local.
+void showUpdateAvailable(const char* version);
 
 // Draw a calibration progress screen and flush to display.
 //   remaining_s    — seconds left in the calibration

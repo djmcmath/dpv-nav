@@ -2,6 +2,7 @@
 #include "logo_bitmap.h"
 #include "../board_pins.h"
 #include "../config.h"
+#include "../version.h"
 #include <dpvlink.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
@@ -909,7 +910,7 @@ void tickRandomTextTest() {
 //   y=22  horizontal separator  cyan
 //   y=28..136  6 status rows    label + dots + ok/FAIL, size 2
 // ===========================================================================
-void showBootStatus(uint8_t boot_flags) {
+void showBootStatus(uint8_t boot_flags, const char* nav_fw, const char* update_version) {
     if (!tftReady) return;
     invalidateNavCache();
     tft.fillScreen(COLOR_BLACK);
@@ -950,6 +951,107 @@ void showBootStatus(uint8_t boot_flags) {
         }
         y += 18;
     }
+
+    // Firmware footer. The two boards are released as a pair, so one line is
+    // the normal case; a split means an OTA updated one board and not the other.
+    y += 6;
+    tft.drawFastHLine(0, y, SCREEN_WIDTH, COLOR_GRAY);
+    y += 8;
+    tft.setTextSize(2);
+    bool navKnown = (nav_fw != nullptr && nav_fw[0] != '\0');
+    if (navKnown && strcmp(nav_fw, FW_VERSION) == 0) {
+        tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+        tft.setCursor(0, y);
+        tft.printf("fw %s", FW_VERSION);
+    } else {
+        tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
+        tft.setCursor(0, y);
+        tft.printf("nav  %s", navKnown ? nav_fw : "?");
+        tft.setCursor(0, y + 18);
+        tft.printf("disp %s", FW_VERSION);
+    }
+
+    if (update_version && update_version[0]) {
+        tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
+        tft.setCursor(0, 222);
+        tft.printf("Update %s: tern.local", update_version);
+    }
+}
+
+// ===========================================================================
+// Firmware update screens
+// ===========================================================================
+static void printWrapped(int16_t x, int16_t y, const char* text, int maxCharsPerLine,
+                         int16_t lineHeight, int maxLines);  // defined with the cloud-cal screens
+
+static constexpr int FW_BAR_Y = 130;
+static constexpr int FW_BAR_H = 16;
+
+void showFirmwareUpdate(const char* version, int pct, const char* message, bool error, bool full) {
+    if (!tftReady) return;
+    if (full) {
+        invalidateNavCache();
+        tft.fillScreen(COLOR_BLACK);
+
+        tft.setTextSize(2);
+        tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
+        tft.setCursor(4, 4);
+        tft.print("FIRMWARE UPDATE");
+        tft.drawFastHLine(0, 28, SCREEN_WIDTH, COLOR_CYAN);
+
+        tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+        tft.setCursor(4, 44);
+        tft.printf("Display %s", FW_VERSION);
+        tft.setCursor(4, 64);
+        tft.printf("     -> %s", version ? version : "?");
+
+        tft.setTextSize(1);
+        tft.setTextColor(error ? COLOR_RED : COLOR_WHITE, COLOR_BLACK);
+        printWrapped(4, 164, message ? message : "", 50, 12, 3);
+
+        tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+        tft.setCursor(4, 222);
+        tft.print(error ? "Still running the old firmware."
+                        : "Keep the unit powered. Buttons are off.");
+        if (pct >= 0) tft.drawRect(4, FW_BAR_Y, SCREEN_WIDTH - 8, FW_BAR_H, COLOR_GRAY);
+    }
+    if (pct < 0) return;
+    if (pct > 100) pct = 100;
+
+    int inner = SCREEN_WIDTH - 10;
+    int fill  = inner * pct / 100;
+    tft.fillRect(5, FW_BAR_Y + 1, fill, FW_BAR_H - 2, COLOR_CYAN);
+    tft.fillRect(5 + fill, FW_BAR_Y + 1, inner - fill, FW_BAR_H - 2, COLOR_BLACK);
+
+    tft.setTextSize(3);
+    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+    tft.setCursor(4, 96);
+    tft.printf("%3d%%", pct);
+}
+
+void showUpdateAvailable(const char* version) {
+    if (!tftReady) return;
+    invalidateNavCache();
+    tft.fillScreen(COLOR_BLACK);
+
+    tft.setTextSize(2);
+    tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
+    tft.setCursor(4, 4);
+    tft.print("FIRMWARE");
+    tft.drawFastHLine(0, 28, SCREEN_WIDTH, COLOR_CYAN);
+
+    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+    tft.setCursor(4, 70);
+    tft.printf("Version %s", version ? version : "?");
+    tft.setCursor(4, 94);
+    tft.print("is available.");
+
+    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+    tft.setCursor(4, 140);
+    tft.print("Install it from");
+    tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
+    tft.setCursor(4, 164);
+    tft.print("tern.local");
 }
 
 // ===========================================================================

@@ -22,6 +22,8 @@ PacketType identifyPacket(const char* buf, size_t len) {
     if (t[0] == 'R') return PacketType::CAL_CLOUD_RESULT;
     if (t[0] == 'L') return PacketType::CLOUD_LINK_RESULT;
     if (t[0] == 'P') return PacketType::BOOT_PING;
+    if (t[0] == 'U') return PacketType::OTA_BEGIN;
+    if (t[0] == 'V') return PacketType::UPDATE_HINT;
     // Backward compat: packets without "t" are assumed NavPacket
     if (doc["hdg"].is<float>()) return PacketType::NAV;
     return PacketType::UNKNOWN;
@@ -131,9 +133,10 @@ bool bytesToNavPacket(const char* buf, size_t len, NavPacket& out) {
 // ---------------------------------------------------------------------------
 // Boot-time display-link round-trip check
 // ---------------------------------------------------------------------------
-size_t bootPingToBytes(char* buf, size_t bufLen) {
+size_t bootPingToBytes(const char* fwVersion, char* buf, size_t bufLen) {
     JsonDocument doc;
     doc["t"] = "P";
+    doc["v"] = fwVersion;
     size_t n = serializeJson(doc, buf, bufLen - 1);
     if (n == 0 || n >= bufLen - 1) return 0;
     buf[n]     = '\n';
@@ -208,6 +211,90 @@ size_t displayArriveWaypointToBytes(uint8_t idx, char* buf, size_t bufLen) {
     buf[n]     = '\n';
     buf[n + 1] = '\0';
     return n + 1;
+}
+
+size_t displayLinkHelloToBytes(const char* fwVersion, char* buf, size_t bufLen) {
+    JsonDocument doc;
+    doc["cmd"] = static_cast<uint8_t>(DisplayCmd::LINK_HELLO);
+    doc["v"]   = fwVersion;
+
+    size_t n = serializeJson(doc, buf, bufLen - 1);
+    if (n == 0 || n >= bufLen - 1) return 0;
+    buf[n]     = '\n';
+    buf[n + 1] = '\0';
+    return n + 1;
+}
+
+void parseLinkVersion(const char* buf, size_t len, char* verOut, size_t verOutLen) {
+    if (verOutLen == 0) return;
+    verOut[0] = '\0';
+    JsonDocument doc;
+    if (deserializeJson(doc, buf, len)) return;
+    const char* v = doc["v"] | "";
+    strncpy(verOut, v, verOutLen - 1);
+    verOut[verOutLen - 1] = '\0';
+}
+
+// ---------------------------------------------------------------------------
+// Display firmware update packets
+// ---------------------------------------------------------------------------
+static size_t finishLine(JsonDocument& doc, char* buf, size_t bufLen) {
+    size_t n = serializeJson(doc, buf, bufLen - 1);
+    if (n == 0 || n >= bufLen - 1) return 0;
+    buf[n]     = '\n';
+    buf[n + 1] = '\0';
+    return n + 1;
+}
+
+size_t otaBeginPacketToBytes(const OtaBeginPacket& pkt, char* buf, size_t bufLen) {
+    JsonDocument doc;
+    doc["t"]      = "U";
+    doc["pv"]     = pkt.pv;
+    doc["size"]   = pkt.size;
+    doc["sha256"] = pkt.sha256;
+    doc["v"]      = pkt.version;
+    return finishLine(doc, buf, bufLen);
+}
+
+bool bytesToOtaBeginPacket(const char* buf, size_t len, OtaBeginPacket& out) {
+    JsonDocument doc;
+    if (deserializeJson(doc, buf, len)) return false;
+    out.pv   = doc["pv"] | (uint8_t)0;
+    out.size = doc["size"] | (uint32_t)0;
+    const char* sha = doc["sha256"] | "";
+    const char* v   = doc["v"] | "";
+    strncpy(out.sha256, sha, sizeof(out.sha256) - 1);
+    out.sha256[sizeof(out.sha256) - 1] = '\0';
+    strncpy(out.version, v, sizeof(out.version) - 1);
+    out.version[sizeof(out.version) - 1] = '\0';
+    return true;
+}
+
+size_t updateHintToBytes(const char* version, char* buf, size_t bufLen) {
+    JsonDocument doc;
+    doc["t"] = "V";
+    doc["v"] = version;
+    return finishLine(doc, buf, bufLen);
+}
+
+size_t otaReplyToBytes(DisplayCmd cmd, bool ok, const char* err, char* buf, size_t bufLen) {
+    JsonDocument doc;
+    doc["cmd"] = static_cast<uint8_t>(cmd);
+    doc["ok"]  = ok ? 1 : 0;
+    if (err && err[0]) doc["err"] = err;
+    return finishLine(doc, buf, bufLen);
+}
+
+bool parseOtaReply(const char* buf, size_t len, bool& ok, char* errOut, size_t errOutLen) {
+    JsonDocument doc;
+    if (deserializeJson(doc, buf, len)) return false;
+    ok = (doc["ok"] | 0) != 0;
+    if (errOutLen > 0) {
+        const char* e = doc["err"] | "";
+        strncpy(errOut, e, errOutLen - 1);
+        errOut[errOutLen - 1] = '\0';
+    }
+    return true;
 }
 
 uint8_t parseWaypointIndex(const char* buf, size_t len) {

@@ -27,6 +27,7 @@
 #include "net/web_server.h"
 #include "net/cloud_client.h"
 #include "net/cal_sync.h"
+#include "net/ota.h"
 #include "nav_main.h"
 #include "util/serial_commands.h"
 #include "util/mag_cal_collect.h"
@@ -35,6 +36,8 @@
 #include "util/hdg_cal.h"
 #include "util/waypoints.h"
 #include "util/motor_cal.h"
+#include "util/ota_confirm.h"
+#include "version.h"
 #include <dpvlink.h>
 
 // Default loopTask stack (~8 KB) isn't enough once cloud::updateAuthorizePoll()
@@ -321,6 +324,10 @@ static uint8_t gBootFlags = 0;
 // display->nav direction of Serial1 is alive (see boot self-test in setup()).
 static bool gDisplayLinkAckReceived = false;
 
+// FW_VERSION the display reported in its LINK_HELLO. Empty = no reply yet, or
+// a pre-OTA display build that doesn't send one (USB flash required).
+static char gDisplayFwVersion[16] = "";
+
 // ---- Toggle states (shared between command handler and sendNavPacket) ------
 static bool gGpsEnabled  = DEFAULT_USE_GPS_POSITION;  // GPS usage (position + speed)
 static bool gWifiEnabled = true;   // WiFi radio enabled (surface mode default)
@@ -334,6 +341,26 @@ static uint32_t gDepthSurfaceSinceMs = 0;      // 0 = not currently shallow; els
 // ---- Serial link buffer ----------------------------------------------------
 static char linkBuf[256];
 static char wpBuf[3200];  // waypoint list packet — up to 50 waypoints in JSON
+
+// ---- OTA gating (see nav_main.h / net/ota.cpp) -----------------------------
+const char* otaBlockedReason() {
+    if (gDiveMode) return "Dive mode is on";
+    if (depth::isPresent() && depth::getDepth_m() > DEPTH_SURFACE_REVERT_M) {
+        return "The unit is underwater";
+    }
+    if (logging::isLogging()) return "Logging is on -- stop logging first";
+    if (gInCal || sysState == SystemState::CALIBRATION) return "A calibration is running";
+    if (gCurrentHoldActive) return "A current measurement is running";
+    return nullptr;
+}
+
+const char* displayFwVersion() {
+    return gDisplayFwVersion;
+}
+
+void forgetDisplayFwVersion() {
+    gDisplayFwVersion[0] = '\0';
+}
 
 // ---- NVS helpers -----------------------------------------------------------
 // Build full nav NVS state from current globals (avoids stale-read-then-write).
@@ -374,7 +401,7 @@ static void setDiveMode(bool dive);
 // ===========================================================================
 void setup() {
     Serial.begin(115200);
-    Serial.println("\n=== DPV-NAV (nav device) ===");
+    Serial.println("\n=== DPV-NAV (nav device) fw " FW_VERSION " ===");
 
     // Serial link to display device
     Serial1.begin(LINK_BAUD, SERIAL_8N1, LINK_RX_PIN, LINK_TX_PIN);
@@ -480,7 +507,7 @@ void setup() {
             if (now - lastPingMs >= DISPLAY_PING_INTERVAL_MS) {
                 lastPingMs = now;
                 char pingBuf[32];
-                size_t n = bootPingToBytes(pingBuf, sizeof(pingBuf));
+                size_t n = bootPingToBytes(FW_VERSION, pingBuf, sizeof(pingBuf));
                 if (n > 0) Serial1.write(pingBuf, n);
             }
             handleDisplayCmd();
@@ -546,7 +573,14 @@ void setup() {
         logging::init();
 
         sysState = SystemState::READY;
+
+        // Both required checks (IMU + display link round-trip) passed, so a
+        // freshly OTA'd image has proved itself. An image that lands in ERROR
+        // stays unconfirmed and reverts on its next reset -- see ota_confirm.h.
+        ota_confirm::markValid();
     }
+    Serial.printf("Display fw: %s\n",
+                  gDisplayFwVersion[0] ? gDisplayFwVersion : "(not reported -- pre-OTA build)");
 
     // Set local timezone (Seattle / Pacific Time).
     // Must be done before wifi::init() so the NTP callback picks it up,
@@ -599,6 +633,15 @@ void loop() {
     // Keep web server alive even in error state
     web::update();
 
+    // Sending firmware to the display: the transfer owns Serial1 until it ends.
+    // No NavPackets or command parsing in the meantime (they would land in the
+    // middle of it), and heading isn't computed -- the display is showing its
+    // update screen, and the install refuses to start in dive mode anyway.
+    if (ota::ownsDisplayLink()) {
+        ota::update();
+        return;
+    }
+
     if (sysState == SystemState::ERROR) {
         // Keep reporting the boot self-test summary instead of going fully
         // silent -- a halted nav device used to be indistinguishable from a
@@ -612,6 +655,8 @@ void loop() {
             sendNavPacket(0, 0, 0, 0, 0, false, 0, 0, 0, 0, GpsFix{});
         }
         handleDisplayCmd();
+        // An ERROR-state unit may be exactly the one that needs new firmware.
+        ota::update();
         delay(1);
         return;
     }
@@ -1098,6 +1143,10 @@ void loop() {
     // --- Calibration install-sync pending-confirm retry (non-blocking; only
     // does anything once every few minutes, see cal_sync.cpp) ---------------
     cal_sync::update();
+
+    // --- Firmware update: boot-time manifest check, then (once the diver
+    // starts one from tern.local) at most one download chunk per iteration --
+    ota::update();
 
     // --- Cloud account-link poll (non-blocking, see LINK_ACCOUNT above) ------
     cloud::updateAuthorizePoll();
@@ -2236,6 +2285,8 @@ static void handleDisplayCmd() {
                         // the boot self-test window (e.g. a retried/duplicate
                         // reply); just re-affirms the flag.
                         gDisplayLinkAckReceived = true;
+                        parseLinkVersion(cmdBuf, cmdPos, gDisplayFwVersion,
+                                              sizeof(gDisplayFwVersion));
                         break;
                     }
                     case DisplayCmd::ARRIVE_WAYPOINT: {

@@ -9,9 +9,12 @@
 
 #include "board_pins.h"
 #include "config.h"
+#include "display_ota.h"
 #include "drivers/display.h"
 #include "menu/menu.h"
 #include "nav/state.h"
+#include "util/ota_confirm.h"
+#include "version.h"
 #include <dpvlink.h>
 
 // ---- Link receive state ----------------------------------------------------
@@ -52,6 +55,20 @@ static constexpr uint32_t BASELINE_FINISH_PENDING_TIMEOUT_MS = 8000;
 // 96, not 64: ACCEPT_CLOUD_CAL/REJECT_CLOUD_CAL carry a 36-char UUID ("cid")
 // plus JSON overhead, which doesn't fit the old 64-byte size.
 static char txBuf[96];
+
+// ---- Nav's firmware version, from the "v" field of its boot ping ------------
+// "" until the first ping arrives, and on a pre-OTA nav that sends none.
+static char gNavFwVersion[16] = "";
+
+// ---- Firmware update hint ("V" packet) --------------------------------------
+// Nav sends it a few times after its boot-time check finds a newer release.
+// Shown on the boot status screen if that's still up, otherwise once as a
+// short full-screen notice. Installing only happens from tern.local.
+static char     gUpdateHintVersion[16] = "";
+static bool     gUpdateHintShown       = false;  // the notice has been shown this boot
+static uint32_t gUpdateHintUntilMs     = 0;      // notice on screen until then (0 = not showing)
+static bool     gUpdateHintDrawn       = false;
+static constexpr uint32_t UPDATE_HINT_SHOW_MS = 4000;
 
 // ---- Timing ----------------------------------------------------------------
 static constexpr uint32_t DISPLAY_INTERVAL_MS = 250;  // 4 Hz refresh
@@ -285,7 +302,7 @@ static void handleButtons();
 // ===========================================================================
 void setup() {
     Serial.begin(115200);
-    Serial.println("\n=== DPV-NAV (display device) ===");
+    Serial.println("\n=== DPV-NAV (display device) fw " FW_VERSION " ===");
 
     // ---- Wake-from-deep-sleep check ----------------------------------------
     // Buttons are configured as INPUT in the lines below; read them now using
@@ -322,7 +339,10 @@ void setup() {
         Serial1.end();
     }
 
-    // Serial link from nav device
+    // Serial link from nav device. The RX buffer holds a whole firmware-update
+    // frame (~1 KB) with room to spare while the screen is being drawn; the
+    // default is too small for that. Must be set before begin().
+    Serial1.setRxBufferSize(2048);
     Serial1.begin(LINK_BAUD, SERIAL_8N1, LINK_RX_PIN, LINK_TX_PIN);
 
     // Buttons (direct GPIO, external pull-up)
@@ -378,8 +398,23 @@ static NavPacket applyHeadingMode(NavPacket pkt) {
 
 // ===========================================================================
 void loop() {
+    // --- Firmware update from nav: owns the link and the screen -------------
+    if (display_ota::active()) {
+        display_ota::update();
+        if (!display_ota::active()) {
+            // Transfer failed or was cancelled (success restarts instead).
+            // Nav resumes its stream; don't flash NO LINK or keep a stale line.
+            rxPos       = 0;
+            lastNavMs   = millis();
+            wasLinkDead = false;
+            display::clear();
+        }
+        return;
+    }
+
     // --- Read serial link (non-blocking, line-buffered) ---------------------
-    while (Serial1.available()) {
+    // Stops at an OTA_BEGIN packet: everything after it belongs to display_ota.
+    while (Serial1.available() && !display_ota::active()) {
         char c = Serial1.read();
         if (c == '\n' || rxPos >= sizeof(rxBuf) - 1) {
             rxBuf[rxPos] = '\0';
@@ -389,6 +424,7 @@ void loop() {
             rxBuf[rxPos++] = c;
         }
     }
+    if (display_ota::active()) return;  // a transfer just started; its screen is up
 
     // --- Read USB serial commands (non-blocking, line-buffered) -------------
     while (Serial.available()) {
@@ -500,6 +536,9 @@ void loop() {
     }
     if (menu::isOpen()) {
         menuWasOpen = true;
+        // A button press dismisses the update notice rather than queueing behind it.
+        gUpdateHintUntilMs = 0;
+        gUpdateHintDrawn   = false;
     }
 
     // --- Periodic display reinit (workaround for SPI blank-out) --------------
@@ -521,7 +560,7 @@ void loop() {
                 // Nav came up during the logo hold — transition now that 3 s have passed.
                 gBootPhase  = BootPhase::STATUS;
                 gBootShowMs = now;
-                display::showBootStatus(lastNav.boot_flags);
+                display::showBootStatus(lastNav.boot_flags, gNavFwVersion, gUpdateHintVersion);
             } else {
                 // Still waiting — overlay counter at bottom of logo screen at 1 Hz.
                 if (now - lastCounterMs >= COUNTER_INTERVAL_MS) {
@@ -541,9 +580,10 @@ void loop() {
         // to keep it visible (display::showBootStatus was already called on first packet).
         if (now - lastDisplayMs >= DISPLAY_INTERVAL_MS) {
             lastDisplayMs = now;
-            display::showBootStatus(lastNav.boot_flags);
+            display::showBootStatus(lastNav.boot_flags, gNavFwVersion, gUpdateHintVersion);
         }
         if (now - gBootShowMs >= BOOT_STATUS_HOLD_MS) {
+            if (gUpdateHintVersion[0]) gUpdateHintShown = true;  // already seen on this screen
             gBootPhase = BootPhase::DONE;
             wasLinkDead = false;
             display::clear();
@@ -749,6 +789,17 @@ void loop() {
                     int secondsRemaining = (int)((remainingMs + 999) / 1000);  // round up
                     display::showSpeedCalCountdown(secondsRemaining);
                 }
+            } else if (gUpdateHintUntilMs != 0 && !menu::isOpen() &&
+                       static_cast<SystemState>(lastNav.system_state) != SystemState::CALIBRATION) {
+                // One-off "update available" notice, then back to the nav screen.
+                if ((int32_t)(now - gUpdateHintUntilMs) < 0) {
+                    if (!gUpdateHintDrawn) display::showUpdateAvailable(gUpdateHintVersion);
+                    gUpdateHintDrawn = true;
+                } else {
+                    gUpdateHintUntilMs = 0;
+                    gUpdateHintDrawn   = false;
+                    display::clear();
+                }
             } else {
 
             display::setImperialUnits(menu::settings().imperial);
@@ -826,6 +877,7 @@ static void processNavLine() {
         if (bytesToNavPacket(rxBuf, rxPos, lastNav)) {
             navValid  = true;
             lastNavMs = millis();
+            ota_confirm::markValid();  // no-op after the first call
             menu::updateNavState(lastNav.flags, lastNav.flags2);
             if (gBootPhase == BootPhase::LOGO) {
                 // Only switch to STATUS if the logo minimum hold has elapsed;
@@ -833,7 +885,7 @@ static void processNavLine() {
                 if (millis() - gLogoStartMs >= LOGO_MIN_MS) {
                     gBootPhase  = BootPhase::STATUS;
                     gBootShowMs = millis();
-                    display::showBootStatus(lastNav.boot_flags);
+                    display::showBootStatus(lastNav.boot_flags, gNavFwVersion, gUpdateHintVersion);
                 }
             }
             // Advance speed cal phase based on cal_mode from nav device.
@@ -941,11 +993,28 @@ static void processNavLine() {
             }
             Serial.printf("[CLOUD_LINK] result stage=%u\n", pkt.stage);
         }
+    } else if (ptype == PacketType::OTA_BEGIN) {
+        display_ota::begin(rxBuf, rxPos);
+    } else if (ptype == PacketType::UPDATE_HINT) {
+        char v[sizeof(gUpdateHintVersion)];
+        parseLinkVersion(rxBuf, rxPos, v, sizeof(v));
+        if (v[0] && strcmp(v, gUpdateHintVersion) != 0) {
+            strcpy(gUpdateHintVersion, v);
+            Serial.printf("[OTA] nav reports firmware %s available\n", v);
+        }
+        // The boot status screen shows it inline; after that, one notice per boot.
+        if (v[0] && gBootPhase == BootPhase::DONE && !gUpdateHintShown) {
+            gUpdateHintShown   = true;
+            gUpdateHintUntilMs = millis() + UPDATE_HINT_SHOW_MS;
+        }
     } else if (ptype == PacketType::BOOT_PING) {
         // Nav's boot self-test round-trip check (see setup() in nav_main.cpp)
         // -- echo back immediately so nav can confirm display->nav is alive.
         lastNavMs = millis();
-        sendCmd(DisplayCmd::LINK_HELLO);
+        // Nav's own version rides along on the ping, for the boot status screen.
+        parseLinkVersion(rxBuf, rxPos, gNavFwVersion, sizeof(gNavFwVersion));
+        size_t n = displayLinkHelloToBytes(FW_VERSION, txBuf, sizeof(txBuf));
+        if (n > 0) Serial1.write(txBuf, n);
     }
 }
 

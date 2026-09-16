@@ -395,12 +395,17 @@ async function delWp(name) {
 }
 ['wplat','wplon'].forEach(id => {
   document.getElementById(id).addEventListener('paste', e => {
-    const text = (e.clipboardData || window.clipboardData).getData('text').trim();
-    const m = text.match(/^(-?\d+\.?\d*)[,\s]+(-?\d+\.?\d*)$/);
-    if (!m) return;
+    // Google Maps wraps copied coords in invisible bidi marks (U+200E, U+202A..)
+    // and may use U+2212 for minus, so pull out the two numbers rather than
+    // anchoring on the whole string. Hemisphere letters (47.7° N, 122.6° W) flip sign.
+    const text = (e.clipboardData || window.clipboardData).getData('text')
+      .replace(/[−–]/g, '-');
+    const nums = [...text.matchAll(/(-?\d+(?:\.\d+)?)[°\s]*([NSEW])?(?![\d.])/gi)];
+    if (nums.length !== 2) return;
+    const val = n => (/[SW]/i.test(n[2] || '') ? -Math.abs(+n[1]) : +n[1]);
     e.preventDefault();
-    document.getElementById('wplat').value = m[1];
-    document.getElementById('wplon').value = m[2];
+    document.getElementById('wplat').value = val(nums[0]);
+    document.getElementById('wplon').value = val(nums[1]);
   });
 });
 const sleep = ms => new Promise(r => setTimeout(r, ms));

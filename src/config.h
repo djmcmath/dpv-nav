@@ -340,8 +340,8 @@ constexpr bool  DEFAULT_SALT_WATER        = true;  // saltwater diving is the pr
 // radios fast once underwater), reverting to surface requires staying
 // shallow for a sustained period (avoids GPS/WiFi flapping from wave action
 // at the surface).
-constexpr float DEPTH_DIVE_TRIGGER_M         = 0.3f;   // ~1 ft — crossing this enters dive mode immediately
-constexpr float DEPTH_SURFACE_REVERT_M       = 0.15f;  // ~0.5 ft — must stay shallower than this...
+constexpr float DEPTH_DIVE_TRIGGER_M         = 1.3f;   // ~4 ft — crossing this enters dive mode immediately
+constexpr float DEPTH_SURFACE_REVERT_M       = 0.6f;  // ~2 ft — must stay shallower than this...
 constexpr float DEPTH_SURFACE_REVERT_DWELL_S = 30.0f;  // ...for this long before reverting to surface mode
 
 // ---------------------------------------------------------------------------

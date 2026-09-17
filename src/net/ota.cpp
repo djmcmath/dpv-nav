@@ -157,7 +157,7 @@ static const char* stateName(State s) {
     return "unknown";
 }
 
-static bool installing() {
+bool installing() {
     return gState == State::DISPLAY_TRANSFER || gState == State::DISPLAY_VERIFY ||
            gState == State::NAV_DOWNLOAD || gState == State::REBOOTING;
 }

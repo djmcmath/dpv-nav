@@ -178,7 +178,8 @@ requirements installed (they import `callib.coverage`, which uses numpy).
 | Script | Proves |
 |---|---|
 | `orient_equivalence.py` | the firmware orientation port and `coverage.py` agree sample for sample, including every degenerate branch and the poles. Also prints the axis-convention sentinel (passing `magNED` costs up to 180 deg of heading). |
-| `dpvlink_test/run.sh` | `CalProgressPacket`'s 2-bits-per-cell target map round-trips index-for-index, rejects corrupt input wholesale, and fits the 512-byte link buffer. |
+| `dpvlink_test/run.sh` | `CalProgressPacket`'s 2-bits-per-cell target map round-trips index-for-index, rejects corrupt input wholesale, and fits the 512-byte link buffer. Also that `NavPacket`'s log-sync progress fields ride the wire only while `FLAG2_UPLOADING` is set, and decode to zero rather than stale values when absent. |
+| `lognames_test/run.sh` | dive-log filenames parse as `YYYYMMDD-NNN.csv`, name order equals age order (including the `"001.csv" > "00000000-001.csv"` case a plain string compare gets backwards), and no wipe or mid-day delete lets a new log inherit a deleted log's name -- the property `net/log_sync.cpp` keys uploads on. |
 | `gapfill_chain_check.py` | a cell the *server* flags is the cell the *device* targets -- driven end to end through bin assignment, wire packing, and decode. |
 
 What they do **not** prove: that the firmware compiles, or that the axis

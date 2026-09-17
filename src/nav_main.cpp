@@ -28,6 +28,7 @@
 #include "net/cloud_client.h"
 #include "net/cal_sync.h"
 #include "net/ota.h"
+#include "net/log_sync.h"
 #include "nav_main.h"
 #include "util/serial_commands.h"
 #include "util/mag_cal_collect.h"
@@ -401,6 +402,7 @@ const char* otaBlockedReason() {
     if (logging::isLogging()) return "Logging is on -- stop logging first";
     if (gInCal || sysState == SystemState::CALIBRATION) return "A calibration is running";
     if (gCurrentHoldActive) return "A current measurement is running";
+    if (log_sync::isUploading()) return "Dive logs are uploading -- try again when they finish";
     return nullptr;
 }
 
@@ -643,6 +645,7 @@ void setup() {
     wifi::init();
     web::init();
     cal_sync::init();
+    log_sync::init();
 
     // Restore state from NVS (previous session)
     {
@@ -1195,6 +1198,16 @@ void loop() {
     // --- Firmware update: boot-time manifest check, then (once the diver
     // starts one from tern.local) at most one download chunk per iteration --
     ota::update();
+
+    // --- Automatic dive-log upload (net/log_sync.h) -------------------------
+    // Held off during calibration: a cal's own upload is blocking and owns the
+    // display, and log_sync's uploads block too, so the two must not interleave.
+    // Held off during a firmware install for the same reason: the install keeps
+    // an HTTPS stream open across iterations, and a blocking upload in between
+    // would stall it and open a second TLS session on a tight heap.
+    if (!gInCal && sysState != SystemState::CALIBRATION && !ota::installing()) {
+        log_sync::update();
+    }
 
     // --- Cloud account-link poll (non-blocking, see LINK_ACCOUNT above) ------
     cloud::updateAuthorizePoll();
@@ -1836,6 +1849,11 @@ static void sendNavPacket(float heading, float headingRaw, float pitch, float ro
     }
     if (gSaltWater) flags2 |= FLAG2_SALT_WATER;
     if (gDiveMode)  flags2 |= FLAG2_DIVE_MODE;
+    if (log_sync::isUploading()) {
+        flags2 |= FLAG2_UPLOADING;
+        pkt.log_sync_done  = log_sync::doneCount();
+        pkt.log_sync_total = log_sync::totalCount();
+    }
     pkt.flags2 = flags2;
 
     updateBattMv();

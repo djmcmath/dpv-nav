@@ -1636,6 +1636,47 @@ void showCloudCalFailed(const char* message) {
     tft.print("Press BTN2 to exit");
 }
 
+// ---------------------------------------------------------------------------
+// Automatic dive-log upload progress.
+// ---------------------------------------------------------------------------
+void showLogUpload(uint8_t done, uint8_t total, uint32_t secondsWaiting) {
+    if (!tftReady) return;
+    invalidateNavCache();
+    tft.fillScreen(COLOR_BLACK);
+
+    tft.setTextSize(2);
+    tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
+    tft.setCursor(4, 4);
+    tft.print("DIVE LOGS");
+    tft.drawFastHLine(0, 28, SCREEN_WIDTH, COLOR_CYAN);
+
+    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+    tft.setCursor(4, 60);
+    tft.print("Uploading...");
+
+    if (total > 0) {
+        char buf[24];
+        snprintf(buf, sizeof(buf), "%u of %u", (unsigned)(done + 1 > total ? total : done + 1),
+                 (unsigned)total);
+        tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
+        tft.setCursor(4, 92);
+        tft.print(buf);
+    }
+
+    tft.setTextSize(1);
+    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+    tft.setCursor(4, 132);
+    tft.print("Hang on -- the unit is busy");
+    tft.setCursor(4, 146);
+    tft.print("until this finishes.");
+
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%lus", (unsigned long)secondsWaiting);
+    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+    tft.setCursor(4, 174);
+    tft.print(buf);
+}
+
 void showCloudCalResult(uint8_t quality, float rmsPct, const char* recommendation,
                          int16_t coverageGaps, uint8_t choice, uint8_t calType) {
     if (!tftReady) return;

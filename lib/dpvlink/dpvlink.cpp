@@ -77,6 +77,11 @@ size_t navPacketToBytes(const NavPacket& pkt, char* buf, size_t bufLen) {
     if (pkt.gps_hdop_x10 > 0) doc["gh"] = pkt.gps_hdop_x10;
     if (pkt.gps_antenna  > 0) doc["ga"] = pkt.gps_antenna;
     if (pkt.flags2       > 0) doc["f2"] = pkt.flags2;
+    // Log-sync progress — only while a pass is running (saves bandwidth)
+    if (pkt.flags2 & FLAG2_UPLOADING) {
+        doc["ls"] = pkt.log_sync_done;
+        doc["lt"] = pkt.log_sync_total;
+    }
     // Depth fields — only include when the sensor is present (saves bandwidth otherwise)
     if (pkt.flags2 & FLAG2_DEPTH_PRESENT) {
         doc["dp"] = pkt.depth_m;
@@ -125,6 +130,8 @@ bool bytesToNavPacket(const char* buf, size_t len, NavPacket& out) {
     out.gps_hdop_x10         = doc["gh"]  | (uint8_t)0;
     out.gps_antenna          = doc["ga"]  | (uint8_t)0;
     out.flags2               = doc["f2"]  | (uint8_t)0;
+    out.log_sync_done        = doc["ls"]  | (uint8_t)0;
+    out.log_sync_total       = doc["lt"]  | (uint8_t)0;
     out.depth_m              = doc["dp"]  | 0.0f;
     out.water_temp_c         = doc["wt"]  | 0.0f;
     return true;

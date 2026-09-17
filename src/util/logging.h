@@ -2,8 +2,14 @@
 
 #include <cstdint>
 #include "../sensors/imu.h"
+#include "log_names.h"
 
 namespace logging {
+
+// Longest log filename (log_names::NAME_BUF_LEN) and its full path under /logs.
+// net/log_sync.cpp sizes its own buffers off these.
+static constexpr size_t LOG_NAME_MAX = log_names::NAME_BUF_LEN;
+static constexpr size_t LOG_PATH_MAX = 32;
 
 // MID is appended as 3 rather than inserted between LOW and HIGH on purpose: the
 // numeric value is persisted in NVS (`log_level`) and shipped in NavPacket's
@@ -77,6 +83,13 @@ void log(const LogData& d);
 // Log one entry immediately, bypassing the rate limit. Use for rare events
 // (e.g., waypoint position corrections) that must not be silently dropped.
 void logImmediate(const LogData& d);
+
+// Full path of the file currently open for writing, or "" when none is.
+// net/log_sync.cpp uses this to leave the in-progress log alone: uploading a
+// partial file would land one upload now and a second, byte-different one
+// when the dive ends, which the server can't dedupe and the assembler would
+// see as two overlapping runs.
+const char* currentPath();
 
 // True if level != OFF.
 bool isLogging();

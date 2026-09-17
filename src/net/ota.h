@@ -48,6 +48,11 @@ void update();
 // anything else on the link would land in the middle of the transfer.
 bool ownsDisplayLink();
 
+// True from the start of an install until nav restarts: a display transfer,
+// its verify, or nav.bin streaming into the spare slot. Other blocking network
+// work (net/log_sync.h) waits while this is true.
+bool installing();
+
 // Re-fetch the manifest now. Blocks for one HTTPS request. Returns a short
 // human-readable result for the web page.
 String checkNow();

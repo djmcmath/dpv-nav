@@ -984,6 +984,33 @@ static void processNavLine() {
                 Serial.println("[CAL_GRID] Complete — holding DONE screen");
             }
         }
+    } else if (ptype == PacketType::CAL_ORIENT) {
+        // The attitude-only subset of CalProgressPacket, arriving 5x more
+        // often (see dpvlink.h). Merge it into the cached grid packet and let
+        // the normal render path pick it up -- loop() re-renders every pass,
+        // so no explicit redraw is needed here.
+        //
+        // Ignored unless a CalProgressPacket has already established a grid:
+        // on its own this packet says where the device is pointing but not
+        // what any cell means, and a half-populated grid is worse than none.
+        // It also deliberately does NOT touch lastCalProgressMs or
+        // calCompleteHolding -- "the grid data is fresh" and "the session
+        // finished" are both statements only the full packet can make.
+        CalOrientPacket opkt{};
+        if (calProgressValid && bytesToCalOrientPacket(rxBuf, rxPos, opkt)) {
+            lastCalProgress.current_bin   = opkt.current_bin;
+            lastCalProgress.cur_pitch_deg = opkt.cur_pitch_deg;
+            lastCalProgress.cur_hdg_deg   = opkt.cur_hdg_deg;
+            // Roll fields move WITH current_bin, never separately: the widget
+            // describes the cell under the highlight, so splitting them would
+            // paint one cell's roll coverage under another cell's box.
+            memcpy(lastCalProgress.current_bin_roll_counts,
+                   opkt.current_bin_roll_counts, sizeof(opkt.current_bin_roll_counts));
+            memcpy(lastCalProgress.current_bin_roll_targeted,
+                   opkt.current_bin_roll_targeted, sizeof(opkt.current_bin_roll_targeted));
+            lastCalProgress.current_roll_sector = opkt.current_roll_sector;
+            lastNavMs = millis();  // keep link-alive timer refreshed
+        }
     } else if (ptype == PacketType::WAYPOINT_LIST) {
         WaypointListPacket wpPkt{};
         if (bytesToWaypointListPacket(rxBuf, rxPos, wpPkt)) {

@@ -776,8 +776,16 @@ static bool g_baselineUserDone = false;
 // display can say *why* the session ended instead of just "Done".
 static bool g_baselineMaxSamplesReached = false;
 
+// GAP_FILL only: the calibration used to reconstruct the live orientation that
+// picks each sample's cell. Set from magBinCalBegin(); see imu.h for why this
+// must be the baseline-only cal and not the installed base-o-mount chain.
+// Flag false = fall back to g_magCalibration (the installed chain).
+static MagCalib g_binCalBinningCal{};
+static bool     g_hasBinCalBinningCal = false;
+
 bool magBinCalBegin(BinCalMode mode, const uint8_t* targets60,
-                    const uint8_t (*rollTargets60x4)[MAG_CAL_ROLL_SECTORS], bool hasRollTargets) {
+                    const uint8_t (*rollTargets60x4)[MAG_CAL_ROLL_SECTORS], bool hasRollTargets,
+                    const MagCalib* binningCal) {
     magBinCalEnd();  // clean up any previous run
 
     if (mode == BinCalMode::GAP_FILL && !targets60) {
@@ -799,6 +807,11 @@ bool magBinCalBegin(BinCalMode mode, const uint8_t* targets60,
     memset(g_binTargets, 0, sizeof(g_binTargets));
     g_binHasRollTargets = false;
     memset(g_binRollTargets, 0, sizeof(g_binRollTargets));
+    g_hasBinCalBinningCal = false;
+    if (mode == BinCalMode::GAP_FILL && binningCal) {
+        g_binCalBinningCal    = *binningCal;
+        g_hasBinCalBinningCal = true;
+    }
     if (mode == BinCalMode::GAP_FILL) {
         memcpy(g_binTargets, targets60, sizeof(g_binTargets));
         g_binHasTargets = true;
@@ -910,21 +923,31 @@ bool magBinCalTick(float pitch_deg, float heading_deg, const Vec3i16& rawMagSens
         //
         // AXIS CONVENTION (see util/mag_cal_orient.h -- getting this wrong is
         // worth up to 180 deg of heading error and would look exactly like the
-        // old failures): the port wants logical-frame mag with the installed
-        // calibration applied and calibrated accel in g. That is precisely the
-        // pair magBinCalDumpCSV() writes and coverage.py reads. Never magNED.
-        const float xc = rawMagSensor.x - g_magCalibration.bias.x;
-        const float yc = rawMagSensor.y - g_magCalibration.bias.y;
-        const float zc = rawMagSensor.z - g_magCalibration.bias.z;
-        const float mxCal = g_magCalibration.softIron[0][0]*xc
-                          + g_magCalibration.softIron[0][1]*yc
-                          + g_magCalibration.softIron[0][2]*zc;
-        const float myCal = g_magCalibration.softIron[1][0]*xc
-                          + g_magCalibration.softIron[1][1]*yc
-                          + g_magCalibration.softIron[1][2]*zc;
-        const float mzCal = g_magCalibration.softIron[2][0]*xc
-                          + g_magCalibration.softIron[2][1]*yc
-                          + g_magCalibration.softIron[2][2]*zc;
+        // old failures): the port wants logical-frame mag with a calibration
+        // applied and calibrated accel in g. Never magNED.
+        //
+        // WHICH calibration matters just as much, and this was wrong until
+        // 2026-09-17. It must be the frame the SERVER's target grid is
+        // expressed in, which is the baseline-only fit: magBinCalDumpCSV()
+        // stores RAW counts, so coverage.py bins them through its own fit of
+        // the baseline collection and never sees a mounted correction. (The
+        // comment that used to live here claimed this pair was "precisely what
+        // DumpCSV writes and coverage.py reads" -- it is not, DumpCSV writes
+        // raw.) Using the installed base-o-mount chain applies a correction for
+        // scooter iron during an off-DPV pass: with this unit's mag_mount.json
+        // that is up to 22 deg of heading error, ~29% of level headings binned
+        // into the wrong cell, and a roll-dependent swing of +-6 to +-12 deg,
+        // because a mounted soft-iron matrix is anisotropic (diag
+        // 0.81/1.32/1.0 here) and rolling the unit turns the field through it.
+        // The installed chain stays only as the fallback for a caller that
+        // supplied nothing.
+        const MagCalib& bc = g_hasBinCalBinningCal ? g_binCalBinningCal : g_magCalibration;
+        const float xc = rawMagSensor.x - bc.bias.x;
+        const float yc = rawMagSensor.y - bc.bias.y;
+        const float zc = rawMagSensor.z - bc.bias.z;
+        const float mxCal = bc.softIron[0][0]*xc + bc.softIron[0][1]*yc + bc.softIron[0][2]*zc;
+        const float myCal = bc.softIron[1][0]*xc + bc.softIron[1][1]*yc + bc.softIron[1][2]*zc;
+        const float mzCal = bc.softIron[2][0]*xc + bc.softIron[2][1]*yc + bc.softIron[2][2]*zc;
 
         float algPitch = 0.0f, algHdg = 0.0f;
         mag_orient::reconstructOrientation(mxCal, myCal, mzCal,
@@ -1101,6 +1124,52 @@ bool magBinCalIsComplete() {
     return true;
 }
 
+// Fills the attitude-varying fields that CalProgressPacket and
+// CalOrientPacket share. Both describe the same instant, and the display
+// merges the fast packet's copies straight over the slow packet's, so the two
+// must be filled identically -- a divergence here shows up on the device as
+// the highlighted cell and the roll widget describing different cells.
+// Templated rather than duplicated for exactly that reason; the field names
+// are deliberately identical in both structs (see dpvlink.h).
+//
+// Roll widget: for whichever cell current_bin points at, the combined
+// server-prior-upload + this-session status per roll sector
+// (rollSectorSatisfied -- 0=ok/satisfied, either because the server already
+// considered this sector ok/over from a prior accepted upload, or this
+// session's own count cleared its cap; 1=some local samples but not yet
+// satisfied; 2=none locally and not server-satisfied), plus the live roll
+// sector for the widget's outline. `current_bin_roll_counts` stays
+// this-session-only (the server doesn't send per-roll sample counts, only
+// status), so a sector satisfied purely by prior server coverage shows status
+// 0 with count 0 -- correct, not a display bug. Only meaningful in gap-fill;
+// zeroed and sector -1 otherwise, matching current_bin's own "-1 if
+// unmappable".
+template <typename PktT>
+static void fillLiveOrient(PktT& pkt) {
+    pkt.current_bin   = (g_lastComputedBin >= 0 && g_lastComputedBin < g_binCalBinCount)
+                        ? (int8_t)g_lastComputedBin : (int8_t)-1;
+    pkt.cur_pitch_deg = g_lastPitchDeg;
+    pkt.cur_hdg_deg   = g_lastHdgDeg;
+
+    if (g_binCalSubPhase == BinCalSubPhase::GAP_FILL && pkt.current_bin >= 0) {
+        const int bin = pkt.current_bin;
+        for (int k = 0; k < MAG_CAL_ROLL_SECTORS; k++) {
+            const uint8_t cnt = g_binRollCounts[bin][k];
+            pkt.current_bin_roll_counts[k] = cnt;
+            pkt.current_bin_roll_targeted[k] = rollSectorSatisfied(bin, k) ? 0 : (cnt > 0) ? 1 : 2;
+        }
+        pkt.current_roll_sector = (int8_t)g_lastRollSector;
+    } else {
+        memset(pkt.current_bin_roll_counts, 0, sizeof(pkt.current_bin_roll_counts));
+        memset(pkt.current_bin_roll_targeted, 0, sizeof(pkt.current_bin_roll_targeted));
+        pkt.current_roll_sector = -1;
+    }
+}
+
+void magBinCalGetOrient(CalOrientPacket& pkt) {
+    fillLiveOrient(pkt);
+}
+
 void magBinCalGetProgress(CalProgressPacket& pkt) {
     pkt.cal_type   = binCalIsMounted() ? (uint8_t)CalType::MOUNTED : (uint8_t)CalType::BASELINE;
     pkt.phase      = (g_binCalSubPhase == BinCalSubPhase::ROUGH_SCAN) ? (uint8_t)CalPhase::ROUGH_SCAN
@@ -1137,41 +1206,23 @@ void magBinCalGetProgress(CalProgressPacket& pkt) {
     if (gapFill) {
         pkt.has_targets = g_binHasTargets;
         memcpy(pkt.targets, g_binTargets, sizeof(pkt.targets));
+        // Per-cell "finished" comes from binRollSatisfied() -- the SAME
+        // predicate as bins_green above and magBinCalIsComplete() below.
+        // The display used to derive cell colour from bin_counts instead,
+        // which turned a cell green on 15 upright-only samples while this
+        // predicate (correctly) still wanted the other three roll sectors.
+        pkt.has_cell_satisfied = g_binHasTargets;
+        for (int i = 0; i < 60; i++) {
+            pkt.cell_satisfied[i] = (i < g_binCalBinCount) && binIsTargeted(i) && binRollSatisfied(i);
+        }
     } else {
         pkt.has_targets = false;
         memset(pkt.targets, 0, sizeof(pkt.targets));
+        pkt.has_cell_satisfied = false;
+        memset(pkt.cell_satisfied, 0, sizeof(pkt.cell_satisfied));
     }
     pkt.max_samples_reached = g_baselineMaxSamplesReached;
-    pkt.current_bin   = (g_lastComputedBin >= 0 && g_lastComputedBin < g_binCalBinCount)
-                        ? (int8_t)g_lastComputedBin : (int8_t)-1;
-    pkt.cur_pitch_deg = g_lastPitchDeg;
-    pkt.cur_hdg_deg   = g_lastHdgDeg;
-
-    // Persistent roll widget: for whichever cell current_bin points at, the
-    // combined server-prior-upload + this-session status per roll sector
-    // (rollSectorSatisfied -- 0=ok/satisfied, either because the server
-    // already considered this sector ok/over from a prior accepted upload,
-    // or this session's own count cleared its cap; 1=some local samples but
-    // not yet satisfied; 2=none locally and not server-satisfied), plus the
-    // live roll sector for the widget's outline. `current_bin_roll_counts`
-    // stays this-session-only (the server doesn't send per-roll sample
-    // counts, only status), so a sector satisfied purely by prior server
-    // coverage shows status 0 with count 0 -- correct, not a display bug.
-    // Only meaningful in gap-fill; zeroed and sector -1 otherwise, matching
-    // current_bin's own "-1 if unmappable".
-    if (gapFill && pkt.current_bin >= 0) {
-        const int bin = pkt.current_bin;
-        for (int k = 0; k < MAG_CAL_ROLL_SECTORS; k++) {
-            const uint8_t cnt = g_binRollCounts[bin][k];
-            pkt.current_bin_roll_counts[k] = cnt;
-            pkt.current_bin_roll_targeted[k] = rollSectorSatisfied(bin, k) ? 0 : (cnt > 0) ? 1 : 2;
-        }
-        pkt.current_roll_sector = (int8_t)g_lastRollSector;
-    } else {
-        memset(pkt.current_bin_roll_counts, 0, sizeof(pkt.current_bin_roll_counts));
-        memset(pkt.current_bin_roll_targeted, 0, sizeof(pkt.current_bin_roll_targeted));
-        pkt.current_roll_sector = -1;
-    }
+    fillLiveOrient(pkt);
 
     if (g_binCalSubPhase == BinCalSubPhase::ROUGH_SCAN && g_roughScanSampleCount > 0) {
         // fmaxf(0, ...) guards the pre-first-sample state where max<min (sentinel
@@ -1217,6 +1268,7 @@ void magBinCalEnd() {
     magFit2DReset();
     g_binCalActive    = false;
     g_binCalMode      = BinCalMode::BASELINE;
+    g_hasBinCalBinningCal = false;
     g_binHasTargets   = false;
     memset(g_binTargets, 0, sizeof(g_binTargets));
     g_binHasRollTargets = false;

@@ -227,6 +227,43 @@ unit through the outlined shape's neighbors until they clear.
 briefly sees your hand's motion as "down," not just gravity. Pause near the
 target orientation rather than reading the grid or the roll widget mid-motion.)*
 
+**Top and bottom rows: aim for the edge of the band, not straight up.**
+
+The outer rows cover everything past ±60° of elevation, so the natural instinct
+is to point the unit straight up (or straight down) and spin it to pick up the
+roll poses. Don't — the row starts at 60°, and holding nearer 65° than 90° makes
+the same cell dramatically easier to work:
+
+| holding | roll signal | roll reading noise | heading smear from a 3° hand wobble |
+|---|---|---|---|
+| 65° | 0.42 g | ±1.4° | 6° (a fifth of a column) |
+| 80° | 0.17 g | ±3.3° | 17° (half a column) |
+| 85° | 0.09 g | ±6.5° | 34° (a full column) |
+| 88° | 0.04 g | ±16° | 86° (three columns) |
+
+Two separate things degrade toward vertical. **Roll** is read off the part of
+gravity across the tracked axis, which shrinks as `cos(elevation)` — at 88° only
+0.035 g is left to work with, so which roll pose you are in becomes mostly
+sensor noise. **Heading** gains `tan(elevation)`, so at 88° a 3° tremor sweeps
+you across three heading columns. Together that is why spinning while pointed
+near-vertical scatters samples over the whole top row instead of completing one
+cell: the roll credit is noisy and the heading column will not hold still.
+
+At 65° you are still in the top row, with ~12× steadier heading and ~12× cleaner
+roll than at 88°. Point up, but not all the way.
+
+**This noise is accepted behaviour, not a defect — please don't re-open it.**
+Near vertical there is genuinely almost no gravity left across the tracked axis
+to measure roll with, and heading genuinely does gain `tan(elevation)`; both are
+properties of the geometry, not of the filter, the calibration, or the wire
+format. The device therefore still credits a roll sector near vertical even
+though that reading is mostly noise. Gating it (refusing roll credit above ~84°)
+was considered and **deliberately not done**: it would throw away samples the
+diver worked to collect in the row that is already hardest to fill, to fix a
+coverage overclaim that the band-edge technique above avoids anyway. If the top
+row is being difficult, the answer is to hold nearer 65° — not to go looking for
+a bug in the roll math.
+
 ### Heading (12-pt): the website manual-entry form
 
 The 12 fixed points (every 30°) can leave one span under-sampled — e.g. only 4 of the

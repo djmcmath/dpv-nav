@@ -4,6 +4,7 @@
 //   see tools/dpvlink_test/run.sh
 #include "../../lib/dpvlink/dpvlink.h"
 #include "../../lib/dpvlink/ota_link.h"
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -357,6 +358,122 @@ int main() {
         bytesToNavPacket(buf, n, stale);
         check(stale.log_sync_done == 0, "log_sync_done defaults to zero when absent");
         check(stale.log_sync_total == 0, "log_sync_total defaults to zero when absent");
+    }
+
+    // --- Per-cell "finished" map -------------------------------------------
+    // The grid, the "N/M cells" counter and auto-completion must agree on what
+    // finished means. They did not: the display derived cell colour from the
+    // sample count, which reaches the cap on upright-only samples, while the
+    // counter used the roll-aware predicate. This map is what carries the one
+    // verdict across the link.
+    {
+        CalProgressPacket tx = basePkt((uint8_t)CalPhase::GAP_FILL);
+        tx.has_targets = true;
+        tx.has_cell_satisfied = true;
+        for (int i = 0; i < 60; i++) tx.cell_satisfied[i] = (i % 7 == 3);
+
+        size_t n = calProgressPacketToBytes(tx, buf, sizeof(buf));
+        check(n > 0, "progress with finished map encodes");
+
+        CalProgressPacket rx{};
+        check(bytesToCalProgressPacket(buf, n, rx), "progress with finished map decodes");
+        check(rx.has_cell_satisfied, "has_cell_satisfied survived");
+        bool cellsOk = true;
+        for (int i = 0; i < 60; i++) {
+            if (rx.cell_satisfied[i] != (i % 7 == 3)) cellsOk = false;
+        }
+        check(cellsOk, "every finished bit landed in the right cell");
+
+        // Absent map: the flag must stay false so the display falls back to the
+        // count rule instead of painting a grid where nothing is ever done.
+        CalProgressPacket none = basePkt((uint8_t)CalPhase::GAP_FILL);
+        none.has_targets = true;
+        none.has_cell_satisfied = false;
+        n = calProgressPacketToBytes(none, buf, sizeof(buf));
+        check(strstr(buf, "\"dn\"") == nullptr, "no dn field when nothing to report");
+        CalProgressPacket stale{};
+        stale.has_cell_satisfied = true;          // poison
+        for (int i = 0; i < 60; i++) stale.cell_satisfied[i] = true;
+        bytesToCalProgressPacket(buf, n, stale);
+        check(!stale.has_cell_satisfied, "absent dn clears has_cell_satisfied");
+        bool allClear = true;
+        for (int i = 0; i < 60; i++) if (stale.cell_satisfied[i]) allClear = false;
+        check(allClear, "absent dn clears the stale finished bits");
+    }
+
+    // --- CalOrientPacket: the 10 Hz attitude-only subset of the above -------
+    // Its whole reason to exist is being small enough to send 5x as often, and
+    // its whole risk is drifting away from the CalProgressPacket fields it
+    // overwrites on the display. Both are checked here.
+    {
+        CalOrientPacket tx{};
+        tx.current_bin   = 41;
+        tx.cur_pitch_deg = -37.5f;
+        tx.cur_hdg_deg   = 284.25f;
+        tx.current_bin_roll_counts[0]   = 9;
+        tx.current_bin_roll_counts[1]   = 0;
+        tx.current_bin_roll_counts[2]   = 4;
+        tx.current_bin_roll_counts[3]   = 1;
+        tx.current_bin_roll_targeted[0] = 0;
+        tx.current_bin_roll_targeted[1] = 2;
+        tx.current_bin_roll_targeted[2] = 1;
+        tx.current_bin_roll_targeted[3] = 1;
+        tx.current_roll_sector = 2;
+
+        size_t n = calOrientPacketToBytes(tx, buf, sizeof(buf));
+        check(n > 0, "orient encode produced bytes");
+        check(identifyPacket(buf, n) == PacketType::CAL_ORIENT, "orient identifies as CAL_ORIENT");
+        // Budget check, not style: at 10 Hz on a 115200 baud link shared with
+        // NavPacket, this packet's size is the feature. A regression that
+        // pushed it toward CalProgressPacket's ~350 bytes would silently undo
+        // the reason it was added.
+        check(n < 160, "orient packet stays small enough for 10 Hz");
+        printf("  orient packet length: %zu bytes (progress is ~319)\n", n);
+
+        CalOrientPacket rx{};
+        check(bytesToCalOrientPacket(buf, n, rx), "orient decode succeeded");
+        check(rx.current_bin == 41, "orient current_bin survived");
+        check(fabsf(rx.cur_pitch_deg - (-37.5f)) < 0.01f, "orient pitch survived");
+        check(fabsf(rx.cur_hdg_deg - 284.25f) < 0.01f, "orient heading survived");
+        check(rx.current_roll_sector == 2, "orient roll sector survived");
+        bool rollOk = true;
+        for (int k = 0; k < 4; k++) {
+            if (rx.current_bin_roll_counts[k]   != tx.current_bin_roll_counts[k])   rollOk = false;
+            if (rx.current_bin_roll_targeted[k] != tx.current_bin_roll_targeted[k]) rollOk = false;
+        }
+        check(rollOk, "orient roll breakdown survived");
+
+        // Key compatibility: the display merges these fields straight into its
+        // cached CalProgressPacket, so both encoders must spell them the same.
+        // Two spellings for one field is how the highlight and the roll widget
+        // end up describing different cells.
+        CalProgressPacket cp = basePkt((uint8_t)CalPhase::GAP_FILL);
+        cp.has_targets   = true;  // rc/rt/rs are GAP_FILL-with-targets only
+        cp.current_bin   = 41;
+        cp.cur_pitch_deg = -37.5f;
+        cp.cur_hdg_deg   = 284.25f;
+        char cbuf[512];
+        size_t cn = calProgressPacketToBytes(cp, cbuf, sizeof(cbuf));
+        check(cn > 0, "progress encode produced bytes");
+        const char* keys[] = { "\"cb\"", "\"pp\"", "\"hh\"", "\"rc\"", "\"rt\"", "\"rs\"" };
+        bool keysOk = true;
+        for (const char* k : keys) {
+            if (strstr(buf, k) == nullptr || strstr(cbuf, k) == nullptr) keysOk = false;
+        }
+        check(keysOk, "orient and progress use identical key names");
+
+        // A dropped or garbled roll status must NOT read as 0 -- 0 means
+        // "satisfied" and paints the widget green, telling the diver a roll
+        // sector is done when nothing at all is known about it.
+        const char* noRoll = "{\"t\":\"O\",\"cb\":5,\"pp\":1.0,\"hh\":2.0}";
+        CalOrientPacket bare{};
+        check(bytesToCalOrientPacket(noRoll, strlen(noRoll), bare), "orient decodes without roll fields");
+        bool safeDefault = true;
+        for (int k = 0; k < 4; k++) {
+            if (bare.current_bin_roll_targeted[k] != 2) safeDefault = false;
+        }
+        check(safeDefault, "missing roll status defaults to 'none', not 'satisfied'");
+        check(bare.current_roll_sector == -1, "missing roll sector defaults to -1");
     }
 
     if (failures == 0) printf("  all dpvlink round-trip checks passed\n");

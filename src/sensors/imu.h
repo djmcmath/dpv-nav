@@ -7,8 +7,9 @@
 #include "calib.h"  // For MagCalib struct
 #include "../config.h"  // MAG_CAL_ROLL_SECTORS
 
-// Forward declaration — CalProgressPacket defined in dpvlink.h
+// Forward declarations — both defined in dpvlink.h
 struct CalProgressPacket;
+struct CalOrientPacket;
 
 namespace imu {
 
@@ -195,9 +196,23 @@ enum class BinCalMode : uint8_t { BASELINE = 0, MOUNTED = 1, GAP_FILL = 2 };
 // calibration predating roll coverage): the widget then falls back to
 // session-local-only tracking, exactly as gap-fill behaved before roll
 // existed.
+//
+// `binningCal` (GAP_FILL only) is the calibration used to compute the LIVE
+// orientation that picks each sample's cell -- NOT the one applied to nav
+// heading. It must be the BASELINE-ONLY cal, because that is the frame the
+// server's target grid is expressed in: magBinCalDumpCSV() stores raw counts,
+// so callib/coverage.py bins them through its own fit of the baseline
+// collection, with no mounted correction anywhere in it. Passing the installed
+// base-o-mount chain instead (as this did until 2026-09-17) bins through a
+// correction for scooter iron that is not present during an off-DPV pass --
+// measured at up to 22 deg of heading error and ~29% of headings landing in
+// the wrong cell with this unit's mag_mount.json, including a roll-dependent
+// swing, since a mounted soft-iron matrix is anisotropic. nullptr falls back
+// to the installed calibration.
 bool   magBinCalBegin(BinCalMode mode, const uint8_t* targets60 = nullptr,
                        const uint8_t (*rollTargets60x4)[MAG_CAL_ROLL_SECTORS] = nullptr,
-                       bool hasRollTargets = false);
+                       bool hasRollTargets = false,
+                       const MagCalib* binningCal = nullptr);
 // Add one sample; pitch_deg from AHRS, heading_deg from AHRS, rawMag in logical frame (post-axis-map).
 // rawMagLogical must be the output of readMagRaw() — NOT readMagRaw_SensorFrame().  The calibration
 // JSON is applied in logical frame at runtime, so samples stored here must also be in logical frame.
@@ -229,6 +244,11 @@ bool   magBinCalFinishBaseline();
 void   magBinCalGapFillProgress(int& remainingOut, int& totalOut);
 // Fill CalProgressPacket with current bin state
 void   magBinCalGetProgress(struct CalProgressPacket& pkt);
+// Fill CalOrientPacket with just the attitude-varying subset of the above --
+// cheap enough to send at 10 Hz so the diver can actually steer toward a
+// target cell (see dpvlink.h's CalOrientPacket comment). Same values the
+// next magBinCalGetProgress() would report for those fields.
+void   magBinCalGetOrient(struct CalOrientPacket& pkt);
 // Write raw samples as CSV to an already-open File object
 // Format: mx,my,mz,ax,ay,az,gx,gy,gz (mag = raw sensor counts, accel = g, gyro = rad/s; one sample per line)
 void   magBinCalDumpCSV(void* filePtr);  // void* to avoid #include <LittleFS.h> here

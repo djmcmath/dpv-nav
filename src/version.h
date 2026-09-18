@@ -7,4 +7,4 @@
 //
 // Lives here rather than in platformio.ini because platformio.ini is untracked.
 // Format is strictly MAJOR.MINOR.PATCH (the server rejects anything else).
-#define FW_VERSION "0.7.6"
+#define FW_VERSION "0.7.18"

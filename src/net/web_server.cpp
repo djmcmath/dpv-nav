@@ -1085,6 +1085,10 @@ static void handleCloudStatus() {
     server.send(200, "application/json", json);
 }
 
+static void handleCloudUploadLog() {
+    server.send(200, "application/json", cloud::uploadLogJson());
+}
+
 static void handleLogSyncStatus() {
     server.send(200, "application/json", log_sync::statusJson());
 }
@@ -1219,6 +1223,7 @@ void init() {
     server.on("/api/wifi-scan",     HTTP_GET,    handleGetWifiScan);
     server.on("/api/wifi-connect",  HTTP_POST,   handleWifiConnectNow);
     server.on("/api/cloud-status",     HTTP_GET,  handleCloudStatus);
+    server.on("/api/cloud/upload-log", HTTP_GET,  handleCloudUploadLog);
     server.on("/api/dive-logs/upload", HTTP_POST, handleDiveLogUpload);
     server.on("/api/dive-logs/sync-status", HTTP_GET, handleLogSyncStatus);
     server.on("/api/cal/retry-upload", HTTP_POST, handleCalRetryUpload);

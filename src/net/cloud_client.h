@@ -27,6 +27,25 @@ namespace cloud {
 // Has this unit completed the device-auth flow and stored a token in NVS?
 bool isAuthorized();
 
+// Diagnostics for the streamed-upload path (raw cal CSVs, cal backups), as
+// JSON: the last few attempts with code, byte count consumed before the
+// failure, elapsed time, heap headroom and RSSI. HTTPClient reports every
+// body-send failure as -3 and distinguishes its four causes only through
+// log_d() calls that our CORE_DEBUG_LEVEL=0 build compiles out, so this is
+// where a -3 gets its context. Served at GET /api/cloud/upload-log.
+String uploadLogJson();
+
+// Pushes uploadLogJson() to POST /api/device/health as `subsystems.upload_log`.
+//
+// This exists because the unit is sealed and is not always on a network anyone
+// can reach: when it runs on a phone hotspot, mDNS does not cross networks, so
+// `tern.local` is unreachable from a laptop on the house wifi and the only
+// other way in is to physically join the unit's own softAP. Meanwhile the
+// health body is ~1.5 KB -- far below the ~4-6 KB point where the failing
+// uploads stall -- so it gets through exactly when the thing we want to
+// diagnose does not. Called automatically when a streamed upload gives up.
+bool reportUploadDiagnostics(String& errorOut);
+
 // One-time device-auth bootstrap (device-code grant, loosely inspired by
 // RFC 8628 but without a verification URI -- the diver never reads or types
 // a URL. Linking is two independent, order-agnostic halves: this device

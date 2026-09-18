@@ -352,6 +352,120 @@ constexpr float DEPTH_SURFACE_REVERT_DWELL_S = 30.0f;  // ...for this long befor
 constexpr const char* CLOUD_API_HOST     = "map.terndiving.com";
 constexpr uint16_t    CLOUD_API_PORT     = 443;
 constexpr uint32_t    CLOUD_HTTP_TIMEOUT_MS = 15000;  // per-request timeout
+// Streamed-upload retry policy (net/cloud_client.cpp postUploadStreamed).
+// HTTPClient reports every body-send failure as -3, and a cal CSV that fails
+// mid-body leaves no server-side row at all, so one clean re-POST is worth
+// more than a perfect diagnosis. Safe to repeat: the backend dedupes on
+// content hash and answers identical bytes with 409 + the existing upload_id.
+// Retries cover transport failures only, never an HTTP status.
+// softAP suspension during uploads: TESTED AND DISPROVEN 2026-09-18, left in
+// place (off) so nobody re-derives it. A single gap-fill run produced the A/B
+// directly: attempt 1 with the AP up stalled at 7300 bytes consumed, attempts
+// 2 and 3 with the AP suspended stalled at 5840 -- same failure, same place.
+// The radio sharing is not what wedges these uploads. Turning it on up front
+// was actively harmful (-1, never reached the server at all), which is why the
+// suspend now only ever arms on a retry.
+constexpr bool        CLOUD_UPLOAD_SUSPEND_AP    = false;
+constexpr uint32_t    WIFI_AP_SUSPEND_SETTLE_MS  = 50;
+constexpr uint32_t    WIFI_AP_SUSPEND_VERIFY_MS  = 400;  // re-confirm the STA link this long
+// Attempts and delay are a nav-loop budget, not just a retry policy: every one
+// of these blocks the nav main loop, which stops NavPackets and eventually
+// costs the diver their heading. While the cal UI is up, display_main's
+// awaitingCloudCal term in linkAlive suppresses NO LINK with no time bound at
+// all, so the budget is not really about that screen -- it is about the diver
+// pressing out of it mid-upload, which drops the override and leaves NAV_TIMEOUT_MS
+// (5 s) governing a loop that is still blocked. That is exactly what produced
+// the NO LINK scare on 2026-09-17.
+// Worst case with the timeouts below: 20 s + 1 s + 20 s + 0.25 s + 5 s ~= 46 s
+// of blocked loop. Two attempts is the ceiling that keeps it there; a third
+// would put it past a minute again, and with the connect timeout finally
+// reaching socket_timeout (see CLOUD_UPLOAD_CONNECT_TIMEOUT_MS) a third attempt
+// buys much less than it used to.
+constexpr int         CLOUD_UPLOAD_ATTEMPTS      = 2;
+constexpr uint32_t    CLOUD_UPLOAD_RETRY_DELAY_MS = 1000;
+
+// The -3, finally traced end to end through the framework (2026-09-18, from a
+// CORE_DEBUG_LEVEL=4 serial capture plus the arduino-esp32 sources):
+//
+//   HTTPClient::_connectTimeout        default HTTPCLIENT_DEFAULT_TCP_TIMEOUT = 5000
+//     -> WiFiClientSecure::connect(host, port, timeout)   sets _timeout
+//       -> start_ssl_client(..., timeout, ...)            sets socket_timeout
+//         -> send_ssl_data() already loops patiently on WANT_READ/WANT_WRITE
+//            with vTaskDelay(2) -- and gives up the moment
+//            millis() - write_start > socket_timeout
+//           -> WiFiClientSecure::write() sees < 0, calls stop(), returns 0
+//             -> HTTPClient logs "short write, asked for 1460 but got 0
+//                retry...", waits delay(1), and writes again into a socket it
+//                has just closed -- which is why the retry fails 9 ms later
+//                with no diagnosis and the caller sees a bare -3.
+//
+// So the body send was never impatient; it was patient for exactly 5000 ms.
+// That is the 5.04 s the capture measured between " connected to
+// map.terndiving.com:443" and the first short write, to within a rounding
+// error. Note what does NOT reach it: https.setTimeout(CLOUD_HTTP_TIMEOUT_MS)
+// only sets _tcpTimeout and, once connected, the socket's SO_SNDTIMEO --
+// socket_timeout is fixed at connect time from _connectTimeout and nothing
+// else, so setConnectTimeout() is the single handle on how long a stalled
+// upload is allowed to wait. It is a misleading name here: on this stack it
+// governs the whole session, not just the TCP connect.
+//
+// Sized from the server-side packet capture rather than a round number: the
+// server ACKed everything within ~25 ms while the device retransmitted on RTO
+// backoff (1.72 s, then 4.0 s) because those ACKs were not reaching it. The
+// third backoff lands near 8 s and the fourth near 16 s -- both past the old
+// 5 s cap, so the transfer was being abandoned one or two retransmits short of
+// its next chance to recover.
+//
+// TRIED AT 20000 AND IT DID NOT HELP -- recorded here so it is not retried.
+// 0.7.15 on the bench: connect at t=75865, first short write at t=95908, i.e.
+// 20,043 ms against the 20,000 ms constant, which proves the trace above is
+// right to the millisecond. But `consumed` was still 5840 -- the same 4 x 1460
+// as at the 5 s cap. The device made *zero* progress for twenty seconds, not
+// slow progress. So the send window never reopens at all, and patience past
+// the first couple of RTO backoffs buys nothing but blocked nav loop. Held at
+// 10 s: enough to cover the 1.72 + 4.0 + 8.0 backoff sequence, which is the
+// only part with any evidence behind it.
+constexpr uint32_t    CLOUD_UPLOAD_CONNECT_TIMEOUT_MS = 10000;
+
+// Minimum largest contiguous free block before opening a TLS session at all.
+// Bracketed by measurement on 0.7.15, not guessed -- a single bench run gave
+// both ends of it:
+//   largest 42996 -> start_ssl_client() succeeded
+//   largest 32756 -> (-32512) SSL - Memory allocation failed, three for three
+// and it is deterministic, because one completed TLS session permanently costs
+// about 10 KB out of the largest block (42996 before the first attempt, 32756
+// after it and for the rest of the boot). The likely shape, though only the
+// bracket above is measured: mbedtls wants two ~16.4 KB record buffers
+// (MBEDTLS_SSL_IN_CONTENT_LEN / OUT_CONTENT_LEN, 16384 each) carved out of one
+// block, so 32756 misses holding both by a few hundred bytes.
+//
+// The point of the gate is honesty, not recovery: without it a retry burns
+// ~400 ms and reports -1 "connection refused", which is what sent this
+// investigation chasing DNS, the iPhone hotspot and softAP suspension for
+// three days. It cannot connect, so say that instead of blaming the network.
+constexpr uint32_t    CLOUD_TLS_MIN_LARGEST_BLOCK = 40000;
+
+// Let the heap coalesce before standing up another TLS session. Every session
+// costs mbedtls a large allocation, and back-to-back sessions on a failing
+// upload are what produce the -1 described at CLOUD_DIAG_TIMEOUT_S below.
+// Not a cure for fragmentation, just the cheapest thing that helps.
+constexpr uint32_t    CLOUD_TLS_SETTLE_MS        = 250;
+
+// Connect timeout for the diagnostics report, seconds. Deliberately short: the
+// report is a nice-to-have on top of an upload that has already failed, and it
+// must not add another long block to the nav loop. Note this is the same
+// socket_timeout knob described at CLOUD_UPLOAD_CONNECT_TIMEOUT_MS above, so it
+// bounds the send as well as the connect -- fine for a payload this small.
+//
+// This report is also the likeliest thing in the whole path to fail on memory
+// rather than on the network. The 2026-09-18 capture caught it exactly: free
+// heap 91116 bytes but the largest contiguous block only 32756, and
+// start_ssl_client() returned (-32512) SSL - Memory allocation failed. That is
+// what every unexplained -1 in this investigation actually was -- not DNS, not
+// the hotspot, and not softAP suspension, all of which got blamed for it. It
+// only shows up on the third TLS session of a run, which is why it looked like
+// the retries were being rejected by the network.
+constexpr int         CLOUD_DIAG_TIMEOUT_S       = 5;
 
 // Device-auth polling (RFC 8628), per docs/architecture/device-uploads-plan.md.
 constexpr uint32_t CLOUD_AUTH_POLL_INTERVAL_MS = 5000;

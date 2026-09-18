@@ -293,8 +293,8 @@ constexpr uint8_t GPS_POS_MIN_ACCEPT_BARS = 2;        // floor: never accept few
 // Battery voltage indicator thresholds (millivolts, single-cell LiPo on Feather v1 BAT pin)
 // GPIO35 reads VBAT/2 via the onboard 2:1 divider; adjust if battery type differs.
 // ---------------------------------------------------------------------------
-constexpr uint16_t BATT_MV_FULL   = 4500;  // fully charged (100%)
-constexpr uint16_t BATT_MV_EMPTY  = 3300;  // protection cutoff (0%)
+constexpr uint16_t BATT_MV_FULL   = 4200;  // fully charged (100%)
+constexpr uint16_t BATT_MV_EMPTY  = 3200;  // protection cutoff (0%)
 constexpr uint16_t BATT_MV_GREEN  = 3700;  // >= green (good)
 constexpr uint16_t BATT_MV_YELLOW = 3400;  // >= yellow (moderate); below = red (low)
 constexpr int      BATT_ADC_AVG_N = 8;     // samples averaged per battery reading

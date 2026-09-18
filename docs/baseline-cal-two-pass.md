@@ -138,8 +138,9 @@ is baseline-only.
 
 ## Risks & open questions
 
-- **Not yet verified on hardware.** Both `nav` and `display` environments build clean;
-  this is the next physical test.
+- ~~**Not yet verified on hardware.**~~ **Verified, repeatedly.** The two-pass flow has
+  been the normal baseline path on real hardware since 2026-08; the reference run of
+  2026-09-18 scored 1.2% baseline and a final under 1° on-unit / 1.6° on the website.
 - **Rough bias is hard-iron only.** No soft-iron correction from ROUGH_SCAN — deliberate,
   to keep the bootstrap cheap and because hard-iron dominates uncorrected heading error.
   If COLLECT's heading still isn't good enough after this, a fuller on-device
@@ -154,15 +155,22 @@ is baseline-only.
   connector-end up more") without knowing the board's axis map. Worth revisiting if the
   bars turn out to be genuinely useful signal rather than just a rough sanity check.
   the diver mostly ignores in favor of watching the live fit number.
-- **Roll coverage is still not tracked anywhere**, in either pass. Confirmed present as a
-  real gap in the original AHRS-based grid (`getBinIndex` only ever used pitch/heading),
-  and per-axis min/max bars don't surface it either. Deliberately deferred — per-product
-  decision, downstream stages (Mounted cal + 12-point Fourier correction) already
-  compensate well enough for the level-operation case this pipeline is optimized for
-  (dry-land heading error stays under 2° despite the gap). Worth a dedicated pass only if
-  that stops being true.
+- ~~**Roll coverage is still not tracked anywhere**, in either pass.~~ **Closed — roll is
+  now a tracked third coverage axis.** The gap was real (the original AHRS-based
+  `getBinIndex` used pitch/heading only, and per-axis min/max bars don't surface roll),
+  and it stopped being acceptable once a tilted-ring mounted fit was traced to it. Roll
+  sectors, the 4-triangle roll widget, `binRollSatisfied()` as the single
+  cell-is-finished predicate, and the server-side coverage sync all shipped; see
+  `docs/calibration-guide.md` and dive-map's
+  `docs/architecture/calibration-grid-conventions.md`. What remains open is **steering**,
+  not tracking: heading gain is `tan(pitch)`, so cells at |pitch| > 60° are not aimable,
+  and near-vertical roll credit is largely noise — accepted as-is 2026-09-18, with the
+  mitigation being technique (work the ~65° band edge, not the pole).
 
 ## Status
 
-Implemented and building clean on both `nav` and `display` PlatformIO environments.
-Not yet flashed/tested on real hardware as of this writing.
+**Shipped and in routine use.** Implemented on both `nav` and `display` PlatformIO
+environments, flashed, and exercised as the standard baseline-cal path on real hardware.
+The Risks list above has been updated to mark which of its original open questions have
+since closed; the two constants (`MAG_CAL_ROUGH_SCAN_MIN_SAMPLES`,
+`MAG_CAL_ROUGH_SCAN_EXPECTED_RANGE`) and the axis-bar labeling remain genuinely open.

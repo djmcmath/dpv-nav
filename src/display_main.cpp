@@ -271,6 +271,12 @@ static constexpr uint32_t WAKE_HOLD_MS = 600;   // both-buttons hold to confirm 
 // Enter ESP32 deep sleep.  Never returns.
 static void enterDeepSleep() {
     Serial.println("[SLEEP] entering deep sleep");
+    // The ESP32 itself is the cheap part of "off" (~10 uA). The backlight is
+    // ~25 mA, and it stays lit through deep sleep unless it is explicitly
+    // driven low and latched -- which is what this call does, along with
+    // putting the panel controller to sleep. Safe on both paths that reach
+    // here, including the unconfirmed wake below, where init() has not run.
+    display::sleepForPowerOff();
     Serial.flush();
     esp_sleep_enable_ext1_wakeup(SLEEP_WAKE_PIN_MASK, ESP_EXT1_WAKEUP_ALL_LOW);
     esp_deep_sleep_start();

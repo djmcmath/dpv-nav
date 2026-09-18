@@ -7,6 +7,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
 #include <SPI.h>
+#include <driver/rtc_io.h>
 #include <Arduino.h>
 #include <math.h>
 
@@ -149,8 +150,53 @@ namespace display {
 // Core API
 // ===========================================================================
 
+// --- Backlight --------------------------------------------------------------
+// TFT_BL drives the EyeSPI "Lite" pin, which the breakout pulls high -- so the
+// backlight is lit by default and stays lit unless something drives this low.
+// That is the whole reason a "powered off" unit used to glow: the panel was
+// blanked and the ESP32 was in deep sleep at ~10 uA, next to a backlight still
+// drawing ~25 mA, which is essentially the entire power-off budget.
+//
+// GPIO4 is RTC-capable, which is what makes the off state survivable: an
+// ordinary pad goes high-Z in deep sleep, the breakout's pull-up wins, and the
+// light comes straight back on. The RTC pad latch below holds the level with no
+// core running. Deliberately NOT gpio_deep_sleep_hold_en() -- that latches every
+// digital pad, including LINK_TX, which has to carry the wake byte to the nav
+// device on the way back up.
+void setBacklight(bool on) {
+    rtc_gpio_hold_dis(static_cast<gpio_num_t>(TFT_BL));
+    rtc_gpio_deinit(static_cast<gpio_num_t>(TFT_BL));
+    pinMode(TFT_BL, OUTPUT);
+    digitalWrite(TFT_BL, on ? HIGH : LOW);
+}
+
+void sleepForPowerOff() {
+    // Panel controller: blank, then sleep-in (~10 uA). Skipped when init() has
+    // not run -- the unconfirmed-wake path in setup() reaches here before the
+    // SPI bus exists, and talking to the ST7789 then would hang.
+    if (tftReady) {
+        tft.enableDisplay(false);
+        tft.enableSleep(true);
+        tftReady = false;     // later draws become no-ops until init() runs again
+    }
+    // Backlight off, latched off through deep sleep. Nothing releases this
+    // latch except setBacklight(), which init() calls -- so a wake that is not
+    // confirmed by the both-buttons hold never lights the screen at all.
+    rtc_gpio_init(static_cast<gpio_num_t>(TFT_BL));
+    rtc_gpio_set_direction(static_cast<gpio_num_t>(TFT_BL), RTC_GPIO_MODE_OUTPUT_ONLY);
+    rtc_gpio_set_level(static_cast<gpio_num_t>(TFT_BL), 0);
+    rtc_gpio_hold_en(static_cast<gpio_num_t>(TFT_BL));
+    Serial.println("[DISP] panel asleep, backlight off and latched");
+}
+
 bool init() {
-    // Hardware reset pulse
+    // Backlight on first: this also releases the deep-sleep latch left by
+    // sleepForPowerOff(), without which the screen would come up dark.
+    setBacklight(true);
+
+    // Hardware reset pulse. TFT_RST reaches the panel as of 2026-09-18 (it was
+    // pointed at an unrouted GPIO before), so this is now a real reset and not
+    // just a wiggle on a floating pin.
     pinMode(TFT_RST, OUTPUT);
     digitalWrite(TFT_RST, LOW);
     delay(10);

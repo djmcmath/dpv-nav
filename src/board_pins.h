@@ -34,7 +34,19 @@ constexpr int BUTTON2_PIN = 13;
 // --- TFT display (ST7789 320x240 on SPI, direct-wired to ESP32) ---
 constexpr int TFT_CS    = 15;
 constexpr int TFT_DC    = 33;
-constexpr int TFT_RST   = 22; // Shared with SCL_PIN — verify wiring if I2C conflicts occur
+// EyeSPI pad 8. This was 22 for a long time, which is a pin the display board
+// does not route anywhere -- the panel's reset line floated and init() got by on
+// the ST7789's software reset alone. The board has always had RST on IO23
+// (display_board.kicad_pcb, net 4); only this constant was wrong. Same GPIO the
+// nav board uses for I2C SDA, which is not a conflict: they are different
+// boards, and the display build compiles no I2C at all.
+constexpr int TFT_RST   = 23;
+// Backlight enable -- EyeSPI pad 2, "Lite". The breakout pulls it high, so the
+// backlight is lit whenever the panel has power and nothing drives this pin.
+// Jumpered to A5/GPIO4, chosen because it is RTC-capable (so it can hold a level
+// through deep sleep -- see display::sleepForPowerOff), LEDC-capable should we
+// ever want PWM dimming, and not a strapping pin.
+constexpr int TFT_BL    = 4;
 
 // SPI bus pins (ESP32 default VSPI)
 constexpr int DISP_SCK  = 5;

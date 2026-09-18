@@ -1,0 +1,4 @@
+- Fix calibration uploads stalling and failing with "http -3"
+- Free the calibration sample buffer before uploading, so the radio has room to work
+- Report an out-of-memory upload failure as such, instead of as a connection error
+- Show the real reason an upload failed instead of the retry's reason

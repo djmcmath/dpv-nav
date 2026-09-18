@@ -21,6 +21,18 @@ void clear();
 // Safe to call multiple times.  Does NOT do a hardware reset pulse.
 void reinit();
 
+// Drive the backlight enable line (EyeSPI "Lite"): true = lit.
+// Safe to call before init() -- it touches only the GPIO, never SPI -- and it
+// releases the deep-sleep latch that sleepForPowerOff() leaves behind.
+void setBacklight(bool on);
+
+// Put the display all the way down ahead of ESP32 deep sleep: panel controller
+// to DISPOFF + sleep-in, backlight off and latched off so it survives the pad
+// going high-Z.  Safe whether or not init() has run -- the "woke, buttons
+// released early, going straight back to sleep" path reaches it before init().
+// After this, drawing calls are no-ops until init() runs again.
+void sleepForPowerOff();
+
 // Push offscreen framebuffer to display hardware (single SPI transfer).
 void flush();
 

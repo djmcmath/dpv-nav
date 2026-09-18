@@ -2046,7 +2046,10 @@ void showCalGrid(const CalProgressPacket& pkt, const char* title) {
             uint8_t cnt = (binIdx < pkt.bins_total) ? pkt.bin_counts[binIdx] : 0;
 
             uint16_t color;
-            uint8_t  doneAt;   // count at which this cell stops wanting samples
+            // Count at which a cell stops wanting samples. Only still read on
+            // the gap-fill fallback path below (old nav build, no finished
+            // map); everywhere else `color` carries the verdict.
+            uint8_t  doneAt = MAG_CAL_BIN_GREEN_THRESHOLD;
             if (isGapFill) {
                 // Colour by the job, not by raw density. An untargeted cell is
                 // not "empty and bad", it's "not your problem" -- painting it
@@ -2057,12 +2060,21 @@ void showCalGrid(const CalProgressPacket& pkt, const char* title) {
                 const bool targeted = (st == 1 || st == 2);  // thin or empty
                 doneAt = targeted ? MAG_CAL_GAPFILL_TARGET_CAP
                                   : MAG_CAL_GAPFILL_UNTARGETED_CAP;
+                // "Finished" is the device's binRollSatisfied() verdict, not a
+                // sample count: a cell hits MAG_CAL_GAPFILL_TARGET_CAP on 15
+                // upright samples alone, but is not finished until the other
+                // three roll sectors have their 5 each. Counting instead
+                // painted a cell green exactly when its roll coverage was
+                // missing, and disagreed with the "N/M cells" line right below
+                // it -- which is what made the count look broken. Falls back to
+                // the old rule only against a nav build too old to send the map.
+                const bool done = pkt.has_cell_satisfied ? pkt.cell_satisfied[binIdx]
+                                                         : (cnt >= doneAt);
                 if (!targeted)              color = 0x1082;       // very dark gray
-                else if (cnt >= doneAt)     color = COLOR_GREEN;
+                else if (done)              color = COLOR_GREEN;
                 else if (cnt > 0)           color = COLOR_YELLOW;
                 else                        color = COLOR_RED;
             } else {
-                doneAt = MAG_CAL_BIN_GREEN_THRESHOLD;
                 if (cnt >= MAG_CAL_BIN_GREEN_THRESHOLD)       color = COLOR_GREEN;
                 else if (cnt >= MAG_CAL_BIN_YELLOW_THRESHOLD) color = COLOR_YELLOW;
                 else if (cnt > 0)                              color = COLOR_RED;
@@ -2078,7 +2090,7 @@ void showCalGrid(const CalProgressPacket& pkt, const char* title) {
             // gap-fill: a number there reads as a task, and it isn't one.
             if (isGapFill && color == 0x1082) {
                 // nothing to draw
-            } else if (cnt > 0 && cnt < doneAt) {
+            } else if (cnt > 0 && color != COLOR_GREEN) {
                 tft.setTextSize(1);
                 tft.setTextColor(COLOR_BLACK, color);
                 tft.setCursor(cx + 4, cy + ROW_H / 2 - 4);
@@ -2094,6 +2106,58 @@ void showCalGrid(const CalProgressPacket& pkt, const char* title) {
         int r = pkt.current_bin / HDG_COLS;
         int c = pkt.current_bin % HDG_COLS;
         tft.drawRect(GRID_X + c * COL_W, GRID_Y + r * ROW_H, COL_W, ROW_H, COLOR_WHITE);
+    }
+
+    // --- Live sub-cell position dot -----------------------------------------
+    // The cell border alone quantizes the diver's attitude to 30 deg before
+    // they ever see it: a deliberate turn shows as nothing at all until it
+    // crosses a boundary, and then as a jump to the next cell. There is no
+    // continuous error signal to steer on, which is what makes the grid
+    // something to wave at until cells fill rather than something to aim.
+    // The dot says where inside the cell the device actually is.
+    //
+    // Drawn last, on top of the cells and the border. Every frame repaints all
+    // cells first, so the previous dot is already gone -- the same
+    // no-prev-state trick the highlight border uses.
+    if (pkt.current_bin >= 0 && pkt.current_bin < pkt.bins_total) {
+        // Elevation band edges, top row first. MUST match imu.cpp's
+        // getBinIndex() and mag_orient::elevBand(). The level band is 60 deg
+        // tall and the rest are 30, so position within a row is NOT a fixed
+        // fraction of pitch -- that asymmetry is why this is a table and not
+        // arithmetic.
+        static const float kEdges5[6] = { 90.0f, MAG_CAL_ELEV_H2, MAG_CAL_ELEV_H1,
+                                          MAG_CAL_ELEV_L1, MAG_CAL_ELEV_L2, -90.0f };
+        static const float kEdges3[4] = { 90.0f, -MAG_CAL_ELEV_L1, MAG_CAL_ELEV_L1, -90.0f };
+        const float* edges = isMounted ? kEdges3 : kEdges5;
+
+        float hdg = fmodf(pkt.cur_hdg_deg, 360.0f);
+        if (hdg < 0.0f) hdg += 360.0f;
+        float pitch = pkt.cur_pitch_deg;
+        if (pitch >  90.0f) pitch =  90.0f;
+        if (pitch < -90.0f) pitch = -90.0f;
+
+        int dr = 0;
+        while (dr < ELEV_ROWS - 1 && pitch < edges[dr + 1]) dr++;
+        const float span = edges[dr] - edges[dr + 1];
+        float frac = (span > 0.0f) ? (edges[dr] - pitch) / span : 0.5f;
+        if (frac < 0.0f) frac = 0.0f;
+        if (frac > 1.0f) frac = 1.0f;
+
+        const int kDotR = 3;
+        int dx = GRID_X + (int)(hdg / 360.0f * (float)(HDG_COLS * COL_W));
+        int dy = GRID_Y + (int)(((float)dr + frac) * (float)ROW_H);
+        // Clamp so the whole dot stays inside the grid at the 360->0 wrap and
+        // at the poles, where the true position sits exactly on the edge.
+        if (dx < GRID_X + kDotR)                            dx = GRID_X + kDotR;
+        if (dx > GRID_X + HDG_COLS * COL_W - kDotR - 1)     dx = GRID_X + HDG_COLS * COL_W - kDotR - 1;
+        if (dy < GRID_Y + kDotR)                            dy = GRID_Y + kDotR;
+        if (dy > GRID_Y + GRID_H - kDotR - 1)               dy = GRID_Y + GRID_H - kDotR - 1;
+
+        // Black ring under a white dot. The cell behind it can be green,
+        // yellow, red, dark gray or the white highlight border, and any
+        // single-colour marker vanishes into one of them.
+        tft.fillCircle(dx, dy, kDotR + 1, COLOR_BLACK);
+        tft.fillCircle(dx, dy, kDotR,     COLOR_WHITE);
     }
 
     // --- Status + orientation row (clear then redraw each frame) ---
@@ -2142,10 +2206,14 @@ void showCalGrid(const CalProgressPacket& pkt, const char* title) {
             float pitch = pkt.cur_pitch_deg;
             if (hdg < 0.0f) hdg += 360.0f;
             if (hdg >= 360.0f) hdg -= 360.0f;
-            static const char* gdirs[8] = { "N","NE","E","SE","S","SW","W","NW" };
-            int gdidx = (int)((hdg + 22.5f) / 45.0f) % 8;
-            char gbuf[14];
-            snprintf(gbuf, sizeof(gbuf), "%s %+.0f\xB0", gdirs[gdidx], pitch);
+            // Numeric, not an 8-point compass name. The grid is 12 columns of
+            // 30 deg and an 8-point rose does not divide into it, so "NE"
+            // spans parts of two columns and cannot answer the one question
+            // this readout exists for: which column am I in. Truncated with
+            // (int), matching hdgSector()'s floor -- a rounded 360 would name
+            // a column that isn't there.
+            char gbuf[16];
+            snprintf(gbuf, sizeof(gbuf), "%03d\xB0 %+.0f\xB0", (int)hdg, pitch);
             tft.setTextSize(2);
             tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
             tft.setCursor(4, STATUS_Y + 20);
@@ -2197,9 +2265,17 @@ void showCalGrid(const CalProgressPacket& pkt, const char* title) {
                 }
 
                 // Live-roll outline on the triangle matching the device's
-                // current attitude -- skipped when roll is unmappable
-                // (device pointing straight up/down, current_roll_sector
-                // stays -1; see mag_orient::reconstructRoll).
+                // current attitude -- skipped when current_roll_sector is -1,
+                // which means "not in gap-fill, or the cell is unmappable".
+                //
+                // NOT, despite what this comment used to say, "pointing
+                // straight up/down": reconstructRoll()'s degenerate guard is
+                // 1e-6 g and so never fires in practice, and it returns 0.0
+                // there, which is roll sector 0 = UPRIGHT. Near-vertical roll
+                // is therefore reported, not withheld -- and with only
+                // cos(elevation) of gravity left across the tracked axis
+                // (0.035 g at 88 deg) that report is largely sensor noise. See
+                // docs/calibration-guide.md's "aim for the edge of the band".
                 if (pkt.current_roll_sector >= 0 && pkt.current_roll_sector < MAG_CAL_ROLL_SECTORS) {
                     int ox0, oy0, ox1, oy1;
                     switch (pkt.current_roll_sector) {
@@ -2238,10 +2314,10 @@ void showCalGrid(const CalProgressPacket& pkt, const char* title) {
             float pitch = pkt.cur_pitch_deg;
             if (hdg < 0.0f) hdg += 360.0f;
             if (hdg >= 360.0f) hdg -= 360.0f;
-            static const char* dirs[8] = { "N","NE","E","SE","S","SW","W","NW" };
-            int didx = (int)((hdg + 22.5f) / 45.0f) % 8;
-            char obuf[14];
-            snprintf(obuf, sizeof(obuf), "%s %+.0f\xB0", dirs[didx], pitch);
+            // Numeric for the same reason as the gap-fill readout above --
+            // the mounted grid has the same 12 columns.
+            char obuf[16];
+            snprintf(obuf, sizeof(obuf), "%03d\xB0 %+.0f\xB0", (int)hdg, pitch);
             tft.setTextSize(2);
             tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
             tft.setCursor(4, STATUS_Y + 20);

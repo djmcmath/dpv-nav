@@ -24,6 +24,7 @@ PacketType identifyPacket(const char* buf, size_t len) {
     if (t[0] == 'P') return PacketType::BOOT_PING;
     if (t[0] == 'U') return PacketType::OTA_BEGIN;
     if (t[0] == 'V') return PacketType::UPDATE_HINT;
+    if (t[0] == 'O') return PacketType::CAL_ORIENT;
     // Backward compat: packets without "t" are assumed NavPacket
     if (doc["hdg"].is<float>()) return PacketType::NAV;
     return PacketType::UNKNOWN;
@@ -470,6 +471,26 @@ size_t calProgressPacketToBytes(const CalProgressPacket& pkt, char* buf, size_t 
             rt.add(pkt.current_bin_roll_targeted[k]);
         }
         doc["rs"] = pkt.current_roll_sector;
+
+        // Per-cell "finished" flags, 1 bit per cell -> 8 bytes -> 16 hex
+        // chars. Same hex-packing trick as "tg" above and for the same reason:
+        // a 60-element JSON array would cost ~120 bytes on a 2 Hz packet that
+        // is already 319. Absent when the device has nothing to say.
+        if (pkt.has_cell_satisfied) {
+            char dn[17];
+            for (int b = 0; b < 8; b++) {
+                uint8_t packed = 0;
+                for (int k = 0; k < 8; k++) {
+                    const int cell = b * 8 + k;
+                    if (cell < 60 && pkt.cell_satisfied[cell]) packed |= (uint8_t)(1 << k);
+                }
+                static const char kHex[] = "0123456789abcdef";
+                dn[b * 2]     = kHex[packed >> 4];
+                dn[b * 2 + 1] = kHex[packed & 0x0F];
+            }
+            dn[16] = '\0';
+            doc["dn"] = dn;
+        }
     }
 
     // Fit quality — only include when valid to save bandwidth
@@ -563,9 +584,89 @@ bool bytesToCalProgressPacket(const char* buf, size_t len, CalProgressPacket& ou
         out.current_roll_sector = doc["rs"] | (int8_t)-1;
     }
 
+    // Per-cell "finished" flags (see encoder). Absent or malformed -> the
+    // flag stays false and the display falls back to its count rule, rather
+    // than showing a grid where nothing is ever finished.
+    memset(out.cell_satisfied, 0, sizeof(out.cell_satisfied));
+    out.has_cell_satisfied = false;
+    const char* dn = doc["dn"] | (const char*)nullptr;
+    if (dn && strlen(dn) == 16) {
+        bool ok = true;
+        uint8_t bytes[8] = {};
+        for (int b = 0; b < 8 && ok; b++) {
+            for (int h = 0; h < 2; h++) {
+                char ch = dn[b * 2 + h];
+                uint8_t nib;
+                if (ch >= '0' && ch <= '9')      nib = (uint8_t)(ch - '0');
+                else if (ch >= 'a' && ch <= 'f') nib = (uint8_t)(ch - 'a' + 10);
+                else if (ch >= 'A' && ch <= 'F') nib = (uint8_t)(ch - 'A' + 10);
+                else { ok = false; break; }
+                bytes[b] = (uint8_t)((bytes[b] << 4) | nib);
+            }
+        }
+        if (ok) {
+            for (int cell = 0; cell < 60; cell++) {
+                out.cell_satisfied[cell] = (bytes[cell / 8] >> (cell % 8)) & 0x01;
+            }
+            out.has_cell_satisfied = true;
+        }
+    }
+
     out.fit_valid       = doc["fv"]  | false;
     out.fit_hdg_err_deg = doc["fe"]  | 0.0f;
     out.fit_delta       = doc["fd"]  | 0.0f;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// CalOrientPacket -- the attitude-varying subset of CalProgressPacket, sent
+// 5x more often. See the struct comment in dpvlink.h for why.
+// Deliberately reuses CalProgressPacket's key names ("cb"/"pp"/"hh"/"rc"/
+// "rt"/"rs") for the identical fields: the display merges this straight into
+// its cached progress packet, and two spellings for one field is how they
+// drift apart.
+// ---------------------------------------------------------------------------
+size_t calOrientPacketToBytes(const CalOrientPacket& pkt, char* buf, size_t bufLen) {
+    JsonDocument doc;
+    doc["t"]  = "O";
+    doc["cb"] = pkt.current_bin;
+    doc["pp"] = pkt.cur_pitch_deg;
+    doc["hh"] = pkt.cur_hdg_deg;
+
+    JsonArray rc = doc["rc"].to<JsonArray>();
+    JsonArray rt = doc["rt"].to<JsonArray>();
+    for (int k = 0; k < 4; k++) {
+        rc.add(pkt.current_bin_roll_counts[k]);
+        rt.add(pkt.current_bin_roll_targeted[k]);
+    }
+    doc["rs"] = pkt.current_roll_sector;
+
+    size_t n = serializeJson(doc, buf, bufLen - 1);
+    if (n == 0 || n >= bufLen - 1) return 0;
+    buf[n]     = '\n';
+    buf[n + 1] = '\0';
+    return n + 1;
+}
+
+bool bytesToCalOrientPacket(const char* buf, size_t len, CalOrientPacket& out) {
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, buf, len);
+    if (err) return false;
+
+    out.current_bin   = doc["cb"] | (int8_t)-1;
+    out.cur_pitch_deg = doc["pp"] | 0.0f;
+    out.cur_hdg_deg   = doc["hh"] | 0.0f;
+
+    JsonArray rc = doc["rc"];
+    JsonArray rt = doc["rt"];
+    for (int k = 0; k < 4; k++) {
+        out.current_bin_roll_counts[k] = rc[k] | (uint8_t)0;
+        // Missing/garbled defaults to 2 ("none collected"), NOT 0: 0 means
+        // "satisfied" and paints the roll widget green, so a dropped field
+        // would tell the diver a sector is done when nothing is known.
+        out.current_bin_roll_targeted[k] = rt[k] | (uint8_t)2;
+    }
+    out.current_roll_sector = doc["rs"] | (int8_t)-1;
     return true;
 }
 

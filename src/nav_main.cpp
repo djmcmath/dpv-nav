@@ -153,6 +153,17 @@ static uint8_t gCalMode  = 0;
 static constexpr uint32_t CAL_PROGRESS_INTERVAL_MS = 500;
 static uint32_t gLastCalProgressMs = 0;
 
+// ...and for CalOrientPacket, the attitude-only subset, at 10 Hz. The grid
+// packet cannot go faster: it carries 60 counts plus the packed target map
+// (~350 bytes) and the link is 115200 baud. But 2 Hz is far too slow for a
+// diver steering toward a highlighted cell by hand -- each frame is one
+// unfiltered instantaneous sample, so while the unit is moving the highlight
+// lands somewhere effectively random inside the motion envelope, which is
+// what makes the grid feel like it jumps. 78 bytes at 10 Hz costs ~0.8 kB/s
+// of the ~11.5 kB/s link, on top of NavPacket's ~2.5 kB/s.
+static constexpr uint32_t CAL_ORIENT_INTERVAL_MS = 100;
+static uint32_t gLastCalOrientMs = 0;
+
 // CSV output file path for active bin cal (set when cal starts)
 static const char* gBinCalCsvPath = nullptr;
 
@@ -1250,6 +1261,22 @@ void loop() {
                 if (cn > 0) Serial1.write(calBuf, cn);
             }
 
+            // ...and the attitude-only subset at 10 Hz, so the highlighted
+            // cell tracks the diver's hand instead of strobing (see
+            // CAL_ORIENT_INTERVAL_MS). Grid modes only: baseline (5) is
+            // ROUGH_SCAN and has no grid to steer, so it would be pure link
+            // traffic. The display ignores these until a CalProgressPacket has
+            // given it a grid to merge them into, so ordering doesn't matter.
+            if ((gCalMode == 6 || gCalMode == 7) &&
+                nowMs - gLastCalOrientMs >= CAL_ORIENT_INTERVAL_MS) {
+                gLastCalOrientMs = nowMs;
+                CalOrientPacket opkt{};
+                imu::magBinCalGetOrient(opkt);
+                char orientBuf[160];
+                size_t on = calOrientPacketToBytes(opkt, orientBuf, sizeof(orientBuf));
+                if (on > 0) Serial1.write(orientBuf, on);
+            }
+
             // Check completion
             if (imu::magBinCalIsComplete()) {
                 // Send final CalProgressPacket with complete=true immediately —
@@ -2187,8 +2214,31 @@ static void handleDisplayCmd() {
                         // widget just tracks this session only.
                         uint8_t rollTargets[60][MAG_CAL_ROLL_SECTORS];
                         bool hasRollTargets = cal_sync::loadRollTargets(rollTargets);
+                        // Live binning runs on the BASELINE-ONLY cal, not the
+                        // chain loaded above for the hasBase check. Gap-fill is
+                        // an off-DPV baseline pass and the server's target grid
+                        // is in the baseline frame (it bins raw CSV counts
+                        // through its own baseline fit), so a mounted
+                        // correction here is a correction for iron that isn't
+                        // present -- see imu.h for the measured cost. Falls
+                        // back to the chain only if the file vanished between
+                        // the check above and here.
+                        // Same base/legacy precedence loadMagCalibrationChain
+                        // uses, so a unit still running the legacy single-file
+                        // cal gets base-only binning too instead of silently
+                        // falling back to a chain that includes the mount.
+                        MagCalib baseCal{};
+                        bool haveBaseOnly =
+                            storage::loadMagCalibration(storage::MAG_BASE_FILE, baseCal);
+                        if (!haveBaseOnly) {
+                            haveBaseOnly = storage::loadMagCalibration(storage::MAG_LEGACY_FILE, baseCal);
+                        }
+                        if (!haveBaseOnly) {
+                            Serial.println("[GAP_FILL] mag_base.json unreadable -- binning on the installed chain");
+                        }
                         if (!imu::magBinCalBegin(imu::BinCalMode::GAP_FILL, targets,
-                                                  rollTargets, hasRollTargets)) {
+                                                  rollTargets, hasRollTargets,
+                                                  haveBaseOnly ? &baseCal : nullptr)) {
                             Serial.println("[GAP_FILL] Refused: collector would not start");
                             sendGapFillRefusal("Could not start gap-fill collection.");
                             break;

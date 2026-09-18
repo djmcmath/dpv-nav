@@ -209,11 +209,65 @@ struct CalProgressPacket {
     uint8_t  current_bin_roll_targeted[4];
     int8_t   current_roll_sector;  // live roll sector of current_bin's cell; -1 if unmappable, mirrors current_bin
 
+    // GAP_FILL only: per-cell "this cell is finished", one bit each, as the
+    // device's own binRollSatisfied() judges it -- every roll sector at its
+    // (asymmetric) cap, or already ok/over from the server's prior upload.
+    //
+    // This exists because a raw sample count cannot answer the question. A
+    // targeted cell reaches MAG_CAL_GAPFILL_TARGET_CAP (15) on 15 upright
+    // samples alone, while being *finished* needs upright 15 plus 5 in each of
+    // the other three roll sectors. Colouring the grid by the count therefore
+    // painted a cell green precisely when its roll coverage was missing --
+    // the exact failure roll coverage was added to catch -- and disagreed with
+    // both the "N/M cells" counter and auto-completion, which have always used
+    // binRollSatisfied(). One predicate now feeds all three.
+    //
+    // `has_cell_satisfied` is false outside GAP_FILL and on a nav build that
+    // predates this field; the display falls back to the old count rule there
+    // rather than painting every cell unfinished.
+    bool     has_cell_satisfied;
+    bool     cell_satisfied[60];
+
     bool  fit_valid;        // true once ≥8 samples and a valid ellipse solution exists
     float fit_hdg_err_deg;  // estimated heading error from XY ellipticity (degrees);
                             // converges toward the expected error of the resulting cal
     float fit_delta;        // centre shift since last solve, in µT;
                             // converges toward 0 as data stabilises (solution converged)
+};
+
+// ---------------------------------------------------------------------------
+// Live-orientation packet  (nav -> display, grid phases only, ~10 Hz)
+// ---------------------------------------------------------------------------
+// CalProgressPacket carries the whole 60-cell grid and so is rate-limited to
+// 2 Hz (CAL_PROGRESS_INTERVAL_MS) -- it is ~350 bytes and the link is
+// 115200 baud. But the diver steering toward a target cell is running a
+// closed hand-eye loop, and 2 Hz of position feedback is far too slow and too
+// aliased to close it: each packet is one instantaneous unfiltered sample (see
+// imu.cpp's gap-fill path), so while the unit is moving the highlight lands
+// somewhere effectively random inside the motion envelope. That is the
+// mechanism behind the "the box jumps around, I just wave it until cells
+// fill" report -- not a bug in the orientation math, which now verifies clean
+// over the whole sphere.
+//
+// This packet carries ONLY the parts of CalProgressPacket that change with
+// the device's attitude, so it can be sent at 10 Hz for 78 bytes. The grid
+// itself (counts, targets, fit quality) keeps its 2 Hz cadence. The display
+// merges these fields into its cached CalProgressPacket and re-renders; it is
+// never valid on its own, and a display that has not yet seen a
+// CalProgressPacket must ignore it.
+struct CalOrientPacket {
+    int8_t current_bin;          // grid cell of current orientation (-1 if unmappable)
+    float  cur_pitch_deg;        // same source as CalProgressPacket's -- algebraic in
+    float  cur_hdg_deg;          // gap-fill, AHRS in mounted COLLECT
+
+    // Roll widget, GAP_FILL only. These travel WITH current_bin deliberately:
+    // the widget shows the roll breakdown *of the cell under the highlight*,
+    // so shipping a faster current_bin without them would point the widget at
+    // a new cell while still showing the old cell's colours for up to 500 ms.
+    // Same semantics as CalProgressPacket's fields of the same name.
+    uint8_t current_bin_roll_counts[4];
+    uint8_t current_bin_roll_targeted[4];
+    int8_t  current_roll_sector;  // live roll sector; -1 if unmappable
 };
 
 // ---------------------------------------------------------------------------
@@ -294,7 +348,8 @@ struct WaypointListPacket {
 // ---------------------------------------------------------------------------
 enum class PacketType : uint8_t { UNKNOWN = 0, NAV, DEBUG, CAL_PROGRESS, WAYPOINT_LIST, CAL_CLOUD_RESULT, CLOUD_LINK_RESULT, BOOT_PING,
                                   OTA_BEGIN,     // "U": start a display firmware transfer (see ota_link.h)
-                                  UPDATE_HINT }; // "V": a firmware update is available
+                                  UPDATE_HINT,   // "V": a firmware update is available
+                                  CAL_ORIENT };  // "O": live orientation between CAL_PROGRESS frames
 
 PacketType identifyPacket(const char* buf, size_t len);
 
@@ -395,6 +450,9 @@ bool   parseOtaReply(const char* buf, size_t len, bool& ok, char* errOut, size_t
 
 size_t calProgressPacketToBytes(const CalProgressPacket& pkt, char* buf, size_t bufLen);
 bool   bytesToCalProgressPacket(const char* buf, size_t len, CalProgressPacket& out);
+
+size_t calOrientPacketToBytes(const CalOrientPacket& pkt, char* buf, size_t bufLen);
+bool   bytesToCalOrientPacket(const char* buf, size_t len, CalOrientPacket& out);
 
 size_t calCloudResultPacketToBytes(const CalCloudResultPacket& pkt, char* buf, size_t bufLen);
 bool   bytesToCalCloudResultPacket(const char* buf, size_t len, CalCloudResultPacket& out);

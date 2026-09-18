@@ -33,6 +33,34 @@ String getNetworksJson();  // JSON array of {ssid, hidden} objects (no passwords
 bool connectNow(const char* ssid);
 
 // ---------------------------------------------------------------------------
+// Temporarily stopping the softAP (radio contention)
+//
+// The softAP and the STA share one radio. A server-side packet capture on
+// 2026-09-18 showed large cloud uploads stalling because the *server's ACKs*
+// were not reaching this device -- it kept retransmitting data the server had
+// already acknowledged, on RTO backoff, until HTTPClient gave up with -3.
+// Small uploads that fit in one congestion window never need a mid-transfer
+// ACK and so always succeeded, which is why it looked like a size limit.
+// AP+STA contention is the leading suspect for that inbound loss.
+//
+// suspendAp() drops to STA-only for the duration of a transfer; resumeAp()
+// puts it back. Both are no-ops unless the STA is connected -- with no STA
+// there is nothing to protect and stopping the AP would leave the diver no
+// way in at all.
+//
+// It uses WiFi.enableAP() rather than WiFi.mode(): enableAP() clears just the
+// AP bit and leaves the STA netif alone, where a full mode() reset is what
+// init()'s comment warns drops the association. The STA link is re-checked
+// after the switch anyway, and the AP is restored immediately if it did drop.
+//
+// Callers MUST pair these. Anything on the AP side of the radio (a browser at
+// 192.168.4.1) loses its connection for the duration, including the very
+// request that triggered the upload -- acceptable because the alternative is
+// an upload that cannot finish, and the AP comes straight back.
+bool suspendAp();   // true if the AP was actually stopped (i.e. resume it)
+void resumeAp();
+
+// ---------------------------------------------------------------------------
 // SSID scanning
 //
 // The scan is asynchronous on purpose.  Scanning takes the radio off the

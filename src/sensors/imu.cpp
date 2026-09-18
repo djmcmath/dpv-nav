@@ -1,4 +1,5 @@
 #include <Wire.h>
+#include <esp_heap_caps.h>
 #include "../board_pins.h"
 #include "../drivers/lis3mdl.h"
 #include "../types/types.h"
@@ -604,7 +605,7 @@ static bool magFit2DSolve() {
 // This prevents oversampling of easy orientations and produces a more balanced fit.
 
 // Maximum total samples we ever store across all bins
-static constexpr int BIN_CAL_MAX_SAMPLES = 60 * MAG_CAL_BIN_GREEN_THRESHOLD * 2;  // 1800
+static constexpr int BIN_CAL_MAX_SAMPLES = 60 * MAG_CAL_BIN_GREEN_THRESHOLD * 2;  // 2160
 
 struct BinCalSample {
     int16_t x, y, z;        // mag: raw logical-frame counts (post-axis-map, from readMagRaw())
@@ -1260,11 +1261,22 @@ void magBinCalDumpCSV(void* filePtr) {
     Serial.printf("[BIN_CAL] Wrote %d samples to CSV\n", g_binSampleCount);
 }
 
-void magBinCalEnd() {
+// Frees only the sample buffer. Split out of magBinCalEnd() because the cloud
+// upload sits between the CSV dump and the end of the cal, and holding 69,120
+// bytes across it starves the WiFi driver -- see the call site in nav_main.cpp.
+void magBinCalFreeSamples() {
     if (g_binSamples) {
         free(g_binSamples);
         g_binSamples = nullptr;
+        Serial.printf("[BIN_CAL] Freed sample buffer (%u bytes); heap_free=%u largest=%u\n",
+                      (unsigned)(BIN_CAL_MAX_SAMPLES * sizeof(BinCalSample)),
+                      (unsigned)ESP.getFreeHeap(),
+                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     }
+}
+
+void magBinCalEnd() {
+    magBinCalFreeSamples();
     magFit2DReset();
     g_binCalActive    = false;
     g_binCalMode      = BinCalMode::BASELINE;

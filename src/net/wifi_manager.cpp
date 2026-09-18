@@ -368,6 +368,75 @@ void update() {
 }
 
 bool      isAP()           { return gApRunning; }
+// ---------------------------------------------------------------------------
+// softAP suspend/resume -- see the header for why this exists.
+// ---------------------------------------------------------------------------
+
+static bool gApSuspended = false;
+
+bool suspendAp() {
+    if (gApSuspended || !gApRunning) return false;
+    // No STA link means the AP is the only way in. Never take that away.
+    if (!gStaConnected || WiFi.status() != WL_CONNECTED) return false;
+
+    if (!WiFi.enableAP(false)) {
+        Serial.println("[WiFi] AP suspend failed -- leaving it up");
+        return false;
+    }
+    // The association is the thing we cannot afford to lose: without it the
+    // upload this was meant to help has nothing to talk to. A single check
+    // right after the mode change is not enough -- the driver can still report
+    // WL_CONNECTED for a moment while the association is being torn down, and
+    // an IP of 0.0.0.0 means the netif is not usable even if the link is. So
+    // poll for a link that is both connected AND addressed, and treat a
+    // failure to reconfirm as "do not suspend".
+    bool ok = false;
+    uint32_t deadline = millis() + WIFI_AP_SUSPEND_VERIFY_MS;
+    while ((int32_t)(millis() - deadline) < 0) {
+        delay(WIFI_AP_SUSPEND_SETTLE_MS);
+        ok = (WiFi.status() == WL_CONNECTED) && (WiFi.localIP() != IPAddress((uint32_t)0));
+        if (!ok) break;  // lost it -- no point waiting out the rest of the window
+    }
+    // A live link with an address still is not proof the stack is usable: the
+    // mode change can leave the netif without its DNS servers, and a resolver
+    // that returns nothing surfaces as HTTPC_ERROR_CONNECTION_REFUSED (-1) --
+    // indistinguishable, from the caller, from the server being down. Resolving
+    // the host we are about to talk to is the cheapest end-to-end proof.
+    if (ok) {
+        IPAddress resolved;
+        if (!WiFi.hostByName(CLOUD_API_HOST, resolved) || resolved == IPAddress((uint32_t)0)) {
+            Serial.println("[WiFi] AP suspend left DNS unusable");
+            ok = false;
+        }
+    }
+
+    if (!ok) {
+        Serial.printf("[WiFi] AP suspend not safe (status %d, ip %s) -- restoring AP\n",
+                      (int)WiFi.status(), WiFi.localIP().toString().c_str());
+        WiFi.enableAP(true);
+        WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASS);
+        return false;
+    }
+
+    gApSuspended = true;
+    gApRunning   = false;  // also parks the reconnect cycle and blocks scans
+    Serial.printf("[WiFi] AP suspended (STA %s, rssi %d)\n",
+                  WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
+    return true;
+}
+
+void resumeAp() {
+    if (!gApSuspended) return;
+    gApSuspended = false;
+
+    WiFi.enableAP(true);
+    // Re-assert the config rather than trusting the driver to have kept it --
+    // a soft AP that comes back nameless is worse than one that comes back slow.
+    WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASS);
+    gApRunning = true;
+    Serial.printf("[WiFi] AP resumed, IP: %s\n", WiFi.softAPIP().toString().c_str());
+}
+
 bool      isStaConnected() { return gStaConnected; }
 IPAddress ip()             { return WiFi.softAPIP(); }
 IPAddress staIP()          { return WiFi.localIP(); }

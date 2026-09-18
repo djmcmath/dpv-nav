@@ -171,6 +171,7 @@ void   magCalNBGetProgress(uint32_t& elapsed_ms, uint32_t& remaining_ms,
 //   // retrieve:
 //   magBinCalGetProgress(pkt);           // fill CalProgressPacket
 //   magBinCalDumpCSV(file);              // write samples to open LittleFS File
+//   magBinCalFreeSamples();              // give the 69 KB back before uploading
 //   magBinCalEnd();                      // clean up
 
 enum class BinCalMode : uint8_t { BASELINE = 0, MOUNTED = 1, GAP_FILL = 2 };
@@ -252,6 +253,12 @@ void   magBinCalGetOrient(struct CalOrientPacket& pkt);
 // Write raw samples as CSV to an already-open File object
 // Format: mx,my,mz,ax,ay,az,gx,gy,gz (mag = raw sensor counts, accel = g, gyro = rad/s; one sample per line)
 void   magBinCalDumpCSV(void* filePtr);  // void* to avoid #include <LittleFS.h> here
+// Release the 69,120-byte sample buffer without tearing down the rest of the
+// cal state. Call this the moment the CSV is on disk and before anything that
+// needs heap -- above all the cloud upload, which shares this heap with the
+// WiFi driver's dynamic RX buffers. Safe to call more than once; magBinCalEnd()
+// still frees the buffer if this was skipped.
+void   magBinCalFreeSamples();
 void   magBinCalEnd();
 
 }

@@ -465,6 +465,16 @@ static void setDiveMode(bool dive);
 void setup() {
     Serial.begin(115200);
     Serial.println("\n=== DPV-NAV (nav device) fw " FW_VERSION " ===");
+    // Says out loud which build this is. CORE_DEBUG_LEVEL decides whether the
+    // Arduino libraries' own log_d/log_i lines exist at all -- at the default 0
+    // they are compiled out, so a bench session can otherwise look like "the
+    // library had nothing to say" when it was never able to speak. Build the
+    // nav_debug env to get level 4.
+#ifndef CORE_DEBUG_LEVEL
+#define CORE_DEBUG_LEVEL 0
+#endif
+    Serial.printf("=== CORE_DEBUG_LEVEL=%d %s ===\n", CORE_DEBUG_LEVEL,
+                  CORE_DEBUG_LEVEL >= 4 ? "(library logs ON)" : "(library logs OFF)");
 
     // Serial link to display device
     Serial1.begin(LINK_BAUD, SERIAL_8N1, LINK_RX_PIN, LINK_TX_PIN);
@@ -1297,6 +1307,27 @@ void loop() {
                         imu::magBinCalDumpCSV(&f);
                         f.close();
                         Serial.printf("[BIN_CAL] CSV saved to %s\n", gBinCalCsvPath);
+
+                        // Hand back the 69,120-byte sample buffer BEFORE the upload.
+                        // The samples are on LittleFS now and nothing below reads them
+                        // again; magBinCalEnd() at the bottom of this block used to be
+                        // the only free, which meant every cloud upload ran with that
+                        // buffer still resident. That is not just a TLS-allocation
+                        // problem (mbedtls wants ~33 KB contiguous and the largest free
+                        // block measured 42996 with the buffer held, against 110580
+                        // without it) -- the ESP32 WiFi
+                        // driver allocates its RX buffers from this same heap, and when
+                        // it cannot get one the inbound frame is dropped silently. That
+                        // matches the failure exactly: the device streams ~4 segments,
+                        // fills its send queue, and then never sees the ACKs the server
+                        // is demonstrably sending, so it retransmits on RTO backoff
+                        // until HTTPClient gives up (-3). Downloads and OTA over the same
+                        // link are fine because no cal buffer is resident for those, and
+                        // small uploads are fine because they fit in the initial window
+                        // and never need a mid-transfer ACK.
+                        // Measured on the bench, same AP, same 28 KB class of file:
+                        // 113,318 ms before this call existed, 2,186 ms after.
+                        imu::magBinCalFreeSamples();
 
                         // Cloud calibration (docs/cloud-calibration-plan.md): upload the
                         // CSV and run the fit if we have a network. This is a *blocking*

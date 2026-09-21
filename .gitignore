@@ -34,3 +34,4 @@ baseline cal jsons/**/*.csv
 # Per-machine PlatformIO config -- upload/monitor ports differ per dev box.
 platformio.ini
 *.dsn
+tools/.lfsvenv/

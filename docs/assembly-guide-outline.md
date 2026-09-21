@@ -97,9 +97,10 @@ build before they read anything else. ]]
    - All of the soldering is through-hole or wiring junctions; there's no SMD soldering.  The smallest components are the picoblade connectors, which require some finesse to get right, but do not require any special equipment.
    - In most cases, the best way to junction wires involves heat shrink tubing; you'll need to be comfortable with applying and using heat shrink tubing.
    - 3D printing and the requisite follow-on work to make 3D printed parts useful from your setup.  In my own setup, for example, parts often require a little trimming with a utility knife, or sanding surfaces that ended up not quite to spec.  
-   - If you go with the BlueRobotics and GoPro housings, you'll need to drill holes in plastic (not metal).  Holes do need to be precisely places and sized in order to work correctly (the guide includes templates), and they'll need to be clean seating surfaces with no burrs.
-   - If you go with the milled housings, you'll need to have access to a CNC mill or (they're surprisingly common).  If you're fantastically bold, you may be able to mill components by hand with a vice and a router, but getting the o-ring grooves just right will be challenging.
+   - If you go with the BlueRobotics and GoPro housings, you'll need to drill holes in plastic (not metal).  Holes do need to be precisely placed and sized in order to work correctly (the guide includes templates), and they'll need to be clean seating surfaces with no burrs.
+   - If you go with the milled housings, you'll need to have access to a CNC mill (they're surprisingly common).  If you're fantastically bold, you may be able to mill components by hand with a vice and a router, but getting the o-ring grooves just right will be challenging.
    - You'll need to be able to install PlatformIO on a computer with USB ports, and you'll need to be comfortable flashing firmware to embedded computers (e.g. the pair of ESP32s).
+   - Installing cables in glands is a significant part of this process. Stripping cables to appropriate lengths, ensuring seating surfaces are clean, and applying appropriate torque are basic mechanical skills.
 
    - We'll walk you through all of it in this guide, so if you're unfamiliar with any of it, that isn't necessarily a show-stopper, but you should admit that you're learning while you build, so expect several attempts on any part of the process that you're new at.]]
 
@@ -110,8 +111,8 @@ build before they read anything else. ]]
    vacuum pump + test plug for §10. ]]
 
 ### 3.3 Consumables
-[[ Solder, flux, heat shrink (sizes), potting compound, o-ring grease,
-   thread locker, desiccant, moisture indicator cards. ]]
+[[ Solder, heat shrink (various sizes), potting compound (epoxy), o-ring grease,
+   thread locker, desiccant. ]]
 
 ### 3.4 Time and cost
 [[ Honest ranges per variant. Separate "hands-on hours" from "elapsed time"
@@ -135,20 +136,15 @@ build before they read anything else. ]]
 | Risk | Known-good, tested to depth | You own the pressure analysis |
 | Button options | GoPro mechanical | Piezo (Perdix-style) |
 
-[[ BlueRobotics builds great gear for serious underwater applications.  The DIY / Hobbyist unmanned submersible is a competent equipment, designed for significantly deeper applications than what most technical divers are capable of.  As such, they're over-engineered for this application.  They're also fantastically convenient -- the glands and housings are well-built, easy to work with, and require basically no special skills.  That convenience and engineering comes at a cost, however -- the BlueRobotics housing is something like $200.  Similarly, the GoPro housing is straightforward: it's already a housing that works with commercially available o-rings in a known size.  Drill one hole for the gland and you're done.  But it costs $60, and you're locked into the mechanical solution for buttons that force mechanical alignment issues into the design.
+[[ BlueRobotics builds high quality gear for serious underwater applications.  Their DIY / Hobbyist unmanned submersible is competent equipment, designed for significantly deeper applications than what most technical divers are capable of.  As such, they're over-engineered for this application.  They're also fantastically convenient -- the glands and housings are well-built, easy to work with, and require basically no special skills.  That convenience and engineering comes at a cost, however -- the BlueRobotics housing is something like $200.  Similarly, the GoPro housing is straightforward: it's already a housing that works with commercially available o-rings in a known size.  Drill one hole for the gland and you're done.  But it costs $60, and you're locked into the mechanical solution for buttons that force mechanical alignment issues into the design.
 
-   If you mill your own, you're resonsible for precision, obviously -- I'm providing a model that works for me, and it's not my fault if you build it wrong.  State your safety factor
-   convention (4:1+) as the standard to design to. ]]
+If you mill your own, you're resonsible for precision, obviously -- I'm providing a model that works for me, and it's not my fault if you build it wrong.  I went with about a 4:1 safety factor -- more to allow low precision milling than because I think it's important to over-design -- so the most likely failure mode is a leaky o-ring or gland, rather than a collapsed unit. ]]
 
 ### 4.2 Penetrators vs. cable glands
-[[ BR penetrators (~$13, known-good) vs generic electrical glands (~$3, you
-   have to make them seal). Cross-reference the gland sealing procedure in
-   §8.4 and the leak test in §10 — the cheap path is only acceptable if you
-   actually run the test. ]]
+[[ BlueRobotics makes genuinely high quality penetrators.  They're great, and I love them.  But I do not love paying for them. At $13 a pop, times 5 glands, it adds up fast. If you're cheap but demanding, you might try the penetrators from https://rovmaker.org -- they look identical to the BlueRobotics units for <$5 a pop.  If you're really cheap, just add some chromed-brass glands to your Digikey order; they're typically in the $3-5 range, and work well if installed correctly.  Either way: plan on getting a vacuum testing kit to make sure that whatever path you went down actually holds pressure. ]]
 
 ### 4.3 Buttons
-[[ Mechanical (GoPro) vs piezo. Note: piezo eliminates a moving penetration;
-   flag pressure qualification status honestly. ]]
+[[ This is one of the biggest reasons to go with the milled housing, in my opinion.  The printed GoPro housing frame is pretty good, but if it slips out of alignment during a dive, you don't get to push any buttons until you can open the housing again later.  With the milled housing, there's room for proper piezo buttons (like the familiar Shearwater-style buttons), which are delightfully reliable.  On the other hand, the piezo buttons aren't technically rated for pressure exposure -- we're hacking a component from the automotive world into something for the underwater world. v]]
 
 ### 4.4 Optional modules
 [[ There are no optional subsystems.  Without GPS, you never get time or initial position, so you can't navigate.  If you don't have the flow meter, you never get in-water speed, so you can't navigate.  If you don't have the IMU, you can't get heading, so you can't navigate.  If you don't have the display module, you can't control the device or see the outputs. ]]
@@ -173,8 +169,12 @@ build before they read anything else. ]]
 
 ## 6. System architecture
 
-[[ Explain the shape before the steps. Block diagram first, then module by
-   module with a photo of each. ]]
+[[ There are 4 separate components: Nav, Display, Flow, and GPS, each with its own housing and wiring.  Flow is fully potted and bolts on to the side of the Nav housing.  GPS and Display are both either milled housings or GoPro housings.  (You don't need to make the same decision for both -- you can use a GoPro housing for GPS and mill a housing for the Display.)  The Nav housing is the core, where all the wires end up.  It holds the central processor, the IMU, and the battery.
+
+TODO: block diagram
+TODO: photos of each component
+
+]]
 
 ### 6.1 Block diagram
 [[ Power domains, data buses (I²C / RS485 / whatever), pressure boundaries
@@ -182,27 +182,34 @@ build before they read anything else. ]]
    vessels) obvious rather than arbitrary. ]]
 
 ### 6.2 Module: nav / main
-[[ 2" BR housing. ESP32, IMU, depth sensor, power. What's inside, why. ]]
+[[ The main module is where most of the math happens, where the tern.local website is served from, and where the IMU and battery live.  The processing all happens on an ESP32 wired to a Pololu AltIMU 9-axis measurement unit.  A depth sensor is installed in the housing to enable dive/surface mode and tracking water temperature and depth.  The battery is a small flat-pack with a non-metallic housing to reduce magnetic signature.  Everything is arranged so that the IMU -- where we're measuring magnetic fields -- is as far from wiring as possible.  Especially important is the power wiring.  If you run power from the battery to the ESP32 past the IMU, you'll absolutely getting heading deflection based on current draw. 
+
+Note the installation orientation of the IMU.  All of the math assumes that you install your sensor the same way I did.  You can argue that I did it wrong, or that it would be better if it was done some other way.  But if you want it to work with this codebase, just install it the same way I did.
+]]
 
 ### 6.3 Module: display
-[[ GoPro or milled. Screen, buttons, its own MCU or not. ]]
+[[ For initial prototyping, I used GoPro housings.  The GoPro solution requires zero engineering to know that it's rated for depth, they come from the factory with two buttons and a flat rear display, and there's a whole suite of options for mounting the housing on random objects.  However, I was frustrated by the expense ($60 a pop) and the fact that the buttons have to be aligned to mechanical buttons inside the housing.  After losing a number of dives to inability to push buttons, I re-engineered the entire interior framing solution, and that's worked well, but be aware that it can be extremely finicky.
+
+The display module has it's own ESP32.  Initially, it was just an RS485 receiver that drove the EyeSPI board and TFT display.  Over time, numerous functions ended up on the display board, caching data or functionality on the board to eventually send over to Nav for processing or transmission. ]]
 
 ### 6.4 Module: GPS
-[[ Separate housing. State the reason plainly: no GPS underwater — it's for
-   surface fixes and entry/exit marking, so it lives where it can see sky. ]]
+[[ Obviously, the GPS doesn't work underwater, so you may be wondering why it's here, and why it's outside the main Nav housing.  Fundamentally, dead reckoning estimates future position from a known starting point, so fixing a good initial position is key to navigation.
+   
+Initial prototypes had the GPS module just mounted directly to the Nav board.  This works great, as long as you're on the beach.  It **does not** work when you're at the descent buoy trying to hold the scooter high enough out of the water to clear surface-reflection interference to get a pre-dive fix.  I've played with a couple of different methods of putting GPS in a place where I can unclip it and raise it out of the water, while leaving the scooter-proper fully immersed.  The best fixes came from a powered external antenna connected to the u.fl port on the GPS board, but the connection was sufficiently unstable to make it a non-viable solution for production.  You can cheap out on the GPS board if you'd like -- getting a board that **just** has GPS (no battery) will still give you fixes.  However, I went with the Adafruit Ultimate GPS because the battery and memory setup allows the unit to store ephemeris data, which allows for a much faster fix when it gets signal again. ]]
 
 ### 6.5 Module: flow meter
-[[ Potted assembly. Mounting position and why it matters for flow. ]]
+[[ It doesn't seem to matter what flow meter you get, as long as it's roughly in the right range of flow sensitivity, size, and depth rating.  There are a number of options here, and they all look like basically the same thing -- an impeller driving a Hall effect sensor that needs to be calibrated before it's useful.  Whatever flow meter you end up with, you'll need to put it in a box full of epoxy, with the wires coming out of the potting to supply signal to the Nav unit.
+
+It mounts on the side of the Nav unit, with piping on both ends to improve repeatability of flow.  Alignment with the direction of scooter travel is key, of course. ]]
 
 ### 6.6 Power
-[[ Source (DPV BMS → 12V→5V buck), distribution, the 5V and 3.3V domains. ]]
+[[ I've opted for a 3mAh flat-pack from Amazon -- they're cheap, I can get them in multi-packs, and they last more than long enough to be workable for this purpose.  The one gigantic caveat is that the polarity on the connection is almost certainly wrong.  **Before you plug in a non-Adafruit battery to an Adafruit ESP32, check and correct the polarity!** 
+
+Note that the battery wires should be as short as possible. They carry enough current to generate a sufficient magnetic field that they'll definitely drive heading impact if they're anywhere near the IMU.  If you keep power at the back of the board, you'll be ok.
+]]
 
 ### 6.7 Why it's split this way
-[[ The rationale section. Pressure boundaries are the expensive part; magnetic
-   separation from the motor and battery cables drives placement (motor
-   contribution must stay near ~1.7 µT in Earth's ~50 µT field to keep
-   deflection under ~2°); GPS needs sky; display needs to be readable in-hand.
-   This is the part a reader will actually want if they're modifying it. ]]
+[[ I wanted to set things up with as few pressure boundaries as possible.  The initial concept design had everything in one housing.  But that just didn't work.  The IMU needs to be aligned to the scooter tube, which means it has to be mounted **on the tube**, or you're doing some wonky alignment process on the handle.  The display needs to be someplace you can see it, which means either a giant thing on the tube, or a sane-sized display on the handle.  If the flowmeter is inside the housing, you end up with an unnaturally large housing with plumbing flowing through it -- which is actually a more complex pressure boundary than just potting it and putting it outside.  GPS needs to be well above the water line to get a fix, and I'm not strong enough to hoist my 52lb Cuda 650 far enough out of the water to get signal, so it ends up on a cable. ]]
 
 ---
 

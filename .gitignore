@@ -7,6 +7,7 @@ nul
 *.zip
 *.log
 *.tar.gz
+*.bz2
 tools/*.ods
 tools/old csv/*
 .~lock.*#
@@ -35,3 +36,8 @@ baseline cal jsons/**/*.csv
 platformio.ini
 *.dsn
 tools/.lfsvenv/
+
+# Any CSV under tools/ is captured data, not source. The one exception is the
+# hardware ground-truth fixture replayed by tools/frame_fixture_check.py.
+tools/**/*.csv
+!tools/fixtures/frame_fixture.csv

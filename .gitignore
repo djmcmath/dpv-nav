@@ -41,3 +41,13 @@ tools/.lfsvenv/
 # hardware ground-truth fixture replayed by tools/frame_fixture_check.py.
 tools/**/*.csv
 !tools/fixtures/frame_fixture.csv
+
+# KiCad local churn: autosave backup zips, footprint cache, editor-session
+# lock artifacts. Never the source of truth, always regenerable.
+*-backups/
+fp-info-cache
+report.txt
+
+# Working-tree scratch space for superseded/WIP KiCad files kept locally for
+# reference but never committed. See hardware/schematic/*/_archive/.
+_archive/

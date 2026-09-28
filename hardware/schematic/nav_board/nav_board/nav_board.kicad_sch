@@ -1514,6 +1514,231 @@
 			)
 			(embedded_fonts no)
 		)
+		(symbol "dk_Rectangular-Connectors-Headers-Male-Pins:22-23-2021"
+			(pin_names
+				(offset 1.016)
+			)
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(property "Reference" "J"
+				(at -2.54 1.27 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify right)
+				)
+			)
+			(property "Value" "22-23-2021"
+				(at 1.27 -3.81 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Footprint" "digikey-footprints:PinHeader_1x2_P2.54mm_Drill1.02mm"
+				(at 5.08 5.08 0)
+				(effects
+					(font
+						(size 1.524 1.524)
+					)
+					(justify left)
+					(hide yes)
+				)
+			)
+			(property "Datasheet" "https://media.digikey.com/pdf/Data%20Sheets/Molex%20PDFs/A-6373-N_Series_Dwg_2010-12-03.pdf"
+				(at 5.08 7.62 0)
+				(effects
+					(font
+						(size 1.524 1.524)
+					)
+					(justify left)
+					(hide yes)
+				)
+			)
+			(property "Description" "CONN HEADER VERT 2POS 2.54MM"
+				(at 0 0 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(hide yes)
+				)
+			)
+			(property "Digi-Key_PN" "WM4200-ND"
+				(at 5.08 10.16 0)
+				(effects
+					(font
+						(size 1.524 1.524)
+					)
+					(justify left)
+					(hide yes)
+				)
+			)
+			(property "MPN" "22-23-2021"
+				(at 5.08 12.7 0)
+				(effects
+					(font
+						(size 1.524 1.524)
+					)
+					(justify left)
+					(hide yes)
+				)
+			)
+			(property "Category" "Connectors, Interconnects"
+				(at 5.08 15.24 0)
+				(effects
+					(font
+						(size 1.524 1.524)
+					)
+					(justify left)
+					(hide yes)
+				)
+			)
+			(property "Family" "Rectangular Connectors - Headers, Male Pins"
+				(at 5.08 17.78 0)
+				(effects
+					(font
+						(size 1.524 1.524)
+					)
+					(justify left)
+					(hide yes)
+				)
+			)
+			(property "DK_Datasheet_Link" "https://media.digikey.com/pdf/Data%20Sheets/Molex%20PDFs/A-6373-N_Series_Dwg_2010-12-03.pdf"
+				(at 5.08 20.32 0)
+				(effects
+					(font
+						(size 1.524 1.524)
+					)
+					(justify left)
+					(hide yes)
+				)
+			)
+			(property "DK_Detail_Page" "/product-detail/en/molex/22-23-2021/WM4200-ND/26667"
+				(at 5.08 22.86 0)
+				(effects
+					(font
+						(size 1.524 1.524)
+					)
+					(justify left)
+					(hide yes)
+				)
+			)
+			(property "Description_1" "CONN HEADER VERT 2POS 2.54MM"
+				(at 5.08 25.4 0)
+				(effects
+					(font
+						(size 1.524 1.524)
+					)
+					(justify left)
+					(hide yes)
+				)
+			)
+			(property "Manufacturer" "Molex"
+				(at 5.08 27.94 0)
+				(effects
+					(font
+						(size 1.524 1.524)
+					)
+					(justify left)
+					(hide yes)
+				)
+			)
+			(property "Status" "Active"
+				(at 5.08 30.48 0)
+				(effects
+					(font
+						(size 1.524 1.524)
+					)
+					(justify left)
+					(hide yes)
+				)
+			)
+			(property "ki_keywords" "WM4200-ND KK 6373"
+				(at 0 0 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(hide yes)
+				)
+			)
+			(symbol "22-23-2021_1_1"
+				(rectangle
+					(start -1.27 0)
+					(end 3.81 -2.54)
+					(stroke
+						(width 0)
+						(type solid)
+					)
+					(fill
+						(type background)
+					)
+				)
+				(rectangle
+					(start -0.254 -1.143)
+					(end 0.254 -1.651)
+					(stroke
+						(width 0)
+						(type solid)
+					)
+					(fill
+						(type outline)
+					)
+				)
+				(rectangle
+					(start 2.286 -1.143)
+					(end 2.794 -1.651)
+					(stroke
+						(width 0)
+						(type solid)
+					)
+					(fill
+						(type outline)
+					)
+				)
+				(pin passive line
+					(at 0 2.54 270)
+					(length 2.54)
+					(name "~"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 2.54 2.54 270)
+					(length 2.54)
+					(name "~"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+			)
+			(embedded_fonts no)
+		)
 		(symbol "dk_Rectangular-Connectors-Headers-Male-Pins:B4B-XH-A_LF__SN_"
 			(pin_names
 				(offset 1.016)
@@ -2025,6 +2250,12 @@
 		)
 	)
 	(junction
+		(at 99.06 26.67)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "19a52a13-c9c4-4115-a3ef-1bd6ea8464c4")
+	)
+	(junction
 		(at 93.98 82.55)
 		(diameter 0)
 		(color 0 0 0 0)
@@ -2043,10 +2274,10 @@
 		(uuid "38b4af22-586c-44e3-83f3-0c0d186ff44c")
 	)
 	(junction
-		(at 165.1 69.85)
+		(at 99.06 48.26)
 		(diameter 0)
 		(color 0 0 0 0)
-		(uuid "47e257d4-ce86-456d-b849-04b57b01fc09")
+		(uuid "3f4a0fc2-9b38-46a3-9aea-1f3caa0e40cb")
 	)
 	(junction
 		(at 154.94 45.72)
@@ -2055,10 +2286,10 @@
 		(uuid "546ca737-9c4f-4615-87bb-8af9ea2d3ae1")
 	)
 	(junction
-		(at 99.06 53.34)
+		(at 165.1 67.31)
 		(diameter 0)
 		(color 0 0 0 0)
-		(uuid "571491d9-f352-41cb-aaf9-ab97c0f2f145")
+		(uuid "8fab2acb-e3e0-4bfc-a21c-0a211f2adf6a")
 	)
 	(junction
 		(at 93.98 106.68)
@@ -2148,13 +2379,23 @@
 	)
 	(wire
 		(pts
-			(xy 99.06 21.59) (xy 99.06 53.34)
+			(xy 99.06 21.59) (xy 99.06 26.67)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
 		(uuid "1b2d7f7c-d0cb-4d5a-87a0-2e0a616a6102")
+	)
+	(wire
+		(pts
+			(xy 99.06 26.67) (xy 99.06 48.26)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "27613c36-e6f2-44ef-880a-c494eb9ac4d5")
 	)
 	(wire
 		(pts
@@ -2188,13 +2429,23 @@
 	)
 	(wire
 		(pts
-			(xy 88.9 50.8) (xy 93.98 50.8)
+			(xy 165.1 67.31) (xy 165.1 115.57)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "2b8eed86-cdb9-4c38-9241-e18a0788cca2")
+		(uuid "2fa86373-3aef-4e4a-8610-84f1912158ba")
+	)
+	(wire
+		(pts
+			(xy 102.87 53.34) (xy 102.87 81.28)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "34f4ab9e-5b26-4195-b132-32016f145a16")
 	)
 	(wire
 		(pts
@@ -2208,16 +2459,6 @@
 	)
 	(wire
 		(pts
-			(xy 88.9 48.26) (xy 102.87 48.26)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "35de4b44-9060-43d1-a54f-59a11dcb19c8")
-	)
-	(wire
-		(pts
 			(xy 154.94 21.59) (xy 148.59 21.59)
 		)
 		(stroke
@@ -2225,16 +2466,6 @@
 			(type default)
 		)
 		(uuid "35f9728c-ef67-4d7d-8bf6-402c85695c8d")
-	)
-	(wire
-		(pts
-			(xy 93.98 50.8) (xy 93.98 82.55)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "3ba43165-b66a-4894-91b2-dfbf2910c87e")
 	)
 	(wire
 		(pts
@@ -2258,6 +2489,16 @@
 	)
 	(wire
 		(pts
+			(xy 88.9 53.34) (xy 102.87 53.34)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "4419bdb7-1380-4598-ab3b-d1532f11b7a7")
+	)
+	(wire
+		(pts
 			(xy 99.06 21.59) (xy 130.81 21.59)
 		)
 		(stroke
@@ -2268,7 +2509,7 @@
 	)
 	(wire
 		(pts
-			(xy 100.33 86.36) (xy 100.33 104.14)
+			(xy 100.33 86.36) (xy 100.33 99.06)
 		)
 		(stroke
 			(width 0)
@@ -2298,6 +2539,16 @@
 	)
 	(wire
 		(pts
+			(xy 151.13 69.85) (xy 170.18 69.85)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "566046a0-2249-4b72-8a6d-1974addf5072")
+	)
+	(wire
+		(pts
 			(xy 44.45 52.07) (xy 54.61 52.07)
 		)
 		(stroke
@@ -2315,16 +2566,6 @@
 			(type default)
 		)
 		(uuid "5bdb9cfc-f495-4041-b726-f8dfb9498790")
-	)
-	(wire
-		(pts
-			(xy 165.1 48.26) (xy 165.1 69.85)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "5d8353c3-00e2-4d5d-aa36-1cbbefcd922c")
 	)
 	(wire
 		(pts
@@ -2348,13 +2589,43 @@
 	)
 	(wire
 		(pts
-			(xy 82.55 104.14) (xy 100.33 104.14)
+			(xy 82.55 99.06) (xy 100.33 99.06)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "74a75509-cfc1-48e9-84e7-a1607d9be37b")
+		(uuid "76d57a9c-1a9c-48f1-9587-dd4907278f9d")
+	)
+	(wire
+		(pts
+			(xy 88.9 45.72) (xy 93.98 45.72)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "79e9c56a-3e11-4baf-8ea4-6a365e47add7")
+	)
+	(wire
+		(pts
+			(xy 104.14 50.8) (xy 104.14 78.74)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "79f4ee16-be8b-4417-8e3b-b42b63829ee6")
+	)
+	(wire
+		(pts
+			(xy 165.1 67.31) (xy 170.18 67.31)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "8365459a-a429-4874-9d18-8f06812ba001")
 	)
 	(wire
 		(pts
@@ -2365,6 +2636,16 @@
 			(type default)
 		)
 		(uuid "838a1e16-2dc5-46c5-99cf-b6fdf3874d70")
+	)
+	(wire
+		(pts
+			(xy 88.9 50.8) (xy 104.14 50.8)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "84580195-1dc7-4e29-b7d1-e0a7c8fd5d41")
 	)
 	(wire
 		(pts
@@ -2398,6 +2679,16 @@
 	)
 	(wire
 		(pts
+			(xy 93.98 45.72) (xy 93.98 82.55)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "8f6914f7-8b96-4e96-b021-171ea796b094")
+	)
+	(wire
+		(pts
 			(xy 147.32 60.96) (xy 138.43 60.96)
 		)
 		(stroke
@@ -2415,6 +2706,26 @@
 			(type default)
 		)
 		(uuid "9bc4b7f7-d503-45f3-8461-202323f14e0c")
+	)
+	(wire
+		(pts
+			(xy 87.63 26.67) (xy 99.06 26.67)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "9c8ef6af-3d6c-4738-bef3-ea678a9190ab")
+	)
+	(wire
+		(pts
+			(xy 82.55 104.14) (xy 99.06 104.14)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "a0d7b3a1-7524-468c-9ac1-4f073900510d")
 	)
 	(wire
 		(pts
@@ -2458,23 +2769,13 @@
 	)
 	(wire
 		(pts
-			(xy 88.9 45.72) (xy 104.14 45.72)
+			(xy 123.19 29.21) (xy 87.63 29.21)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "b029a279-8a10-454f-9d79-e02a7a1a56ee")
-	)
-	(wire
-		(pts
-			(xy 88.9 53.34) (xy 99.06 53.34)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "b2cc0e6f-88a7-44d9-8798-f034648440ff")
+		(uuid "baf2ad9e-17c6-4f2c-8bf2-36c5cab696a2")
 	)
 	(wire
 		(pts
@@ -2488,17 +2789,7 @@
 	)
 	(wire
 		(pts
-			(xy 165.1 69.85) (xy 170.18 69.85)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "c11d80e0-aa90-419f-873b-a791b0752aa5")
-	)
-	(wire
-		(pts
-			(xy 165.1 69.85) (xy 165.1 115.57)
+			(xy 165.1 48.26) (xy 165.1 67.31)
 		)
 		(stroke
 			(width 0)
@@ -2508,23 +2799,13 @@
 	)
 	(wire
 		(pts
-			(xy 99.06 85.09) (xy 99.06 99.06)
+			(xy 99.06 85.09) (xy 99.06 104.14)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
 		(uuid "c8cfb923-7f39-4902-a38e-a0ccaeaaf4fe")
-	)
-	(wire
-		(pts
-			(xy 104.14 45.72) (xy 104.14 78.74)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "ca85228a-2f43-4e89-a7c1-6d9680ef1bfa")
 	)
 	(wire
 		(pts
@@ -2538,6 +2819,16 @@
 	)
 	(wire
 		(pts
+			(xy 123.19 35.56) (xy 123.19 29.21)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "d4e2b523-72aa-42d6-8daf-485eb0316909")
+	)
+	(wire
+		(pts
 			(xy 151.13 63.5) (xy 151.13 43.18)
 		)
 		(stroke
@@ -2545,6 +2836,16 @@
 			(type default)
 		)
 		(uuid "e281c368-8b92-435d-990c-9c38c6db0dc6")
+	)
+	(wire
+		(pts
+			(xy 99.06 48.26) (xy 99.06 85.09)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "e47df614-283c-4ce7-ace0-c452edd1cd24")
 	)
 	(wire
 		(pts
@@ -2558,17 +2859,7 @@
 	)
 	(wire
 		(pts
-			(xy 82.55 99.06) (xy 99.06 99.06)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "e88ae6be-d0ef-41da-95f9-eb28e844a213")
-	)
-	(wire
-		(pts
-			(xy 151.13 66.04) (xy 151.13 67.31)
+			(xy 151.13 66.04) (xy 151.13 69.85)
 		)
 		(stroke
 			(width 0)
@@ -2598,16 +2889,6 @@
 	)
 	(wire
 		(pts
-			(xy 102.87 48.26) (xy 102.87 81.28)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "efc7df8b-53eb-40d7-b08f-0eb4a2b6f81d")
-	)
-	(wire
-		(pts
 			(xy 170.18 48.26) (xy 165.1 48.26)
 		)
 		(stroke
@@ -2618,13 +2899,13 @@
 	)
 	(wire
 		(pts
-			(xy 151.13 67.31) (xy 170.18 67.31)
+			(xy 88.9 48.26) (xy 99.06 48.26)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "f7159931-4d80-46bb-9f8b-e7c0d67e62e9")
+		(uuid "fa52db35-75e3-49eb-b910-f1cb25698876")
 	)
 	(wire
 		(pts
@@ -2635,16 +2916,6 @@
 			(type default)
 		)
 		(uuid "fd04746c-18b3-4826-bdfc-0ae9913153e4")
-	)
-	(wire
-		(pts
-			(xy 99.06 53.34) (xy 99.06 85.09)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "fdafaace-3ba7-4877-9cf3-23550ab084ba")
 	)
 	(wire
 		(pts
@@ -2684,7 +2955,7 @@
 				)
 			)
 		)
-		(property "Value" "Picoblade to GPS"
+		(property "Value" "GPS"
 			(at 83.82 41.91 0)
 			(effects
 				(font
@@ -2974,7 +3245,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "RS232 to Display"
+		(property "Value" "Display"
 			(at 177.8 45.7199 0)
 			(effects
 				(font
@@ -3109,6 +3380,166 @@
 		)
 	)
 	(symbol
+		(lib_id "dk_Rectangular-Connectors-Headers-Male-Pins:22-23-2021")
+		(at 85.09 26.67 270)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "a248431b-a00c-47df-9276-e6b2f31d6de4")
+		(property "Reference" "J5"
+			(at 83.82 20.32 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "USB to BAT"
+			(at 83.82 22.86 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "digikey-footprints:PinHeader_1x2_P2.54mm_Drill1.02mm"
+			(at 90.17 31.75 0)
+			(effects
+				(font
+					(size 1.524 1.524)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "https://media.digikey.com/pdf/Data%20Sheets/Molex%20PDFs/A-6373-N_Series_Dwg_2010-12-03.pdf"
+			(at 92.71 31.75 0)
+			(effects
+				(font
+					(size 1.524 1.524)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+		(property "Description" "CONN HEADER VERT 2POS 2.54MM"
+			(at 85.09 26.67 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Digi-Key_PN" "WM4200-ND"
+			(at 95.25 31.75 0)
+			(effects
+				(font
+					(size 1.524 1.524)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+		(property "MPN" "22-23-2021"
+			(at 97.79 31.75 0)
+			(effects
+				(font
+					(size 1.524 1.524)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+		(property "Category" "Connectors, Interconnects"
+			(at 100.33 31.75 0)
+			(effects
+				(font
+					(size 1.524 1.524)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+		(property "Family" "Rectangular Connectors - Headers, Male Pins"
+			(at 102.87 31.75 0)
+			(effects
+				(font
+					(size 1.524 1.524)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+		(property "DK_Datasheet_Link" "https://media.digikey.com/pdf/Data%20Sheets/Molex%20PDFs/A-6373-N_Series_Dwg_2010-12-03.pdf"
+			(at 105.41 31.75 0)
+			(effects
+				(font
+					(size 1.524 1.524)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+		(property "DK_Detail_Page" "/product-detail/en/molex/22-23-2021/WM4200-ND/26667"
+			(at 107.95 31.75 0)
+			(effects
+				(font
+					(size 1.524 1.524)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+		(property "Description_1" "CONN HEADER VERT 2POS 2.54MM"
+			(at 110.49 31.75 0)
+			(effects
+				(font
+					(size 1.524 1.524)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+		(property "Manufacturer" "Molex"
+			(at 113.03 31.75 0)
+			(effects
+				(font
+					(size 1.524 1.524)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+		(property "Status" "Active"
+			(at 115.57 31.75 0)
+			(effects
+				(font
+					(size 1.524 1.524)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+		(pin "1"
+			(uuid "709ca6b1-3c86-4d6f-862d-759e7bf9caaf")
+		)
+		(pin "2"
+			(uuid "0ef44709-f980-429e-984b-b490799157b9")
+		)
+		(instances
+			(project ""
+				(path "/78b79bbc-e44a-4098-ae3b-b1371cb4fe97"
+					(reference "J5")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "power:+5V")
 		(at 148.59 21.59 0)
 		(unit 1)
@@ -3193,7 +3624,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "Flow Meter"
+		(property "Value" "Flow"
 			(at 177.8 68.5799 0)
 			(effects
 				(font
@@ -3354,7 +3785,7 @@
 				)
 			)
 		)
-		(property "Value" "Depth Sensor"
+		(property "Value" "Depth"
 			(at 78.74 95.25 90)
 			(effects
 				(font

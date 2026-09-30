@@ -182,6 +182,7 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
     <button id="fwstart" onclick="startFirmware()" hidden>Update now</button>
   </div>
   <div id="fwaction"></div>
+  <label style="font-size:.85rem;color:#aaa"><input type="checkbox" id="fwpre" onchange="setPrerelease(this.checked)"> Offer test builds (internal / debug releases)</label>
 </div>
 <div class="waypoints">
   <b>Waypoints</b>
@@ -701,6 +702,8 @@ function renderFirmware(s) {
   start.disabled = busy || !!s.blocked_reason;
   start.title = s.blocked_reason || '';
   document.getElementById('fwcheck').disabled = busy;
+  document.getElementById('fwpre').checked = !!s.prerelease_opt_in;
+  document.getElementById('fwpre').disabled = busy;
 
   const moving = s.state === 'display_transfer' || s.state === 'nav_download';
   document.getElementById('fwbar').hidden = !moving;
@@ -735,6 +738,10 @@ async function checkFirmware() {
   const msg = await r.text();
   await loadFirmware();
   act.textContent = msg;
+}
+async function setPrerelease(on) {
+  await fetch('/api/ota/prerelease?on=' + (on ? 1 : 0), { method: 'POST' });
+  checkFirmware();
 }
 async function startFirmware() {
   const latest = document.getElementById('fwavail').textContent;
@@ -1164,6 +1171,15 @@ static void handleOtaCheck() {
     server.send(200, "text/plain", ota::checkNow());
 }
 
+static void handleOtaPrerelease() {
+    if (!server.hasArg("on")) {
+        server.send(400, "text/plain", "missing on");
+        return;
+    }
+    ota::setPrereleaseOptIn(server.arg("on") == "1");
+    server.send(200, "text/plain", "OK");
+}
+
 static void handleOtaStart() {
     String err;
     if (!ota::start(err)) {
@@ -1230,6 +1246,7 @@ void init() {
     server.on("/api/ota/status", HTTP_GET,  handleOtaStatus);
     server.on("/api/ota/check",  HTTP_POST, handleOtaCheck);
     server.on("/api/ota/start",  HTTP_POST, handleOtaStart);
+    server.on("/api/ota/prerelease", HTTP_POST, handleOtaPrerelease);
     server.onNotFound([]() {
         Serial.printf("[Web] 404: %s %s\n", server.method() == HTTP_GET ? "GET" : "POST",
                       server.uri().c_str());

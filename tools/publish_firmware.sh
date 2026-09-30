@@ -3,6 +3,12 @@
 #
 #   tools/publish_firmware.sh 0.7.1 release-notes.md
 #   tools/publish_firmware.sh --dry-run 0.7.1 release-notes.md   # build + stage only
+#   tools/publish_firmware.sh 0.8.0-dev.1 release-notes.md       # internal/test build
+#
+# A SemVer pre-release suffix (-dev.1, -beta.2, -rc.1) publishes a test build:
+# it goes in the same manifest, but units only install it if "Offer test builds"
+# is ticked on tern.local (or they already run a test build). Number it after
+# the NEXT release, so the public release sorts above it and replaces it.
 #
 # Publishes to the host the firmware itself talks to (CLOUD_API_HOST in
 # src/config.h), into the dive-map checkout's data/firmware/dpv_nav -- the
@@ -42,7 +48,11 @@ API_HOST="$(sed -n 's/^constexpr const char\* CLOUD_API_HOST *= *"\(.*\)";.*/\1/
 [[ -n "$API_HOST" ]] || die "couldn't read CLOUD_API_HOST from src/config.h"
 : "${FIRMWARE_DEST:=${PUBLISH_SSH_USER:-djmcmath}@$API_HOST:divemap/data/firmware/dpv_nav}"
 
-[[ "$VERSION" =~ ^[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}$ ]] || die "version must be MAJOR.MINOR.PATCH, got '$VERSION'"
+[[ "$VERSION" =~ ^[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$ ]] \
+    || die "version must be MAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH-pre.N, got '$VERSION'"
+(( ${#VERSION} <= 15 )) || die "version '$VERSION' is longer than the 15 chars the device can hold"
+PRERELEASE=0
+[[ "$VERSION" == *-* ]] && PRERELEASE=1
 [[ -f "$NOTES" ]] || die "notes file not found: $NOTES"
 
 SRC_VERSION="$(sed -n 's/^#define FW_VERSION "\(.*\)"/\1/p' "$REPO/src/version.h")"
@@ -112,7 +122,13 @@ release = {
 }
 
 def key(v):
-    return tuple(int(p) for p in v.split("."))
+    # SemVer precedence: 0.8.0-dev.1 < 0.8.0-dev.2 < 0.8.0 < 0.8.1-dev.1.
+    core, _, pre = v.partition("-")
+    nums = tuple(int(p) for p in core.split("."))
+    if not pre:
+        return (nums, (1,))
+    ids = tuple((0, int(i), "") if i.isdigit() else (1, 0, i) for i in pre.split("."))
+    return (nums, (0,) + ids)
 
 # Newest first -- tern.local lists changes in this order.
 releases = sorted(releases + [release], key=lambda r: key(r["version"]), reverse=True)
@@ -140,4 +156,7 @@ else
 fi
 
 echo "==> Published $VERSION. Verify with:"
+if [[ $PRERELEASE -eq 1 ]]; then
+    echo "    NOTE: pre-release -- only units with \"Offer test builds\" ticked are offered this"
+fi
 echo "    curl -s https://$API_HOST/api/firmware/dpv_nav/manifest.json | head -20"

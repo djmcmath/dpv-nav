@@ -62,8 +62,16 @@ String checkNow();
 // otaBlockedReason() in nav_main.h.
 bool start(String& errOut);
 
-// {current_nav, current_display, latest, update_available, targets[], state,
-//  progress, error, message, blocked_reason, releases:[{version, date, changes[]}]}
+// Opt this unit in to pre-release (internal/test) builds -- versions with a
+// SemVer suffix like 0.8.0-dev.1, which are otherwise skipped in the manifest.
+// Persisted in NVS. A unit already running a pre-release sees them regardless.
+// Takes effect on the next checkNow().
+bool prereleaseOptIn();
+void setPrereleaseOptIn(bool on);
+
+// {current_nav, current_display, latest, update_available, prerelease_opt_in,
+//  targets[], state, progress, error, message, blocked_reason,
+//  releases:[{version, date, changes[]}]}
 // -- releases lists only versions newer than the older of the two boards.
 String statusJson();
 

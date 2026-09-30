@@ -2,6 +2,7 @@
 
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
+#include <Preferences.h>
 #include <Update.h>
 #include <WiFiClientSecure.h>
 #include <mbedtls/sha256.h>
@@ -25,6 +26,7 @@ static constexpr uint32_t CHECK_RETRY_MS     = 5UL * 60UL * 1000UL;  // after a 
 static constexpr uint32_t STALL_TIMEOUT_MS   = 20000;                // no bytes for this long = give up
 static constexpr uint32_t REBOOT_DELAY_MS    = 3000;                 // lets tern.local see "rebooting"
 static constexpr int      MANIFEST_MAX_BYTES = 32768;
+static constexpr char     PREFS_NS[]         = "ota";
 
 // Display transfer timing (the per-frame ACK timeout and retries are in ota_link.h).
 static constexpr uint32_t END_REPLY_TIMEOUT_MS  = 3000;   // wait for OTA_DONE after the end frame
@@ -88,21 +90,126 @@ static uint32_t  gNextHintMs   = 0;
 // Versions
 // ---------------------------------------------------------------------------
 
-// Strictly MAJOR.MINOR.PATCH -- matches the server's valid_version().
-static bool parseVersion(const char* s, unsigned v[3]) {
-    char tail;
-    return s && sscanf(s, "%u.%u.%u%c", &v[0], &v[1], &v[2], &tail) == 3;
+// MAJOR.MINOR.PATCH with an optional SemVer pre-release suffix ("0.8.0-dev.1")
+// -- matches the server's valid_version(), including its 15-char cap (every
+// version buffer here is char[16]). A suffix marks an internal/test build; see
+// acceptPrerelease(). *pre, if given, points at the suffix after '-', or at ""
+// for a public release.
+//
+// Firmware up to 0.7.18 parsed "%u.%u.%u%c" == 3, so it skips suffixed
+// releases in the manifest entirely -- those units are never offered one.
+static bool parseVersion(const char* s, unsigned v[3], const char** pre = nullptr) {
+    if (!s || !isdigit((unsigned char)s[0]) || strlen(s) > 15) return false;
+    int n = 0;
+    if (sscanf(s, "%u.%u.%u%n", &v[0], &v[1], &v[2], &n) != 3) return false;
+    if (strspn(s, "0123456789.") != (size_t)n) return false;  // %u alone takes signs/spaces
+    const char* tail = s + n;
+    if (*tail == '\0') {
+        if (pre) *pre = tail;
+        return true;
+    }
+    if (*tail != '-') return false;
+    tail++;
+    // Dot-separated, non-empty [0-9A-Za-z] identifiers.
+    bool idStart = true;
+    for (const char* p = tail; *p; p++) {
+        if (*p == '.') {
+            if (idStart) return false;
+            idStart = true;
+        } else if (isalnum((unsigned char)*p)) {
+            idStart = false;
+        } else {
+            return false;
+        }
+    }
+    if (idStart) return false;  // empty suffix or trailing '.'
+    if (pre) *pre = tail;
+    return true;
 }
 
-// <0, 0, >0 like strcmp. Callers only pass strings parseVersion() accepted.
+static bool isPrerelease(const char* s) {
+    unsigned v[3];
+    const char* pre = "";
+    return parseVersion(s, v, &pre) && pre[0];
+}
+
+// SemVer §11 precedence between two pre-release suffixes: identifier by
+// identifier, numeric ones numerically and below alphanumeric ones, and a
+// shorter list below a longer one it prefixes.
+static int comparePrerelease(const char* a, const char* b) {
+    while (*a && *b) {
+        size_t la = strcspn(a, "."), lb = strcspn(b, ".");
+        bool na = strspn(a, "0123456789") == la;
+        bool nb = strspn(b, "0123456789") == lb;
+        int c;
+        if (na && nb) {
+            unsigned long ia = strtoul(a, nullptr, 10), ib = strtoul(b, nullptr, 10);
+            c = ia == ib ? 0 : (ia < ib ? -1 : 1);
+        } else if (na != nb) {
+            c = na ? -1 : 1;
+        } else {
+            c = strncmp(a, b, la < lb ? la : lb);
+            if (c == 0 && la != lb) c = la < lb ? -1 : 1;
+        }
+        if (c != 0) return c < 0 ? -1 : 1;
+        a += la;
+        b += lb;
+        if (*a == '.') a++;
+        if (*b == '.') b++;
+    }
+    if (*a) return 1;
+    if (*b) return -1;
+    return 0;
+}
+
+// <0, 0, >0 like strcmp, in SemVer precedence: 0.8.0-dev.1 < 0.8.0-dev.2 <
+// 0.8.0 < 0.8.1-dev.1. Callers only pass strings parseVersion() accepted.
 static int compareVersions(const char* a, const char* b) {
     unsigned va[3] = {0, 0, 0}, vb[3] = {0, 0, 0};
-    parseVersion(a, va);
-    parseVersion(b, vb);
+    const char* pa = "";
+    const char* pb = "";
+    parseVersion(a, va, &pa);
+    parseVersion(b, vb, &pb);
     for (int i = 0; i < 3; i++) {
         if (va[i] != vb[i]) return va[i] < vb[i] ? -1 : 1;
     }
-    return 0;
+    if (!pa[0] || !pb[0]) {
+        // A public release outranks any pre-release of the same number.
+        return (pa[0] ? -1 : 0) + (pb[0] ? 1 : 0);
+    }
+    return comparePrerelease(pa, pb);
+}
+
+// Whether this unit is offered pre-release (internal/test) builds: the
+// tern.local opt-in, or it's already running one -- a unit on the test track
+// keeps seeing newer test builds until the next public release overtakes them.
+static bool gPrereleaseOptIn       = false;
+static bool gPrereleaseOptInLoaded = false;
+
+bool prereleaseOptIn() {
+    if (!gPrereleaseOptInLoaded) {
+        Preferences prefs;
+        if (prefs.begin(PREFS_NS, /*readOnly=*/true)) {
+            gPrereleaseOptIn = prefs.getBool("prerelease", false);
+            prefs.end();
+        }
+        gPrereleaseOptInLoaded = true;
+    }
+    return gPrereleaseOptIn;
+}
+
+void setPrereleaseOptIn(bool on) {
+    Preferences prefs;
+    if (prefs.begin(PREFS_NS, /*readOnly=*/false)) {
+        prefs.putBool("prerelease", on);
+        prefs.end();
+    }
+    gPrereleaseOptIn       = on;
+    gPrereleaseOptInLoaded = true;
+}
+
+static bool acceptPrerelease() {
+    return prereleaseOptIn() || isPrerelease(FW_VERSION);
 }
 
 static bool isSha256Hex(const char* s) {
@@ -241,11 +348,14 @@ static String runCheck() {
     JsonObject  newestObj;
     JsonDocument releases;
     JsonArray    out = releases.to<JsonArray>();
+    const bool   withPre = acceptPrerelease();
 
     for (JsonObject r : doc["releases"].as<JsonArray>()) {
         const char* v = r["version"] | "";
         unsigned tmp[3];
-        if (!parseVersion(v, tmp)) continue;
+        const char* pre = "";
+        if (!parseVersion(v, tmp, &pre)) continue;
+        if (pre[0] && !withPre) continue;  // internal/test build, not offered here
         if (!newest || compareVersions(v, newest) > 0) {
             newest = v;
             newestObj = r;
@@ -773,6 +883,7 @@ String statusJson() {
     doc["current_display"]  = displayFwVersion();  // "" = not reported (pre-OTA display)
     doc["latest"]           = gLatest;
     doc["update_available"] = updateAvailable();
+    doc["prerelease_opt_in"] = prereleaseOptIn();
     JsonArray targets = doc["targets"].to<JsonArray>();
     if (displayNeedsUpdate()) targets.add("display");
     if (navNeedsUpdate()) targets.add("nav");

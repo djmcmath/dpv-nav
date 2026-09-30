@@ -281,6 +281,8 @@ Runtime toggle states and estimated position are persisted to ESP32 NVS (Non-Vol
 | Show ETA vs speed | `disp_state` | `show_eta` | On toggle |
 | Imperial units | `disp_state` | `imperial` | On toggle |
 | True heading | `disp_state` | `true_heading` | On toggle |
+| Search datum X / Y / set (`nvs_nav::saveDatum()` / `clearDatum()`) | `nav_state` | `dat_x`, `dat_y`, `dat_set` | Whenever the datum is set or moved (the `saveDatum()` callers in nav_main.cpp) |
+| Offer OTA test builds (`ota::setPrereleaseOptIn()`) | `ota` | `prerelease` | On the tern.local checkbox |
 
 **On boot:** NVS state is loaded at the end of `setup()` in [nav_main.cpp](src/nav_main.cpp) (after WiFi/web server init). If NVS is empty (first boot), factory defaults are used. The restored position is applied via `nav::setPosition()`. Dive mode re-disables GPS and WiFi if it was active.
 
@@ -339,7 +341,8 @@ The display device includes a hierarchical menu system ([src/menu/menu.h](src/me
 ### Menu Structure
 ```
 MENU (root)
-├── Nav:     Select WP, Arrive WP, Mark, Op Mode
+├── Nav:     Select WP, Arrive WP, Mark, Current, Op Mode, Datum
+│            └── Datum: To datum, Datum was, Set here
 ├── Cal:     Baseline, Fill gaps, Mounted, Hdg cal, Speed cal
 ├── Config:  GPS, WiFi, Log, Water, Link acct
 ├── Display: Spd/ETA, Units, Heading
@@ -438,7 +441,7 @@ The menu structure is defined in `buildMenu()` in [src/menu/menu.cpp](src/menu/m
 4. Handle the command in `handleDisplayCmd()` in [src/nav_main.cpp](src/nav_main.cpp)
 5. Add the item to `buildMenu()` in [src/menu/menu.cpp](src/menu/menu.cpp), bumping that submenu's `count` (max `MAX_ITEMS` = 8 including the back item)
 
-**Next free values:** `menu::Action` 26, `DisplayCmd` 44, `cal_mode` 10. `cal_mode` is the
+**Next free values:** `menu::Action` 29, `DisplayCmd` 47, `cal_mode` 10. `cal_mode` is the
 one that bites — 0 quick mag cal, 1 full mag cal, 2/3/4 speed cal, 5 baseline, 6 mounted,
 7 gap-fill, 8/9 current hold. It is easy to read the code and conclude 7 is free; it is not.
 

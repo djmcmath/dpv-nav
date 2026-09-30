@@ -5,7 +5,7 @@ Built for Exploration
 
 Welcome to Tern: underwater navigation for technical divers who are tired of getting lost and wondering where they went.
 
-Nominally, this is a simple dead reckoning navigation system designed to be installed on DPVs (aka "scooters").  I'm making this open source, and attempting to use as many readily-available parts as possible to provide something that'll be accessible to most technical divers.  Some parts of the build are technical -- you'll need to manufacture and solder custom PCBs, flash firmware to ESP32s, and so on, but even if you can't solder or print parts, if you're in the technical diving community, odds are excellent you know someone who can.  
+Nominally, this is a simple dead reckoning navigation system designed to be installed on DPVs (aka "scooters").  I'm making this source-available, and attempting to use as many readily-available parts as possible to provide something that'll be accessible to most technical divers.  Some parts of the build are technical -- you'll need to manufacture and solder custom PCBs, flash firmware to ESP32s, and so on, but even if you can't solder or print parts, if you're in the technical diving community, odds are excellent you know someone who can.  
 
 Yes, it's vibe coded.  I used Claude Code to great effect, covering a ton of ground in a matter of months that I hadn't been able to get through on my own.  Say what you will about AI-supported coding, this project exists, and wouldn't without AI support.
 
@@ -61,3 +61,8 @@ On a Dive:
 -- Long straight runs at constant speed probably yield best results (need to test to confirm this).  If you're doing a lot of big circles, you're probably losing a little accuracy every time you do it.
 -- The unit assumes that if you're moving slowly, you're finning around the wreck and not covering ground.  So if the flow meter is showing <6m/min, it'll assume that heading is meaningless and you're not moving.  This is important if you decide to start finning along for some reason.  Or in other words, it's only really navigating if you're scooting.  If you stop scooting and start finning, the unit assumes you're stopped, and won't update position -- even if you're happily moving through the water.
 - When you arrive at the point where the navigator thinks you're at the wreck, you're probably close, but not there.  In Lake Washington, "close" is rarely the same as "close enough."  Plan on putting down a marker (weight, stake in the ground, etc) and running out a reel.  For planning purposes, you're probably within 10% of the total run length (e.g. if it's been 500m since the last fix, total error is probably <50m).  Experience tends to indicate that a 50m radius circle is too big to search all at once, so plan on conducting a spiral search, e.g. let out 5-7m of line, make a circle, let out another 5-7m, etc.
+
+License:
+- Tern DPV-Nav is source-available and free for noncommercial use.  Firmware and software are licensed under [PolyForm Noncommercial 1.0.0](LICENSES/PolyForm-Noncommercial-1.0.0.txt); hardware designs and documentation under [CC BY-NC-SA 4.0](LICENSES/CC-BY-NC-SA-4.0.txt).
+- Build one, modify it, share your improvements.  Commercial use (selling units or kits, build services, or use in a commercial product) requires a separate license: contact [contact@terndiving.com].
+- See [LICENSE.md](LICENSE.md) for which license covers what, [SAFETY.md](SAFETY.md) before you build or dive, and [CONTRIBUTING.md](CONTRIBUTING.md) if you'd like to contribute.

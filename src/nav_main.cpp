@@ -2176,9 +2176,14 @@ static void handleDisplayCmd() {
                     }
                     case DisplayCmd::SET_DATUM: {
                         nav::setDatum();
+                        // Also make it the target: the display then reads range
+                        // and bearing back to the line from here on, with no
+                        // further button presses at depth.
+                        nav::targetDatum();
+                        sysState = SystemState::NAVIGATING;
                         nav::Position d = nav::getDatum();
                         nvs_nav::saveDatum(d.x_m, d.y_m);
-                        Serial.printf("CMD: SET_DATUM x=%.1f y=%.1f\n", d.x_m, d.y_m);
+                        Serial.printf("CMD: SET_DATUM x=%.1f y=%.1f (now the target)\n", d.x_m, d.y_m);
                         // Logged as a plain Mark: the post-dive fix for "which
                         // wreck was this" is a landmark annotation on this row.
                         logMarkRow(d);

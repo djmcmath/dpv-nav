@@ -48,7 +48,7 @@ constexpr bool  DEFAULT_USE_GPS_POSITION = true;     // use GPS lat/lon as posit
 
 // Magnetic declination (degrees, positive = East, negative = West)
 // Look up your local value at https://www.ngdc.noaa.gov/geomag/declination.shtml
-constexpr float DEFAULT_DECLINATION_DEG  = 14.7f;   // ~14.7°E for southern Oregon (42°N, 122°W)
+constexpr float DEFAULT_DECLINATION_DEG  = 14.7f;   // ~14.7°E for Seattle area / Lake Washington, as of August 2026.
 
 // Display mode (compile-time): 0 = Navigation, 1 = Debug
 #ifndef DISPLAY_MODE

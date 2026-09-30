@@ -44,7 +44,8 @@ void snapToLatLon(float lat, float lon);
 // A remembered point -- typically the bottom of the line -- kept apart from the
 // navigation target, so selecting a waypoint never loses the way back.
 
-// Record the current position as the datum.
+// Record the current position as the datum. Does not touch the target; the
+// SET_DATUM command handler targets it separately.
 void setDatum();
 
 // Restore a saved datum (e.g. from NVS on boot).

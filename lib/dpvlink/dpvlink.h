@@ -398,7 +398,7 @@ enum class DisplayCmd : uint8_t {
     OTA_READY              = 41, // reply to an OTA_BEGIN packet: "ok", and "err" when refused (ota_link.h)
     OTA_DONE               = 42, // image received: "ok" = verified and installed, restarting; else "err"
     FINISH_CURRENT_HOLD    = 43, // diver ends a current hold early: average what was held and save it
-    SET_DATUM              = 44, // record the current DR position as the search datum (e.g. bottom of the line)
+    SET_DATUM              = 44, // record the current DR position as the search datum (e.g. bottom of the line) and target it
     NAV_TO_DATUM           = 45, // make the datum the navigation target
     DATUM_WAS              = 46, // retro-arrive: "the datum was this waypoint" (carries uint8 "idx" field)
 };

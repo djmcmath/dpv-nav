@@ -167,7 +167,9 @@ static void buildMenu() {
     // DATUM submenu (index 5) -- the search datum, typically the bottom of the
     // line. "To datum" is first because it is the one reached for in a hurry;
     // "Set here" is last because it overwrites the way back, and must never be
-    // the item the submenu opens on.
+    // the item the submenu opens on. It also targets the datum, so the whole
+    // at-depth workflow is one menu trip: the diver works reciprocals in their
+    // head and reads range/bearing back to the line off the nav screen.
     auto& dtm = submenus[5];
     strncpy(dtm.title, "Datum", MENU_LABEL_LEN);
     dtm.count = 4;  // 3 actions + ".."

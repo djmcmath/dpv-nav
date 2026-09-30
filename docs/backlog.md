@@ -220,8 +220,21 @@ Features and UX with a design already thought through.
   screen shows only the target. Getting back to the line means Datum > *To datum*, which
   replaces the target. Wanted: a small secondary range/bearing to the datum on the nav screen
   whenever one is set. That needs two new `NavPacket` fields, so it's a wire change on both
-  boards. *Set here* also has no confirm, and pressing it by accident overwrites the way back.
+  boards. Less pressing now that *Set here* also targets the datum (the at-depth workflow is
+  one menu trip, reciprocals done in the diver's head), but still wanted once a wreck waypoint
+  becomes the target. *Set here* also has no confirm, and pressing it by accident overwrites the way back.
   For now it's mitigated only by being the last item in the submenu.
+
+- [ ] **Magnetic declination is a hard-coded constant**
+
+  `DEFAULT_DECLINATION_DEG` in `config.h` (positive = East) is baked in at build time.
+  14.7°E suits Lake Washington (its comment still says southern Oregon). A unit taken
+  anywhere else shows MAG headings and MAG target bearings off by the difference. Wanted: look
+  it up from lat/lon. Options: a public geomagnetic API (NOAA's calculator needs a key),
+  computed on dive-map and synced like the cal, or the World Magnetic Model (WMM) evaluated on
+  the device from the last good GPS fix, which works offline. The value would live in NVS and
+  update at the surface. The WMM option needs no network, which suits a unit that is often
+  offline.
 
 - [ ] **Search patterns on the datum (concept, not decided)**
 

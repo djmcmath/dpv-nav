@@ -13,8 +13,8 @@ constexpr int GPS_ENABLE_PIN = 32;  // HIGH = GPS on, LOW = GPS off (fix retaine
 // Nav device uses GPIO25/26 (GPS occupies 16/17).
 // Display device uses GPIO16/17 (no GPS on display board).
 #ifdef BUILD_NAV
-constexpr int LINK_TX_PIN = 25; //connect to DISPLAY's RX pin 16, pin 25 is aka A1 and DAC1.
-constexpr int LINK_RX_PIN = 26; //connect to DISPLAY's TX pin 17, pin 26 is aka A0 and DAC2
+constexpr int LINK_TX_PIN = 25; //connect to DISPLAY's RX pin 16 (labeled RX), pin 25 (labeled A1)
+constexpr int LINK_RX_PIN = 26; //connect to DISPLAY's TX pin 17 (labeled TX), pin 26 (labeled A0)
 #else  // BUILD_DISPLAY
 constexpr int LINK_TX_PIN = 17;
 constexpr int LINK_RX_PIN = 16;

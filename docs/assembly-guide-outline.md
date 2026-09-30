@@ -217,14 +217,23 @@ Note that the battery wires should be as short as possible. They carry enough cu
 
 ### 7.1 3D printed parts
 - [[ Material: PETG vs ASA vs nylon — pick and justify (water, UV, creep under
-     clamp load, temperature in a black housing in the sun). ]]
+     clamp load, temperature in a black housing in the sun).
+     Material selection matters less than you might think.  None of the 3D printed parts are particularly load-bearing, nothing is a pressure boundary.  Print what you've got, then verify the finished work fits correctly into the designed space.  The most structurally significant components are the mounts to the scooter tube, but even those are more for spacing and aligning than actual structure. ]]
 - [[ Print settings table: layer height, walls, infill, supports, orientation.
      Orientation matters most for the structural mounts — call it out per part. ]]
 - [[ Part list: filename | qty | material | structural or cosmetic | notes. ]]
+- Internals of GoPro housing for display
+- Internals of BlueRobotics housing to mount the board
+- Flow-meter potting holder
+- BR housing to scooter tube mounts
 - [[ Group by: DPV mounts, housing internals (sleds/trays/endcap carriers),
      flow meter potting mold/housing. ]]
 - [[ Post-processing: reaming holes, heat-set inserts, test-fit before you
      commit. ]]
+     - Display housing: the alignment of the GoPro housing buttons is the single most critical and failure prone portion of this assembly.  Put it all together, then visually confirm that the buttons in the housing line up with the installed internal mechanical buttons.  **include a picture here**  If they don't line up, the buttons will not work, and you won't be able to use the device.  Figure out what's keeping them from aligning and adjust your print accordingly.
+     - The second thing work getting right on the display housing is the placement of the display itself.  On my printer, with all its various inaccuracies, the front piece prints just right so that the display *clicks* neatly into place.  If your printer is more true-to-form, you may need to remove a little material, or modify the model to add a little material to the display mounts.
+     - The BlueRobotics housing adapter calls for a pair of heat-set inserts.  Installation is simple: Heat up a soldering iron, place an insert on the end of the iron (without burning yourself), and press the insert into the appropriate place in the mounting structure (without burning yourself). Be careful to ensure that the inserts go in straight -- a cockeyed insert means a cockeyed bolt, which won't hold the board correctly.
+     - The tube-to-scooter alignment portion wil probably require removal of any support structure which was printed, and, depending on how well your printer renders detail, may require some shaving or sanding to ensure they fit flush together.  With my elderly Taz3 printer, it takes a fair bit of coercion to get the bits to align perfectly.  This is important to get right: slop here means slop between the alignment of the direction of scooter travel and the IMU.  As long as this is consistent, you're good.  Where you get into trouble is if this is sloppy; that's hard to calibrate around later.
 
 ### 7.2 Milled housings — 🔁 milled variant only
 [[ Delrin stock spec, workholding, toolpath notes, o-ring groove dimensions
@@ -238,6 +247,11 @@ Note that the battery wires should be as short as possible. They carry enough cu
    choice and mix ratio, degassing, pour technique to avoid voids, cure time
    and temperature, what a void does to you at 150 ft, how to inspect,
    what a failed pot looks like and when to scrap it. ]]
+   - Potting is simpler than many manufacturers make it sound.  "Fully potted" carries a significantly higher price tag, but all they're really doing is covering the thing with epoxy.
+   - If you want to be super-fancy, you can deal with molded pottings and expensive epoxies that are designed for exotic purposes.  In reality, you'll find that you need an epoxy that will bond effectively to whatever your flowmeter is made out of.  In my case, this was just ABS plastic, which means bonding was incredibly easy -- wipe it down with acetone, then just epoxy.
+   - The key is to get a solid, consistent, thick layer of epoxy over any part of the flowmeter housing which could allow water inside.  Depending on which model you get, that probably means primarily the place where the wires come in to the housing, as well as the wiring path itself.
+   - The best path is probably to mix a series of batches of epoxy, rather than attempting to do it all at once.  Put a little epoxy in the bottom of the box, let it harden, then press the flowmeter into it.  Clamp it in place, then slowly, over a series of batches, fill the space around the housing with epoxy.
+   - When complete, you should imagine that you're water trying to find a path to the electricity.  You're creative and patient and strong.  If you can figure out a way to get to the electricity, water will be able to also.  Give up and re-pot until you're sure it'll work. 
 
 > **✅ Checkpoint** — all parts printed/milled, test-fit dry, potting cured and
 > inspected. Nothing electronic has been touched yet.
@@ -259,7 +273,7 @@ Note that the battery wires should be as short as possible. They carry enough cu
    rather than solder down (the ESP32 module, sensor breakouts) so it can be
    swapped without a rework station. ]]
 [[ Photos per board at the "done" state. ]]
-[[ Special case: soldering wire junctions. ]]
+[[ Special case: soldering wire junctions ]]
 
 ### 8.3 Bench smoke test — before anything goes near a housing
 [[ Power up on the bench with a current-limited supply. Expected rail voltages
@@ -311,7 +325,7 @@ Note that the battery wires should be as short as possible. They carry enough cu
    required, torque, and the fact that §10's test is what qualifies it. ]]
 
 ### 9.6 Power wiring notes
-[[ The most important power note: The referenced battery pack from Amazon has the JST plug polarity reversed from what the ESP32 expects.  Historically, when I've made this mistake, it hasn't fried the board, but it seems like it ought to.  You will probably need to swap the polarity on the JST connector (switch black for red wires) before plugging it in.  Double check with the enclosed diagram and a voltmeter to make sure you've gotten it right. ]]
+[[ The most important power note: The referenced battery pack from Amazon has the JST plug polarity reversed from what the ESP32 expects.  Historically, when I've made this mistake, it hasn't fried the board, but Adafruit repeatedly notes that it will.  You will probably need to swap the polarity on the JST connector (switch black for red wires) before plugging it in.  Double check with the enclosed diagram and a voltmeter to make sure you've gotten it right. ]]
 
 > **✅ Checkpoint** — full harness built, continuity-checked end to end, no
 > shorts to ground or between rails. Power-on test with the harness attached,
@@ -345,6 +359,13 @@ Note that the battery wires should be as short as possible. They carry enough cu
 [[ This is the gate between "assembled" and "wet," and it belongs before
    firmware. Do not let anyone skip it. ]]
 
+- Before putting any electronics in housings, you need to test your work against leaks.  Do a careful assembly of everything: hand-check all the glands for tightness, clean and lubricate every o-ring and seating surface.
+- A vacuum check is a good first test.  Plug in your MityVac, draw 10-15 inches of mercury, mark what you've pulled it to, and step away for 5 minutes.  It shouldn't drop at all; any drop is indication that **something** is leaking.
+- For some leaks, the best thing is just to drop it all into the deepest bucket of whatever you have available.  You may need to attach a lead weight to ensure it sinks.
+- First: Just look for bubbles.  Some bubbling around the outside for a moment is often normal, but it should slow, then stop, fairly quickly.  Then you're looking for a consistent stream of bubbles -- that'll indicate a rapid leak.  
+- Second: Leave it overnight.  That's not enough to guarantee that it won't leak in practice at depth, but it gives you confidence that there isn't a slow leak in the shallows, at least.
+- Third: The best possible thing at this point is to take it on a dive.  Mount it, with no electronics, and take it to depth.  In my experience, if one of these housings is going to fail at technical depths, it'll generally do so at recreational depths.  Or in other words, you don't need to go to 100m to discover that it leaks at 20m.
+- Finally: You've demonstrated that you can build a housing that stays dry once.  Now: before every dive, clean the seating surfaces, lubricate the o-rings, double-check the glands, and do a vacuum test.  Murphy says that if you don't vacuum check, you'll 100% leak on that dive.
 - [[ Vacuum test procedure: pull to spec, hold time, acceptable leak-down.
      Give actual numbers. ]]
 - [[ What to do if it doesn't hold — bisecting which seal is leaking. ]]

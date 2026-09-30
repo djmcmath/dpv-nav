@@ -28,6 +28,14 @@ void save(const State& s);
 // Save only position fields (called on a configurable interval, not every loop tick).
 void savePosition(float x_m, float y_m);
 
+// Search datum (local XY). Kept out of State so a full save() for some other
+// toggle can never clobber or resurrect it. Saved the moment it changes: the
+// datum is the way back to the line, and a brownout must not lose it.
+void saveDatum(float x_m, float y_m);
+void clearDatum();
+// Returns false if no datum is stored (or the stored one is non-finite).
+bool loadDatum(float& x_m, float& y_m);
+
 }  // namespace nvs_nav
 
 namespace nvs_disp {

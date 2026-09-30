@@ -14,6 +14,9 @@ static float cur_y = 0.0f;   // meters north of baseline
 static float home_x = 0.0f;
 static float home_y = 0.0f;
 static bool  homeSet = false;
+static float datum_x = 0.0f;
+static float datum_y = 0.0f;
+static bool  datumSet = false;
 static bool  useGps  = true;
 
 // Compute meters-per-degree-longitude at a given latitude
@@ -32,6 +35,7 @@ void init(float baselineLat, float baselineLon) {
     home_x = 0.0f;
     home_y = 0.0f;
     homeSet = false;
+    datumSet = false;
 }
 
 void setHome() {
@@ -75,8 +79,64 @@ void setPosition(float x_m, float y_m) {
 }
 
 void snapToLatLon(float lat, float lon) {
-    cur_x = (lon - baseLon) * mPerDegLon;
-    cur_y = (lat - baseLat) * M_PER_DEG_LAT;
+    float nx = (lon - baseLon) * mPerDegLon;
+    float ny = (lat - baseLat) * M_PER_DEG_LAT;
+    if (datumSet) {
+        datum_x += nx - cur_x;
+        datum_y += ny - cur_y;
+    }
+    cur_x = nx;
+    cur_y = ny;
+}
+
+void setDatum() {
+    datum_x = cur_x;
+    datum_y = cur_y;
+    datumSet = true;
+}
+
+void setDatumXY(float x_m, float y_m) {
+    datum_x = x_m;
+    datum_y = y_m;
+    datumSet = true;
+}
+
+void clearDatum() {
+    datumSet = false;
+    datum_x = 0.0f;
+    datum_y = 0.0f;
+}
+
+bool hasDatum() {
+    return datumSet;
+}
+
+Position getDatum() {
+    Position p;
+    p.x_m = datum_x;
+    p.y_m = datum_y;
+    p.lat = baseLat + datum_y / M_PER_DEG_LAT;
+    p.lon = baseLon + datum_x / mPerDegLon;
+    return p;
+}
+
+bool retroArrive(float lat, float lon) {
+    if (!datumSet) return false;
+    float nx = (lon - baseLon) * mPerDegLon;
+    float ny = (lat - baseLat) * M_PER_DEG_LAT;
+    cur_x += nx - datum_x;
+    cur_y += ny - datum_y;
+    datum_x = nx;
+    datum_y = ny;
+    return true;
+}
+
+bool targetDatum() {
+    if (!datumSet) return false;
+    home_x = datum_x;
+    home_y = datum_y;
+    homeSet = true;
+    return true;
 }
 
 Position getPosition() {

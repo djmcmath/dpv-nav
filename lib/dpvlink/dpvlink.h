@@ -398,6 +398,9 @@ enum class DisplayCmd : uint8_t {
     OTA_READY              = 41, // reply to an OTA_BEGIN packet: "ok", and "err" when refused (ota_link.h)
     OTA_DONE               = 42, // image received: "ok" = verified and installed, restarting; else "err"
     FINISH_CURRENT_HOLD    = 43, // diver ends a current hold early: average what was held and save it
+    SET_DATUM              = 44, // record the current DR position as the search datum (e.g. bottom of the line)
+    NAV_TO_DATUM           = 45, // make the datum the navigation target
+    DATUM_WAS              = 46, // retro-arrive: "the datum was this waypoint" (carries uint8 "idx" field)
 };
 
 // ---------------------------------------------------------------------------
@@ -489,11 +492,12 @@ size_t displayCaptureHdgPointToBytes(float target_deg, char* buf, size_t bufLen)
 // Returns 0.0 if the "tgt" field is absent.
 float parseCaptureHdgPoint(const char* buf, size_t len);
 
-// Serialize SELECT_WAYPOINT or ARRIVE_WAYPOINT with the waypoint index.
+// Serialize SELECT_WAYPOINT, ARRIVE_WAYPOINT or DATUM_WAS with the waypoint index.
 size_t displaySelectWaypointToBytes(uint8_t idx, char* buf, size_t bufLen);
 size_t displayArriveWaypointToBytes(uint8_t idx, char* buf, size_t bufLen);
+size_t displayDatumWasToBytes(uint8_t idx, char* buf, size_t bufLen);
 
-// Extract the waypoint index from a SELECT_WAYPOINT or ARRIVE_WAYPOINT buffer.
+// Extract the waypoint index from a SELECT_WAYPOINT, ARRIVE_WAYPOINT or DATUM_WAS buffer.
 // Returns 0 if the "idx" field is absent.
 uint8_t parseWaypointIndex(const char* buf, size_t len);
 

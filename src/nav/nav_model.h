@@ -35,8 +35,35 @@ void setUseGps(bool enable);
 void setPosition(float x_m, float y_m);
 
 // Snap current position to a lat/lon without being gated by the GPS-enable flag.
-// Used for "arrived at waypoint" to correct accumulated DR error.
+// Used for "arrived at waypoint" to correct accumulated DR error. A set datum
+// is shifted by the same offset: a snap corrects the frame, and the datum was
+// recorded in that same (wrong) frame.
 void snapToLatLon(float lat, float lon);
+
+// --- Search datum ------------------------------------------------------------
+// A remembered point -- typically the bottom of the line -- kept apart from the
+// navigation target, so selecting a waypoint never loses the way back.
+
+// Record the current position as the datum.
+void setDatum();
+
+// Restore a saved datum (e.g. from NVS on boot).
+void setDatumXY(float x_m, float y_m);
+
+void clearDatum();
+bool hasDatum();
+
+// Datum in local XY and lat/lon. Meaningless unless hasDatum().
+Position getDatum();
+
+// "The datum was really at this lat/lon." Translates the current position by
+// the same offset that moves the datum there, so it is valid from anywhere,
+// not just while standing on the datum. Repeatable: the last call wins.
+// Returns false (and changes nothing) if no datum is set.
+bool retroArrive(float lat, float lon);
+
+// Make the datum the navigation target. Returns false if no datum is set.
+bool targetDatum();
 
 // Current position in local XY and lat/lon.
 Position getPosition();

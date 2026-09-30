@@ -96,6 +96,37 @@ void savePosition(float x_m, float y_m) {
     prefs.end();
 }
 
+void saveDatum(float x_m, float y_m) {
+    // Same guard as savePosition(): a NaN datum would point home at nothing.
+    if (!isfinite(x_m) || !isfinite(y_m)) return;
+    Preferences prefs;
+    if (!prefs.begin(NAV_NS, /*readOnly=*/false)) return;
+    prefs.putFloat("dat_x", x_m);
+    prefs.putFloat("dat_y", y_m);
+    prefs.putBool ("dat_set", true);
+    prefs.end();
+}
+
+void clearDatum() {
+    Preferences prefs;
+    if (!prefs.begin(NAV_NS, /*readOnly=*/false)) return;
+    prefs.putBool("dat_set", false);
+    prefs.end();
+}
+
+bool loadDatum(float& x_m, float& y_m) {
+    Preferences prefs;
+    if (!prefs.begin(NAV_NS, /*readOnly=*/true)) return false;
+    bool set = prefs.getBool("dat_set", false);
+    float x  = prefs.getFloat("dat_x", 0.0f);
+    float y  = prefs.getFloat("dat_y", 0.0f);
+    prefs.end();
+    if (!set || !isfinite(x) || !isfinite(y)) return false;
+    x_m = x;
+    y_m = y;
+    return true;
+}
+
 }  // namespace nvs_nav
 
 // ---------------------------------------------------------------------------

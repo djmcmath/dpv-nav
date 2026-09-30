@@ -28,6 +28,7 @@ static bool gHdgCalPending          = false;
 static bool gPowerOffPending        = false;
 static bool gWaypointSelectPending  = false;
 static bool gWaypointArrivePending  = false;
+static bool gDatumWasPending        = false;
 static bool gCloudLinkPending       = false;
 static bool gCurrentHoldPending     = false;
 
@@ -118,7 +119,7 @@ static void invalidateMenuCache() {
 // Menu definition -- the only one. Change the menu here and reflash (or OTA).
 // ---------------------------------------------------------------------------
 static void buildMenu() {
-    submenuCount = 5;
+    submenuCount = 6;
 
     // Root menu (index 0)
     //
@@ -147,7 +148,7 @@ static void buildMenu() {
     // NAV submenu (index 1)
     auto& nav = submenus[1];
     strncpy(nav.title, "Nav", MENU_LABEL_LEN);
-    nav.count = 6;  // 5 items + back
+    nav.count = 7;  // 6 items + back
     strncpy(nav.items[0].label, "Select WP", MENU_LABEL_LEN);
     nav.items[0].action = Action::NAV_SELECT_WAYPOINT; nav.items[0].submenuIdx = -1;
     strncpy(nav.items[1].label, "Arrive WP", MENU_LABEL_LEN);
@@ -158,8 +159,26 @@ static void buildMenu() {
     nav.items[3].action = Action::NAV_CURRENT; nav.items[3].submenuIdx = -1;
     strncpy(nav.items[4].label, "Op Mode", MENU_LABEL_LEN);
     nav.items[4].action = Action::NAV_OP_MODE; nav.items[4].submenuIdx = -1;
-    strncpy(nav.items[5].label, "..", MENU_LABEL_LEN);
-    nav.items[5].action = Action::BACK; nav.items[5].submenuIdx = -1;
+    strncpy(nav.items[5].label, "Datum", MENU_LABEL_LEN);
+    nav.items[5].action = Action::SUBMENU; nav.items[5].submenuIdx = 5;
+    strncpy(nav.items[6].label, "..", MENU_LABEL_LEN);
+    nav.items[6].action = Action::BACK; nav.items[6].submenuIdx = -1;
+
+    // DATUM submenu (index 5) -- the search datum, typically the bottom of the
+    // line. "To datum" is first because it is the one reached for in a hurry;
+    // "Set here" is last because it overwrites the way back, and must never be
+    // the item the submenu opens on.
+    auto& dtm = submenus[5];
+    strncpy(dtm.title, "Datum", MENU_LABEL_LEN);
+    dtm.count = 4;  // 3 actions + ".."
+    strncpy(dtm.items[0].label, "To datum", MENU_LABEL_LEN);
+    dtm.items[0].action = Action::NAV_DATUM_GOTO; dtm.items[0].submenuIdx = -1;
+    strncpy(dtm.items[1].label, "Datum was", MENU_LABEL_LEN);
+    dtm.items[1].action = Action::NAV_DATUM_WAS; dtm.items[1].submenuIdx = -1;
+    strncpy(dtm.items[2].label, "Set here", MENU_LABEL_LEN);
+    dtm.items[2].action = Action::NAV_DATUM_SET; dtm.items[2].submenuIdx = -1;
+    strncpy(dtm.items[3].label, "..", MENU_LABEL_LEN);
+    dtm.items[3].action = Action::BACK; dtm.items[3].submenuIdx = -1;
 
     // CAL submenu (index 2)
     auto& cal = submenus[2];
@@ -306,6 +325,18 @@ static void executeAction(Action act) {
         case Action::NAV_MARK:
             if (gSendCmd) gSendCmd(DisplayCmd::MARK_POSITION);
             Serial.println("[MENU] MARK_POSITION");
+            break;
+        case Action::NAV_DATUM_GOTO:
+            if (gSendCmd) gSendCmd(DisplayCmd::NAV_TO_DATUM);
+            Serial.println("[MENU] NAV_TO_DATUM");
+            break;
+        case Action::NAV_DATUM_WAS:
+            gDatumWasPending = true;
+            Serial.println("[MENU] NAV_DATUM_WAS: entering waypoint picker");
+            break;
+        case Action::NAV_DATUM_SET:
+            if (gSendCmd) gSendCmd(DisplayCmd::SET_DATUM);
+            Serial.println("[MENU] SET_DATUM");
             break;
         case Action::CAL_BASELINE:
             if (gSendCmd) gSendCmd(DisplayCmd::START_BASELINE_CAL);
@@ -725,6 +756,14 @@ bool isPendingWaypointArrive() {
 
 void clearWaypointArrivePending() {
     gWaypointArrivePending = false;
+}
+
+bool isPendingDatumWas() {
+    return gDatumWasPending;
+}
+
+void clearDatumWasPending() {
+    gDatumWasPending = false;
 }
 
 bool isPendingCloudLink() {

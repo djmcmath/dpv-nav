@@ -221,6 +221,18 @@ size_t displayArriveWaypointToBytes(uint8_t idx, char* buf, size_t bufLen) {
     return n + 1;
 }
 
+size_t displayDatumWasToBytes(uint8_t idx, char* buf, size_t bufLen) {
+    JsonDocument doc;
+    doc["cmd"] = static_cast<uint8_t>(DisplayCmd::DATUM_WAS);
+    doc["idx"] = idx;
+
+    size_t n = serializeJson(doc, buf, bufLen - 1);
+    if (n == 0 || n >= bufLen - 1) return 0;
+    buf[n]     = '\n';
+    buf[n + 1] = '\0';
+    return n + 1;
+}
+
 size_t displayLinkHelloToBytes(const char* fwVersion, char* buf, size_t bufLen) {
     JsonDocument doc;
     doc["cmd"] = static_cast<uint8_t>(DisplayCmd::LINK_HELLO);

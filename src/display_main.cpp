@@ -233,6 +233,7 @@ enum class WaypointUiPhase : uint8_t {
     NONE,    // not in waypoint UI
     SELECT,  // user choosing which waypoint to navigate TO
     ARRIVE,  // user choosing which waypoint they have ARRIVED AT
+    DATUM_WAS, // user choosing which waypoint the search datum really WAS
 };
 static WaypointUiPhase gWaypointUiPhase = WaypointUiPhase::NONE;
 static uint8_t         gWaypointUiIdx  = 0;
@@ -290,6 +291,7 @@ static void sendCloudCalRespond(DisplayCmd cmd, const char* calId);
 static void sendSpeedCalStart(uint16_t dist_ft);
 static void sendWaypointSelectCmd(uint8_t idx);
 static void sendWaypointArriveCmd(uint8_t idx);
+static void sendDatumWasCmd(uint8_t idx);
 static void renderWaypointUi();
 
 // One place decides which cal screen a CalProgressPacket gets. There are two
@@ -543,6 +545,15 @@ void loop() {
             gWpPrevTitle[0]  = '\0';
             gWpPrevName[0]   = '\0';
             Serial.println("[WP] entering Arrive Waypoint UI");
+        }
+
+        if (menu::isPendingDatumWas()) {
+            menu::clearDatumWasPending();
+            gWaypointUiPhase = WaypointUiPhase::DATUM_WAS;
+            gWaypointUiIdx   = 0;
+            gWpPrevTitle[0]  = '\0';
+            gWpPrevName[0]   = '\0';
+            Serial.println("[WP] entering Datum Was UI");
         }
 
         if (menu::isPendingCloudLink()) {
@@ -1159,11 +1170,16 @@ static void sendWaypointArriveCmd(uint8_t idx) {
     if (n > 0) Serial1.write(wpTxBuf, n);
 }
 
+static void sendDatumWasCmd(uint8_t idx) {
+    size_t n = displayDatumWasToBytes(idx, wpTxBuf, sizeof(wpTxBuf));
+    if (n > 0) Serial1.write(wpTxBuf, n);
+}
+
 // ---------------------------------------------------------------------------
 // Render waypoint selection / arrival UI (full-screen takeover).
 // Uses incremental update — only redraws when content changes.
 // Layout (320×240):
-//   y=10  title   "NAV TO:" or "ARRIVED AT:" (size 2, cyan)
+//   y=10  title   "NAV TO:", "ARRIVED AT:" or "DATUM WAS:" (size 2, cyan)
 //   y=60  wp name (size 3, yellow, padded to 10 chars)
 //   y=120 counter "n/N" (size 2, white)
 //   y=200 hint    (size 1, gray)
@@ -1174,9 +1190,9 @@ static void renderWaypointUi() {
     constexpr uint16_t CLR_WHITE  = 0xFFFF;
     constexpr uint16_t CLR_GRAY   = 0x7BEF;
 
-    const char* title = (gWaypointUiPhase == WaypointUiPhase::SELECT)
-                        ? "NAV TO:     "
-                        : "ARRIVED AT: ";
+    const char* title = (gWaypointUiPhase == WaypointUiPhase::SELECT) ? "NAV TO:     "
+                      : (gWaypointUiPhase == WaypointUiPhase::ARRIVE) ? "ARRIVED AT: "
+                      :                                                 "DATUM WAS:  ";
 
     if (strcmp(title, gWpPrevTitle) != 0) {
         strncpy(gWpPrevTitle, title, sizeof(gWpPrevTitle) - 1);
@@ -1516,9 +1532,13 @@ static bool handleModalButtons() {
                     sendWaypointSelectCmd(gWaypointUiIdx);
                     Serial.printf("[WP] SELECT waypoint idx=%u name=%s\n",
                                   gWaypointUiIdx, gWpCache[gWaypointUiIdx].name);
-                } else {
+                } else if (gWaypointUiPhase == WaypointUiPhase::ARRIVE) {
                     sendWaypointArriveCmd(gWaypointUiIdx);
                     Serial.printf("[WP] ARRIVE waypoint idx=%u name=%s\n",
+                                  gWaypointUiIdx, gWpCache[gWaypointUiIdx].name);
+                } else {
+                    sendDatumWasCmd(gWaypointUiIdx);
+                    Serial.printf("[WP] DATUM_WAS waypoint idx=%u name=%s\n",
                                   gWaypointUiIdx, gWpCache[gWaypointUiIdx].name);
                 }
             }

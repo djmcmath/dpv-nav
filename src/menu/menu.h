@@ -56,6 +56,9 @@ enum class Action : uint8_t {
     CAL_GAPFILL          = 23,  // guided gap-fill pass over the cells the server flagged
     BACK                 = 24,  // leave submenu, or close the menu at root
     NAV_CURRENT          = 25,  // 60 s station-keeping measurement of the current
+    NAV_DATUM_GOTO       = 26,  // make the search datum the navigation target
+    NAV_DATUM_WAS        = 27,  // open waypoint picker: "the datum was this waypoint"
+    NAV_DATUM_SET        = 28,  // record the current position as the search datum
 };
 
 // ---------------------------------------------------------------------------
@@ -158,6 +161,10 @@ void clearWaypointSelectPending();
 // Cleared by clearWaypointArrivePending().
 bool isPendingWaypointArrive();
 void clearWaypointArrivePending();
+
+// True if the diver chose Nav > Datum > Datum was... (open the waypoint picker).
+bool isPendingDatumWas();
+void clearDatumWasPending();
 
 // Returns true if the user just selected "Link acct" — display should send
 // DisplayCmd::LINK_ACCOUNT and enter the cloud account-link UI.

@@ -11,4 +11,4 @@
 // dot-separated [0-9A-Za-z] runs. Units only install test builds when opted in
 // on tern.local, or when already running one. Number a test build after the
 // NEXT release so the public one outranks it.
-#define FW_VERSION "0.7.18"
+#define FW_VERSION "0.7.19"

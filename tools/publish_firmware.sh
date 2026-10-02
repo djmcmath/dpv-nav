@@ -5,6 +5,8 @@
 #   tools/publish_firmware.sh --dry-run 0.7.1 release-notes.md   # build + stage only
 #   tools/publish_firmware.sh 0.8.0-dev.1 release-notes.md       # internal/test build
 #
+# Note: the version must match src/version.h, and the release-notes.md file must exist.
+#
 # A SemVer pre-release suffix (-dev.1, -beta.2, -rc.1) publishes a test build:
 # it goes in the same manifest, but units only install it if "Offer test builds"
 # is ticked on tern.local (or they already run a test build). Number it after

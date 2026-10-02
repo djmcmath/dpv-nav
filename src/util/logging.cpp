@@ -28,6 +28,18 @@ static char     gLogPath[LOG_PATH_MAX] = "";
 static constexpr size_t FREE_SPACE_THRESHOLD = 32768;  // 32 KB minimum free
 static constexpr const char* LOG_DIR = "/logs";
 
+// Rolling-log cleanup (cleanupOldLogs() below) prefers to delete a log that
+// never recorded a dive -- just a GPS-only track, e.g. left logging after the
+// diver forgot to stop -- over one that did, even when the dive log is older.
+// depth_m is column 13 (0-based 12) in every schema; LOW/MID/HIGH share that
+// prefix (see writeHeader()). A unit with no depth sensor logs depth_m as 0.0
+// for every row regardless of level (see nav_main.cpp's depth::isPresent()
+// checks), so every log on it reads as non-dive and cleanup quietly falls
+// back to today's plain oldest-first order -- not a regression, just no
+// signal to prioritize on.
+static constexpr float NON_DIVE_DEPTH_THRESHOLD_M = 2.0f;
+static constexpr int   DEPTH_COLUMN_INDEX         = 12;
+
 // An unsynced ESP32 sits near epoch 0; any time >= Nov 2023 came from a real
 // source (GPS or NTP). Used both for the date prefix below and for the
 // local_time column.
@@ -57,12 +69,11 @@ static void todayPrefix(char* out, size_t len) {
 
 // One pass over /logs.
 struct LogScan {
-    char     oldest[LOG_NAME_MAX] = "";  // oldest name by log_names::olderThan ("" = empty dir)
     char     newestPrefix[log_names::PREFIX_LEN + 1] = "";  // highest date prefix present ("" = no dated logs)
     uint16_t highestSeq           = 0;   // highest NNN under `seqPrefix` (0 = none)
 };
 
-// `seqPrefix` may be nullptr when the caller only wants oldest/newestPrefix.
+// `seqPrefix` may be nullptr when the caller only wants newestPrefix.
 static void scanLogDir(LogScan& out, const char* seqPrefix) {
     File dir = LittleFS.open(LOG_DIR);
     if (!dir || !dir.isDirectory()) return;
@@ -70,9 +81,6 @@ static void scanLogDir(LogScan& out, const char* seqPrefix) {
     File f = dir.openNextFile();
     while (f) {
         const char* name = f.name();  // e.g. "20260908-001.csv"
-        if (out.oldest[0] == '\0' || log_names::olderThan(name, out.oldest)) {
-            snprintf(out.oldest, sizeof(out.oldest), "%s", name);
-        }
         char     prefix[log_names::PREFIX_LEN + 1];
         uint16_t seq;
         if (log_names::parse(name, prefix, seq)) {
@@ -87,23 +95,82 @@ static void scanLogDir(LogScan& out, const char* seqPrefix) {
     dir.close();
 }
 
-// Delete oldest log files until free space >= threshold. "Oldest" is decided
-// by name alone (log_names::olderThan) -- LittleFS timestamps are only as good
-// as the clock was when the file was written, and on this unit that clock is
-// often unset. See util/log_names.h.
+// True if `path` never recorded a depth past NON_DIVE_DEPTH_THRESHOLD_M --
+// i.e. is a GPS-only track with no dive in it. Stops at the first qualifying
+// sample rather than reading the whole file. An unparsable or empty file
+// (no header, no rows) has no depth evidence either way, so it also reads as
+// non-dive -- there's nothing in it worth protecting.
+static bool isNonDiveLog(const char* path) {
+    File f = LittleFS.open(path, FILE_READ);
+    if (!f) return true;
+
+    f.readStringUntil('\n');  // header
+    while (f.available()) {
+        String line = f.readStringUntil('\n');
+        int col = 0, start = 0;
+        for (int i = 0; i <= (int)line.length(); i++) {
+            if (i < (int)line.length() && line[i] != ',') continue;
+            if (col == DEPTH_COLUMN_INDEX) {
+                if (line.substring(start, i).toFloat() >= NON_DIVE_DEPTH_THRESHOLD_M) {
+                    f.close();
+                    return false;
+                }
+                break;
+            }
+            col++;
+            start = i + 1;
+        }
+    }
+    f.close();
+    return true;
+}
+
+// Find the oldest log basename under LOG_DIR into `out` ("" if nothing
+// qualifies), skipping the file currently open for writing -- it is the one
+// log that cannot be re-collected, and on a nearly full unit it can be the
+// only file left to consider. When `nonDiveOnly` is set, only logs that fail
+// isNonDiveLog's test are eligible. "Oldest" is decided by name alone
+// (log_names::olderThan) -- LittleFS timestamps are only as good as the clock
+// was when the file was written, and on this unit that clock is often unset.
+// See util/log_names.h.
+static void findOldestLog(char* out, size_t outLen, bool nonDiveOnly) {
+    out[0] = '\0';
+    File dir = LittleFS.open(LOG_DIR);
+    if (!dir || !dir.isDirectory()) return;
+
+    File f = dir.openNextFile();
+    while (f) {
+        const char* name = f.name();  // e.g. "20260908-001.csv"
+        char path[LOG_PATH_MAX];
+        snprintf(path, sizeof(path), "%s/%s", LOG_DIR, name);
+        // Age check before the (expensive, file-content) non-dive check so a
+        // candidate that can't possibly beat the current best never pays for it.
+        if (strcmp(path, gLogPath) != 0 &&
+            (out[0] == '\0' || log_names::olderThan(name, out)) &&
+            (!nonDiveOnly || isNonDiveLog(path))) {
+            snprintf(out, outLen, "%s", name);
+        }
+        f.close();
+        f = dir.openNextFile();
+    }
+    dir.close();
+}
+
+// Delete log files until free space >= threshold, preferring non-dive logs
+// (see isNonDiveLog) over dive logs regardless of age, and within each of
+// those two groups, oldest first.
 static void cleanupOldLogs() {
     size_t freeBytes = LittleFS.totalBytes() - LittleFS.usedBytes();
     while (freeBytes < FREE_SPACE_THRESHOLD) {
-        LogScan scan;
-        scanLogDir(scan, nullptr);
-        if (scan.oldest[0] == '\0') break;  // no log files left
+        char victim[LOG_NAME_MAX];
+        findOldestLog(victim, sizeof(victim), /*nonDiveOnly=*/true);
+        if (victim[0] == '\0') {
+            findOldestLog(victim, sizeof(victim), /*nonDiveOnly=*/false);
+        }
+        if (victim[0] == '\0') break;  // no log files left (other than the active one)
 
         char path[LOG_PATH_MAX];
-        snprintf(path, sizeof(path), "%s/%s", LOG_DIR, scan.oldest);
-        // Never prune the file we are actively writing -- it is the one log
-        // that cannot be re-collected, and on a nearly full unit it can be the
-        // only file left to consider.
-        if (strcmp(path, gLogPath) == 0) break;
+        snprintf(path, sizeof(path), "%s/%s", LOG_DIR, victim);
         if (LittleFS.remove(path)) {
             Serial.printf("[LOG] Deleted old log %s (free space: %u)\n", path,
                           (unsigned)(LittleFS.totalBytes() - LittleFS.usedBytes()));

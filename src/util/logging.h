@@ -46,9 +46,10 @@ struct LogData {
 };
 
 // Initialize logging system: mount LittleFS (if not already mounted),
-// clean up oldest logs if free space is below threshold, determine next
-// sequential file number. Starts in OFF state — no file is opened until
-// cycleLevel() moves away from OFF.
+// clean up old logs if free space is below threshold (logs with no dive in
+// them go first, see logging.cpp's isNonDiveLog), determine next sequential
+// file number. Starts in OFF state — no file is opened until cycleLevel()
+// moves away from OFF.
 bool init();
 
 // Shutdown logging system (close file if open).

@@ -1,5 +1,6 @@
 #include "logging.h"
 #include "log_names.h"
+#include "boot_log.h"
 #include "../config.h"
 #include <Arduino.h>
 #include <LittleFS.h>
@@ -128,13 +129,18 @@ static bool isNonDiveLog(const char* path) {
 // Find the oldest log basename under LOG_DIR into `out` ("" if nothing
 // qualifies), skipping the file currently open for writing -- it is the one
 // log that cannot be re-collected, and on a nearly full unit it can be the
-// only file left to consider. When `nonDiveOnly` is set, only logs that fail
-// isNonDiveLog's test are eligible. "Oldest" is decided by name alone
-// (log_names::olderThan) -- LittleFS timestamps are only as good as the clock
-// was when the file was written, and on this unit that clock is often unset.
-// See util/log_names.h.
+// only file left to consider. Also skips boot_log::protectedLogPath(): on a
+// fresh boot gLogPath is always "" (no file has been reopened yet -- that
+// happens later, once NVS restores the log level), so without this second
+// check a brownout mid-dive leaves the half-written log looking exactly like
+// any other stale file the moment this runs. When `nonDiveOnly` is set, only
+// logs that fail isNonDiveLog's test are eligible. "Oldest" is decided by
+// name alone (log_names::olderThan) -- LittleFS timestamps are only as good
+// as the clock was when the file was written, and on this unit that clock is
+// often unset. See util/log_names.h.
 static void findOldestLog(char* out, size_t outLen, bool nonDiveOnly) {
     out[0] = '\0';
+    const char* protectedPath = boot_log::protectedLogPath();
     File dir = LittleFS.open(LOG_DIR);
     if (!dir || !dir.isDirectory()) return;
 
@@ -146,6 +152,7 @@ static void findOldestLog(char* out, size_t outLen, bool nonDiveOnly) {
         // Age check before the (expensive, file-content) non-dive check so a
         // candidate that can't possibly beat the current best never pays for it.
         if (strcmp(path, gLogPath) != 0 &&
+            strcmp(path, protectedPath) != 0 &&
             (out[0] == '\0' || log_names::olderThan(name, out)) &&
             (!nonDiveOnly || isNonDiveLog(path))) {
             snprintf(out, outLen, "%s", name);
@@ -171,9 +178,17 @@ static void cleanupOldLogs() {
 
         char path[LOG_PATH_MAX];
         snprintf(path, sizeof(path), "%s/%s", LOG_DIR, victim);
+
+        uint32_t victimSize = 0;
+        {
+            File vf = LittleFS.open(path, FILE_READ);
+            if (vf) { victimSize = vf.size(); vf.close(); }
+        }
+
         if (LittleFS.remove(path)) {
             Serial.printf("[LOG] Deleted old log %s (free space: %u)\n", path,
                           (unsigned)(LittleFS.totalBytes() - LittleFS.usedBytes()));
+            boot_log::recordCleanupDeletion(path, victimSize, /*wasProtected=*/false);
         } else {
             break;  // can't delete, stop trying
         }
@@ -241,16 +256,20 @@ static bool openNextFile() {
         return false;
     }
     Serial.printf("[LOG] Opened %s (level %s)\n", gLogPath, levelName(gActiveLevel));
+    boot_log::setActiveLogPath(gLogPath);
     writeHeader();
     return true;
 }
 
-// Close current file if open.
+// Close current file if open. A deliberate close (OFF, a level change, or
+// POWER_OFF) means the file is complete, so it no longer needs crash
+// protection on the next boot's cleanup pass.
 static void closeFile() {
     if (gLogFile) {
         gLogFile.flush();
         gLogFile.close();
         Serial.printf("[LOG] Closed %s\n", gLogPath);
+        boot_log::clearActiveLogPath();
         gLogPath[0] = '\0';
     }
 }

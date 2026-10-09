@@ -90,6 +90,7 @@ Code is organized into namespaces by subsystem:
 - `display::` - TFT display driver (ST7789 320×240, direct hardware writes, nav + debug screen rendering)
 - `menu::` - Hierarchical menu system (compiled in, button-driven, on display device)
 - `logging::` - Data logging system (LittleFS-based; `/logs/YYYYMMDD-NNN.csv`)
+- `boot_log::` - Persistent (NVS) reset-reason/cleanup-event history and the active-log-path marker that stops a brownout-interrupted dive log from being swept by `logging::`'s boot-time cleanup (see below)
 - `log_sync::` - Automatic dive-log upload once the unit joins a known network
 - `storage::` - Calibration persistence (JSON files in LittleFS)
 - `hdg_cal::` - Fourier heading calibration (load hdg_fourier.json, apply Fourier-series correction)
@@ -124,6 +125,7 @@ src/
 ├── util/                      # Utilities
 │   ├── logging.cpp/h          # Data logging to LittleFS (see log_names.h for the filename grammar)
 │   ├── log_names.h            # Dive-log filename grammar; pure C++ so tools/lognames_test/ can exercise it
+│   ├── boot_log.cpp/h         # NVS-backed boot/crash history + active-log-path crash protection (see "Log rotation vs. a mid-dive brownout" below)
 │   ├── storage.cpp/h          # Calibration save/load (JSON)
 │   ├── nvs_state.cpp/h        # Runtime state persistence (ESP32 NVS: toggles, position)
 │   ├── hdg_cal.cpp/h          # Fourier heading calibration (load /hdg_fourier.json, apply Fourier-series correction)
@@ -297,6 +299,42 @@ nvs_disp::save(d);                     // save display settings
 ```
 
 **Position save interval:** Configurable via `NVS_POS_SAVE_INTERVAL_MS` in [config.h](src/config.h) (default 30 s). Position is also included in any full `nvs_nav::save()` call triggered by a toggle, so it's always at least as fresh as the last toggle.
+
+### Log rotation vs. a mid-dive brownout (2026-10-03)
+
+`logging.cpp`'s `cleanupOldLogs()` prunes the oldest log once free space drops
+below `FREE_SPACE_THRESHOLD` (32 KiB), and is careful never to delete the file
+currently open for writing — `findOldestLog()` skips whatever `gLogPath` points
+at. That guard is useless at the one moment it matters most: `cleanupOldLogs()`
+runs inside `logging::init()`, which is called from `setup()` **before** the
+saved log level is restored from NVS and the file reopened, so `gLogPath` is
+still `""` (its static initial value) the whole time cleanup runs. A brownout
+mid-dive — a loose power connector, say — reboots the unit, and the half-written
+dive log is, for the one pass that decides its fate, indistinguishable from any
+other stale file on disk. If free space happened to be under the floor at that
+moment, it gets deleted, and the diver is left with only the back half of the
+dive.
+
+Fixed by adding a second, **persistent** guard: `boot_log::setActiveLogPath()`
+mirrors `gLogPath` into NVS every time `logging.cpp` opens a file, and
+`boot_log::clearActiveLogPath()` clears it on every deliberate close (OFF, a
+level change, or `POWER_OFF`) — so it is non-empty in NVS only while a file is
+genuinely open, surviving exactly the kind of reboot that empties `gLogPath`.
+`findOldestLog()` now excludes `boot_log::protectedLogPath()` (read from NVS
+once, early in `boot_log::recordBoot()`, before anything else this boot could
+have overwritten it) alongside `gLogPath`. Once the post-reboot session reopens
+its own file, the marker moves to that new path and the previous file goes back
+to being an ordinary completed log, eligible for normal cleanup like any other.
+
+`boot_log` also exists because there was no way to confirm *any* of this after
+the fact: nothing recorded `esp_reset_reason()` anywhere, and the only place
+`cleanupOldLogs()` ever announced a deletion was a `Serial.printf` nobody is
+watching on a dive. It now keeps a small ring of recent boots (reset reason +
+any files `cleanupOldLogs()` deleted that boot, each flagged if it was somehow
+the protected path anyway) in NVS — a separate flash partition from LittleFS,
+so it survives `uploadfs` — and serves it at `GET /api/boot-log` on `tern.local`
+("Diagnostics" panel), per the "sealed unit, so diagnostics must be
+network-readable" rule elsewhere in this file.
 
 ### I2C / Wire Usage
 

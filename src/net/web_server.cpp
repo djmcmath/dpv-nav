@@ -5,6 +5,7 @@
 #include "cloud_client.h"
 #include "ota.h"
 #include "../util/waypoints.h"
+#include "../util/boot_log.h"
 #include "../nav_main.h"
 #include <ArduinoJson.h>
 #include <WebServer.h>
@@ -126,6 +127,14 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <h1>DPV-Nav File Manager</h1>
 <div class="info" id="fsinfo">Loading...</div>
 <div class="info" id="cloudstatus">Checking cloud link...</div>
+<div class="calsync">
+  <b>Diagnostics</b>
+  <div class="label">Recent boots -- why the unit last restarted, and any dive logs the
+    boot-time space cleanup had to delete. "Active log, deleted anyway" means a log that
+    was still being written when the unit went down was swept regardless -- report that,
+    it means the fix below didn't hold.</div>
+  <div id="bootlog">Loading...</div>
+</div>
 <table>
   <thead><tr>
     <th class="sel"><input type="checkbox" id="selall" onchange="toggleSelectAll()" title="Select all uploadable files"></th>
@@ -278,6 +287,34 @@ async function load() {
       <td>${cloud}</td>
     </tr>`;
   }).join('');
+}
+function reasonLabel(r) {
+  const known = {
+    POWERON: 'Power on', EXT_PIN: 'External reset', SW_RESTART: 'Software restart',
+    PANIC: 'Firmware crash (panic)', INT_WDT: 'Watchdog (interrupt)',
+    TASK_WDT: 'Watchdog (task)', OTHER_WDT: 'Watchdog (other)',
+    DEEPSLEEP_WAKE: 'Woke from sleep', BROWNOUT: 'Brownout (power dropout)',
+    SDIO: 'SDIO reset', UNKNOWN: 'Unknown'
+  };
+  return known[r] || r;
+}
+async function loadBootLog() {
+  const el = document.getElementById('bootlog');
+  try {
+    const boots = (await fetch('/api/boot-log').then(r => r.json())).slice().reverse();
+    if (!boots.length) { el.textContent = 'No boot history recorded yet.'; return; }
+    el.innerHTML = boots.map(b => {
+      const dels = (b.del || []).map(d =>
+        `<li style="${d.act ? 'color:#e63946;font-weight:bold' : ''}">${d.n} (${fmt(d.s)})` +
+        `${d.act ? ' -- active log, deleted anyway' : ''}</li>`).join('');
+      return `<div style="margin:.5rem 0;padding:.4rem .6rem;background:#1a1a2e;border-radius:4px">` +
+        `<b>#${b.seq}</b> &mdash; ${reasonLabel(b.reason)}` +
+        (dels ? `<ul style="margin:.3rem 0 0 1.2rem;font-size:.85rem">${dels}</ul>` : '') +
+        `</div>`;
+    }).join('');
+  } catch (e) {
+    el.textContent = 'Could not load boot history.';
+  }
 }
 function toggleSelectAll() {
   const on = document.getElementById('selall').checked;
@@ -751,6 +788,7 @@ async function startFirmware() {
   loadFirmware();
 }
 load();
+loadBootLog();
 loadWaypoints();
 loadFirmware();
 loadWifi();
@@ -831,6 +869,10 @@ static void handleFsInfo() {
     json += String(LittleFS.totalBytes() - LittleFS.usedBytes());
     json += "}";
     server.send(200, "application/json", json);
+}
+
+static void handleBootLog() {
+    server.send(200, "application/json", boot_log::statusJson());
 }
 
 static void handleDownload() {
@@ -1220,6 +1262,7 @@ void init() {
     server.on("/",            HTTP_GET,  handleIndex);
     server.on("/api/files",   HTTP_GET,  handleFileList);
     server.on("/api/fs-info", HTTP_GET,  handleFsInfo);
+    server.on("/api/boot-log", HTTP_GET, handleBootLog);
     server.on("/api/download",HTTP_GET,  handleDownload);
     server.on("/api/delete",  HTTP_GET,  handleDelete);
     server.on("/api/upload",     HTTP_POST, handleUploadComplete, handleUpload);

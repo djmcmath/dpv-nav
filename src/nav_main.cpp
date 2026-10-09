@@ -33,6 +33,7 @@
 #include "util/serial_commands.h"
 #include "util/mag_cal_collect.h"
 #include "util/nvs_state.h"
+#include "util/boot_log.h"
 #include "util/speed_cal.h"
 #include "util/hdg_cal.h"
 #include "util/waypoints.h"
@@ -476,6 +477,12 @@ void setup() {
 #endif
     Serial.printf("=== CORE_DEBUG_LEVEL=%d %s ===\n", CORE_DEBUG_LEVEL,
                   CORE_DEBUG_LEVEL >= 4 ? "(library logs ON)" : "(library logs OFF)");
+
+    // Must run before anything else touches NVS or LittleFS: this is what
+    // tells us *why* we're booting (brownout vs. panic vs. a deliberate
+    // reset) and latches the previous session's active log path before
+    // logging::init()'s cleanup pass runs against it.
+    boot_log::recordBoot();
 
     // Serial link to display device
     Serial1.begin(LINK_BAUD, SERIAL_8N1, LINK_RX_PIN, LINK_TX_PIN);

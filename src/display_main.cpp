@@ -124,6 +124,27 @@ enum class HdgFourierCalPhase : uint8_t {
 static HdgFourierCalPhase gHdgFourierCalPhase = HdgFourierCalPhase::NONE;
 static int                gHdgFourierCalStep  = 0;
 
+// Signed shortest-path difference a-b, wrapped to (-180, 180]. No wrapped-diff
+// helper exists anywhere else in the firmware (every other wrap* helper only
+// wraps a single angle into [0,360)) -- the only precedent is tools/fourier_fit.py's
+// wrap(). C's fmodf is not floor-mod (see mag_cal_orient.cpp's note on the same
+// trap), hence the explicit "+ 360 before the second mod" below.
+static float wrappedAngleDiff(float a, float b) {
+    float d = fmodf(a - b + 180.0f, 360.0f);
+    if (d < 0) d += 360.0f;
+    return d - 180.0f;
+}
+
+// Running average of (indicated - target) across points captured this session.
+static float gHdgCalErrSum   = 0.0f;
+static int   gHdgCalErrCount = 0;
+
+// BTN2 gives no visible feedback until the next render tick happens to redraw
+// the incremented step -- same class of gap gBaselineFinishPending closes for
+// baseline cal. 0 = not showing; otherwise the millis() deadline to advance.
+static uint32_t gHdgCalAckUntilMs = 0;
+static constexpr uint32_t HDG_CAL_ACK_HOLD_MS = 450;
+
 // ---- Speed calibration UI state --------------------------------------------
 // Phases live entirely on the display device; the nav device drives
 // cal_mode (2/3/4) in NavPackets once the run starts.
@@ -526,6 +547,9 @@ void loop() {
             sendCmd(DisplayCmd::START_HDG_FOURIER_CAL);
             gHdgFourierCalPhase = HdgFourierCalPhase::COLLECTING;
             gHdgFourierCalStep  = 0;
+            gHdgCalErrSum       = 0.0f;
+            gHdgCalErrCount     = 0;
+            gHdgCalAckUntilMs   = 0;
             Serial.println("[HDG_CAL] entering Fourier heading cal");
         }
 
@@ -580,6 +604,27 @@ void loop() {
         lastReinitMs = now;
         display::reinit();
         // reinit re-initializes SSD controller and SPI speed
+    }
+
+    // --- Hdg cal "MARKED" ack expiry ------------------------------------------
+    // Checked every loop iteration (not gated by DISPLAY_INTERVAL_MS) so the
+    // ack beat's duration is accurate regardless of the 4 Hz render cadence.
+    if (gHdgCalAckUntilMs != 0 && now >= gHdgCalAckUntilMs) {
+        gHdgCalAckUntilMs = 0;
+        gHdgFourierCalStep++;
+        if (gHdgFourierCalStep >= kHdgCalNPoints) {
+            sendCmd(DisplayCmd::FINALIZE_HDG_CAL);
+            gHdgFourierCalPhase = HdgFourierCalPhase::NONE;
+            // Nav is about to CSV-dump + (if online) blocking-upload the
+            // heading samples -- hand off to the same wait/result UI
+            // baseline/mounted's bin-grid completion already uses, rather
+            // than a separate local "done" screen. See
+            // docs/architecture/heading-cal-cloud-plan.md.
+            gCloudCalPhase       = CloudCalUiPhase::WAITING;
+            gCloudCalWaitStartMs = millis();
+            display::clear();
+        }
+        // else: the next periodic render naturally draws the new step's prompt
     }
 
     // --- Update display -------------------------------------------------------
@@ -796,11 +841,19 @@ void loop() {
                 return;
             }
 
-            // Fourier heading cal — takes priority while active
+            // Fourier heading cal — takes priority while active. While the
+            // "MARKED" ack is up (gHdgCalAckUntilMs != 0), showHdgFourierCalAck
+            // was already drawn once, immediately, at button-press time --
+            // skip re-rendering it here, which would just flicker the ack in
+            // and out at the 4 Hz tick for no reason.
             if (gHdgFourierCalPhase == HdgFourierCalPhase::COLLECTING) {
-                display::showHdgFourierCalPrompt(gHdgFourierCalStep, kHdgCalNPoints,
-                                                 kHdgCalTargets[gHdgFourierCalStep],
-                                                 navValid ? lastNav.heading_raw_deg : 0.0f);
+                if (gHdgCalAckUntilMs == 0) {
+                    display::showHdgFourierCalPrompt(gHdgFourierCalStep, kHdgCalNPoints,
+                                                     kHdgCalTargets[gHdgFourierCalStep],
+                                                     navValid ? lastNav.heading_raw_deg : 0.0f,
+                                                     gHdgCalErrCount > 0 ? gHdgCalErrSum / gHdgCalErrCount : 0.0f,
+                                                     gHdgCalErrCount);
+                }
                 return;
             }
 
@@ -1311,28 +1364,33 @@ static bool handleModalButtons() {
 
     // --- Fourier heading calibration -----------------------------------------
     if (gHdgFourierCalPhase == HdgFourierCalPhase::COLLECTING) {
+        // While the "MARKED" ack is showing, ignore BTN2 rather than queue it --
+        // the step/finalize advance happens in loop()'s ack-expiry check, not here.
+        if (gHdgCalAckUntilMs != 0) {
+            return true;
+        }
         // BTN2 short press: send CAPTURE_HDG_POINT with current target; nav device
-        // records its live gCurrentHeadingRawDeg alongside the target.
+        // records its live gCurrentHeadingRawDeg alongside the target. Then show
+        // an immediate "MARKED" ack (held for HDG_CAL_ACK_HOLD_MS) instead of
+        // silently incrementing the step and waiting for the next render tick --
+        // same gap gBaselineFinishPending closes for baseline cal.
         if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
             btn2.fired = true;
-            float target = kHdgCalTargets[gHdgFourierCalStep];
+            float target    = kHdgCalTargets[gHdgFourierCalStep];
+            float indicated = navValid ? lastNav.heading_raw_deg : 0.0f;
             size_t n = displayCaptureHdgPointToBytes(target, txBuf, sizeof(txBuf));
             if (n > 0) Serial1.write(txBuf, n);
             Serial.printf("[HDG_CAL] Step %d/%d target=%.0f\n",
                           gHdgFourierCalStep + 1, kHdgCalNPoints, target);
-            gHdgFourierCalStep++;
-            if (gHdgFourierCalStep >= kHdgCalNPoints) {
-                sendCmd(DisplayCmd::FINALIZE_HDG_CAL);
-                gHdgFourierCalPhase = HdgFourierCalPhase::NONE;
-                // Nav is about to CSV-dump + (if online) blocking-upload the
-                // heading samples -- hand off to the same wait/result UI
-                // baseline/mounted's bin-grid completion already uses, rather
-                // than a separate local "done" screen. See
-                // docs/architecture/heading-cal-cloud-plan.md.
-                gCloudCalPhase       = CloudCalUiPhase::WAITING;
-                gCloudCalWaitStartMs = millis();
-                display::clear();
-            }
+
+            float err = wrappedAngleDiff(indicated, target);
+            gHdgCalErrSum += err;
+            gHdgCalErrCount++;
+            float avg = gHdgCalErrSum / gHdgCalErrCount;
+
+            display::showHdgFourierCalAck(gHdgFourierCalStep + 1, kHdgCalNPoints,
+                                          target, indicated, err, avg);
+            gHdgCalAckUntilMs = millis() + HDG_CAL_ACK_HOLD_MS;
         }
         return true;
     }

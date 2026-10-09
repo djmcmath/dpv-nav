@@ -131,6 +131,13 @@ static bool g_roughScanStaticDrawn = false;
 static bool g_cloudLinkWaitingStaticDrawn = false;
 static char g_cloudLinkWaitingLastCode[16] = "";
 
+// Hdg Fourier cal prompt: same idea again -- header/labels/footer are drawn
+// once per step, and only the live HDG number + avg-error line are redrawn
+// when they actually change. Reset by clear() so a fresh session (or the
+// MARKED ack screen, which overwrites the whole display) forces a full
+// redraw on the next prompt call.
+static bool g_hdgCalPromptStaticDrawn = false;
+
 // ---------------------------------------------------------------------------
 // Nav mode layout constants
 // ---------------------------------------------------------------------------
@@ -237,6 +244,7 @@ void clear() {
     g_roughScanStaticDrawn = false;
     g_cloudLinkWaitingStaticDrawn = false;
     g_cloudLinkWaitingLastCode[0] = '\0';
+    g_hdgCalPromptStaticDrawn = false;
     tft.fillScreen(COLOR_BLACK);
     delay(50);
     bootLineY = 0;
@@ -252,6 +260,7 @@ void reinit() {
     g_roughScanStaticDrawn = false;
     g_cloudLinkWaitingStaticDrawn = false;
     g_cloudLinkWaitingLastCode[0] = '\0';
+    g_hdgCalPromptStaticDrawn = false;
     Serial.println("[DISP] reinit complete");
 }
 
@@ -1502,58 +1511,152 @@ void showSpeedCalResult(uint16_t dist_ft, uint16_t elapsed_s,
 
 // ---------------------------------------------------------------------------
 // Fourier heading calibration: prompt screen
+//
+// Static layout (header/labels/separators/footer instruction) is drawn once
+// per step behind g_hdgCalPromptStaticDrawn, same idiom as g_calGridStaticDrawn
+// above -- only the live HDG number and the avg-error line are redrawn when
+// they actually change, which is what kills the old per-tick full-screen
+// flicker (every call used to start with an unconditional fillScreen()).
+//
 // Layout (320×240):
-//   y=  0  "HDG CAL"                    cyan, size 2
-//   y= 22  "Step N/12: Target 000°"     white, size 2
-//   y= 44  separator line               cyan
-//   y= 50  "Use phone compass:"         yellow, size 1
-//   y= 60  "physically face 000°"       yellow, size 1
-//   y= 74  "BTN2 when aimed & steady"   gray, size 1
-//   y= 86  separator line               cyan
-//   y= 92  "SENSOR (expected to differ):" gray, size 1
-//   y=104  "XXX.X°"                     white, size 3
+//   y=  0  "HDG CAL  Step N/12"        cyan,   size 1  (static)
+//   y= 10  separator                   cyan
+//   y= 14  "TARGET"                    gray,   size 1  (static)
+//   y= 24  "XXX°" target               white,  size 6, centered (static)
+//   y= 78  separator                   cyan
+//   y= 82  "HDG"                       gray,   size 1  (static)
+//   y= 92  "XXX°" indicated            white,  size 6, centered (live)
+//   y=146  separator                   cyan
+//   y=152  "Mark with BTN2"            gray,   size 2  (static)
+//   y=178  "Avg err ±X°" / "Avg err --" yellow, size 2  (live, on capture)
 // ---------------------------------------------------------------------------
-void showHdgFourierCalPrompt(int step, int total, float targetDeg, float indicatedDeg) {
+static int s_hdgCalLastStep     = -1;
+static int s_hdgCalLastIndInt   = INT32_MIN;
+static bool s_hdgCalLastAvgValid = false;
+static int s_hdgCalLastAvgInt   = INT32_MIN;
+
+// Shared by the TARGET (static, step entry) and HDG (live, every tick) rows.
+static void drawHdgCalBigNumber(int y, float deg) {
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%03.0f" "\xB0", deg);
+    tft.fillRect(0, y, SCREEN_WIDTH, 48, COLOR_BLACK);
+    tft.setTextSize(6);
+    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+    int charW = 6 * 6;
+    int x = (SCREEN_WIDTH - (int)strlen(buf) * charW) / 2;
+    tft.setCursor(x, y);
+    tft.print(buf);
+}
+
+void showHdgFourierCalPrompt(int step, int total, float targetDeg, float indicatedDeg,
+                              float avgErrDeg, int errCount) {
+    if (!tftReady) return;
+
+    bool stepChanged = (step != s_hdgCalLastStep);
+    if (stepChanged || !g_hdgCalPromptStaticDrawn) {
+        s_hdgCalLastStep = step;
+        invalidateNavCache();
+        tft.fillScreen(COLOR_BLACK);
+
+        tft.setTextSize(1);
+        tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
+        tft.setCursor(0, 0);
+        char hdr[24];
+        snprintf(hdr, sizeof(hdr), "HDG CAL  Step %d/%d", step + 1, total);
+        tft.print(hdr);
+        tft.drawFastHLine(0, 10, SCREEN_WIDTH, COLOR_CYAN);
+
+        tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+        tft.setCursor(0, 14);
+        tft.print("TARGET");
+        drawHdgCalBigNumber(24, targetDeg);
+
+        tft.drawFastHLine(0, 78, SCREEN_WIDTH, COLOR_CYAN);
+
+        tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+        tft.setCursor(0, 82);
+        tft.print("HDG");
+        // live number drawn unconditionally below, every call
+
+        tft.drawFastHLine(0, 146, SCREEN_WIDTH, COLOR_CYAN);
+
+        tft.setTextSize(2);
+        tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+        tft.setCursor(4, 152);
+        tft.print("Mark with BTN2");
+
+        g_hdgCalPromptStaticDrawn = true;
+        s_hdgCalLastIndInt    = INT32_MIN;  // force the live rows below to redraw
+        s_hdgCalLastAvgValid  = false;
+    }
+
+    // Live HDG number -- redrawn only when the displayed (rounded) value
+    // actually changes, instead of every 250 ms render tick regardless.
+    int indInt = (int)lroundf(indicatedDeg);
+    if (indInt != s_hdgCalLastIndInt) {
+        s_hdgCalLastIndInt = indInt;
+        drawHdgCalBigNumber(92, indicatedDeg);
+    }
+
+    // Avg error -- only changes when a new point is captured, not per tick.
+    bool avgValid = (errCount > 0);
+    int avgInt = avgValid ? (int)lroundf(avgErrDeg) : 0;
+    if (avgValid != s_hdgCalLastAvgValid || (avgValid && avgInt != s_hdgCalLastAvgInt)) {
+        s_hdgCalLastAvgValid = avgValid;
+        s_hdgCalLastAvgInt   = avgInt;
+        tft.fillRect(0, 178, SCREEN_WIDTH, 16, COLOR_BLACK);
+        tft.setTextSize(2);
+        tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
+        tft.setCursor(4, 178);
+        char ebuf[24];
+        if (avgValid) {
+            snprintf(ebuf, sizeof(ebuf), "Avg err %+d" "\xB0", avgInt);
+        } else {
+            snprintf(ebuf, sizeof(ebuf), "Avg err --");
+        }
+        tft.print(ebuf);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fourier heading calibration: brief "MARKED" acknowledgment after BTN2.
+//
+// handleModalButtons() in display_main.cpp draws this immediately on press
+// (not waiting for the next render tick) and holds it for a fixed beat before
+// advancing the step -- BTN2 otherwise gives no visible feedback at all until
+// the next prompt happens to redraw, the same gap gBaselineFinishPending was
+// added to close for baseline cal. Drawn once; nothing on it changes while
+// it's held, so no incremental-redraw logic is needed here.
+// ---------------------------------------------------------------------------
+void showHdgFourierCalAck(int step, int total, float targetDeg, float indicatedDeg,
+                           float errDeg, float avgErrDeg) {
     if (!tftReady) return;
     invalidateNavCache();
     tft.fillScreen(COLOR_BLACK);
 
+    tft.setTextSize(4);
+    tft.setTextColor(COLOR_GREEN, COLOR_BLACK);
+    const char* marked = "MARKED";
+    int charW = 4 * 6;
+    int x = (SCREEN_WIDTH - (int)strlen(marked) * charW) / 2;
+    tft.setCursor(x, 40);
+    tft.print(marked);
+
+    char line[32];
     tft.setTextSize(2);
-    tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
-    tft.setCursor(0, 0);
-    tft.print("HDG CAL");
-
-    char buf[48];
-    snprintf(buf, sizeof(buf), "Step %d/%d: Tgt %03.0f" "\xF8", step + 1, total, targetDeg);
     tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
-    tft.setCursor(0, 22);
-    tft.print(buf);
+    tft.setCursor(20, 100);
+    snprintf(line, sizeof(line), "Step %d/%d", step, total);
+    tft.print(line);
 
-    tft.drawFastHLine(0, 44, SCREEN_WIDTH, COLOR_CYAN);
+    tft.setCursor(20, 130);
+    snprintf(line, sizeof(line), "Tgt %03.0f" "\xB0" "  Hdg %03.0f" "\xB0", targetDeg, indicatedDeg);
+    tft.print(line);
 
-    tft.setTextSize(1);
     tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
-    tft.setCursor(0, 50);
-    tft.print("Use phone compass:");
-    snprintf(buf, sizeof(buf), "physically face %.0f" "\xF8", targetDeg);
-    tft.setCursor(0, 60);
-    tft.print(buf);
-
-    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
-    tft.setCursor(0, 74);
-    tft.print("BTN2 when aimed & steady");
-
-    tft.drawFastHLine(0, 86, SCREEN_WIDTH, COLOR_CYAN);
-
-    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
-    tft.setCursor(0, 92);
-    tft.print("SENSOR (expected to differ):");
-
-    tft.setTextSize(3);
-    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
-    snprintf(buf, sizeof(buf), "%.1f" "\xF8", indicatedDeg);
-    tft.setCursor(0, 104);
-    tft.print(buf);
+    tft.setCursor(20, 160);
+    snprintf(line, sizeof(line), "err %+.0f" "\xB0" "  avg %+.0f" "\xB0", errDeg, avgErrDeg);
+    tft.print(line);
 }
 
 // ---------------------------------------------------------------------------

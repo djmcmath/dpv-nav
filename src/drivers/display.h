@@ -146,7 +146,17 @@ void showSpeedCalResult(uint16_t dist_ft, uint16_t elapsed_s,
 //   total        — total number of steps
 //   targetDeg    — target heading the user should align to (0-360)
 //   indicatedDeg — live AHRS heading from NavPacket (pre-correction)
-void showHdgFourierCalPrompt(int step, int total, float targetDeg, float indicatedDeg);
+//   avgErrDeg    — running average of (indicated - target) over points captured
+//                  so far this session; ignored unless errCount > 0
+//   errCount     — number of points captured so far this session (0 = none yet)
+void showHdgFourierCalPrompt(int step, int total, float targetDeg, float indicatedDeg,
+                              float avgErrDeg, int errCount);
+
+// Brief acknowledgment shown immediately on BTN2, before the step advances --
+// held on screen for a fixed beat by the caller. errDeg is this point's own
+// (indicated - target); avgErrDeg is the running average including this point.
+void showHdgFourierCalAck(int step, int total, float targetDeg, float indicatedDeg,
+                           float errDeg, float avgErrDeg);
 
 // Cloud calibration screens (docs/cloud-calibration-plan.md). Shown after a
 // bin-coverage cal (Baseline/Mounted), or the 12-point Fourier heading cal

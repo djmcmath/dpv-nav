@@ -1,0 +1,11 @@
+Reference,Value,Footprint,Populate,Notes
+J1,Molex 53047-0410,GPS_Carrier:Molex_PicoBlade_53047-0410_1x04_P1.25mm_Vertical,Yes,
+D1,SS14,GPS_Carrier:D_SOD-123,Yes,
+U1,Adafruit Ultimate GPS serial #746,GPS_Carrier:Adafruit_Ultimate_GPS_Serial_746_THT_Raised,Yes,Serial #746 mounted on top with 1x9 header and two spacers
+R1,4.7k,GPS_Carrier:R_0603_1608Metric,Yes,
+U2,Adafruit QT Py ESP32-S2 #5325,GPS_Carrier:Adafruit_QT_Py_ESP32_S2_THT,Yes,Mounted on bottom with two 1x7 headers; underside clearance required
+R2,220R,GPS_Carrier:R_0603_1608Metric,Yes,
+J2,LED socket (optional),GPS_Carrier:PinSocket_1x02_P2.54mm_Vertical,Optional,Optional external LED socket; LED part unspecified
+R3,2.2k,GPS_Carrier:R_0603_1608Metric,Yes,
+Q1,MMBT3904,GPS_Carrier:SOT-23,Yes,
+R4,100k,GPS_Carrier:R_0603_1608Metric,Yes,

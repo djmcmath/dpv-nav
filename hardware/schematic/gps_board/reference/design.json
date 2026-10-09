@@ -1,0 +1,142 @@
+{
+  "root_uuid": "90d662d2-cc00-5268-a0dc-773c66ed3ac5",
+  "parts": [
+    {
+      "ref": "J1",
+      "value": "Molex 53047-0410",
+      "footprint": "Molex_PicoBlade_53047-0410_1x04_P1.25mm_Vertical",
+      "symbol": "NAV_PicoBlade_4",
+      "nets": {
+        "1": "+5V_NAV",
+        "2": "GND",
+        "3": "NAV_TX",
+        "4": "GPS_TX"
+      },
+      "uuid": "c5d700bd-f9eb-570a-9bfb-dfca909e56bb",
+      "dnp": false,
+      "fields": {}
+    },
+    {
+      "ref": "D1",
+      "value": "SS14",
+      "footprint": "D_SOD-123",
+      "symbol": "D_Schottky",
+      "nets": {
+        "1": "+5V_QT",
+        "2": "+5V_NAV"
+      },
+      "uuid": "afc7f841-2d99-540a-a135-aba5b0fd161d",
+      "dnp": false,
+      "fields": {}
+    },
+    {
+      "ref": "U1",
+      "value": "Adafruit Ultimate GPS serial #746",
+      "footprint": "Adafruit_Ultimate_GPS_Serial_746_THT_Raised",
+      "symbol": "GPS_Serial_746",
+      "nets": {
+        "2": "+5V_NAV",
+        "3": "GND",
+        "4": "NAV_TX",
+        "5": "GPS_TX"
+      },
+      "uuid": "acb91070-f754-549a-87dc-505c8ec0836c",
+      "dnp": false,
+      "fields": {}
+    },
+    {
+      "ref": "R1",
+      "value": "4.7k",
+      "footprint": "R_0603_1608Metric",
+      "symbol": "R",
+      "nets": {
+        "1": "GPS_TX",
+        "2": "QT_RX"
+      },
+      "uuid": "3d03a05e-f20e-525d-bab4-f76f628661ea",
+      "dnp": false,
+      "fields": {}
+    },
+    {
+      "ref": "U2",
+      "value": "Adafruit QT Py ESP32-S2 #5325",
+      "footprint": "Adafruit_QT_Py_ESP32_S2_THT",
+      "symbol": "QT_Py_ESP32_S2",
+      "nets": {
+        "14": "+5V_QT",
+        "13": "GND",
+        "8": "QT_RX",
+        "1": "LED_CTRL"
+      },
+      "uuid": "11a0faa3-28c5-5126-99d7-134f0f13c278",
+      "dnp": false,
+      "fields": {}
+    },
+    {
+      "ref": "R2",
+      "value": "220R",
+      "footprint": "R_0603_1608Metric",
+      "symbol": "R",
+      "nets": {
+        "1": "+5V_QT",
+        "2": "LED_A"
+      },
+      "uuid": "44d30a7e-d6fa-56f7-99b8-10a76aa36d8d",
+      "dnp": false,
+      "fields": {}
+    },
+    {
+      "ref": "J2",
+      "value": "LED socket (optional)",
+      "footprint": "PinSocket_1x02_P2.54mm_Vertical",
+      "symbol": "LED_SOCKET",
+      "nets": {
+        "1": "LED_A",
+        "2": "LED_K"
+      },
+      "uuid": "56baa87d-4cb8-5a7b-a06c-93f05347cfd2",
+      "dnp": true,
+      "fields": {}
+    },
+    {
+      "ref": "R3",
+      "value": "2.2k",
+      "footprint": "R_0603_1608Metric",
+      "symbol": "R",
+      "nets": {
+        "1": "LED_CTRL",
+        "2": "LED_BASE"
+      },
+      "uuid": "dd2fddfe-7693-5ba7-96b5-22376adc9cf5",
+      "dnp": false,
+      "fields": {}
+    },
+    {
+      "ref": "Q1",
+      "value": "MMBT3904",
+      "footprint": "SOT-23",
+      "symbol": "MMBT3904",
+      "nets": {
+        "1": "LED_BASE",
+        "2": "GND",
+        "3": "LED_K"
+      },
+      "uuid": "d302be8a-421e-5ebe-9392-0b6e2bd06335",
+      "dnp": false,
+      "fields": {}
+    },
+    {
+      "ref": "R4",
+      "value": "100k",
+      "footprint": "R_0603_1608Metric",
+      "symbol": "R",
+      "nets": {
+        "1": "LED_BASE",
+        "2": "GND"
+      },
+      "uuid": "51d135b1-02f2-5b1e-89e5-680cd852c8d9",
+      "dnp": false,
+      "fields": {}
+    }
+  ]
+}

@@ -1,0 +1,217 @@
+{
+  "Adafruit_QT_Py_ESP32_S2_THT": {
+    "source": "qtpy-s2.brd",
+    "pads": [
+      {
+        "pad": 1,
+        "signal": "A0",
+        "x": -7.62,
+        "y": -7.62,
+        "source_element": "JP1",
+        "source_pad": "1"
+      },
+      {
+        "pad": 2,
+        "signal": "A1",
+        "x": -7.62,
+        "y": -5.08,
+        "source_element": "JP1",
+        "source_pad": "2"
+      },
+      {
+        "pad": 3,
+        "signal": "A2",
+        "x": -7.62,
+        "y": -2.54,
+        "source_element": "JP1",
+        "source_pad": "3"
+      },
+      {
+        "pad": 4,
+        "signal": "A3",
+        "x": -7.62,
+        "y": 0.0,
+        "source_element": "JP1",
+        "source_pad": "4"
+      },
+      {
+        "pad": 5,
+        "signal": "SDA",
+        "x": -7.62,
+        "y": 2.54,
+        "source_element": "JP1",
+        "source_pad": "5"
+      },
+      {
+        "pad": 6,
+        "signal": "SCL",
+        "x": -7.62,
+        "y": 5.08,
+        "source_element": "JP1",
+        "source_pad": "6"
+      },
+      {
+        "pad": 7,
+        "signal": "TX",
+        "x": -7.62,
+        "y": 7.62,
+        "source_element": "JP1",
+        "source_pad": "7"
+      },
+      {
+        "pad": 8,
+        "signal": "RX",
+        "x": 7.62,
+        "y": 7.62,
+        "source_element": "JP3",
+        "source_pad": "1"
+      },
+      {
+        "pad": 9,
+        "signal": "SCK",
+        "x": 7.62,
+        "y": 5.08,
+        "source_element": "JP3",
+        "source_pad": "2"
+      },
+      {
+        "pad": 10,
+        "signal": "MISO",
+        "x": 7.62,
+        "y": 2.54,
+        "source_element": "JP3",
+        "source_pad": "3"
+      },
+      {
+        "pad": 11,
+        "signal": "MOSI",
+        "x": 7.62,
+        "y": 0.0,
+        "source_element": "JP3",
+        "source_pad": "4"
+      },
+      {
+        "pad": 12,
+        "signal": "3.3V",
+        "x": 7.62,
+        "y": -2.54,
+        "source_element": "JP3",
+        "source_pad": "5"
+      },
+      {
+        "pad": 13,
+        "signal": "GND",
+        "x": 7.62,
+        "y": -5.08,
+        "source_element": "JP3",
+        "source_pad": "6"
+      },
+      {
+        "pad": 14,
+        "signal": "+5V",
+        "x": 7.62,
+        "y": -7.62,
+        "source_element": "JP3",
+        "source_pad": "7"
+      }
+    ],
+    "holes": [],
+    "origin_eagle": [
+      8.89,
+      10.3505
+    ]
+  },
+  "Adafruit_Ultimate_GPS_Serial_746_THT": {
+    "source": "gps-serial.brd",
+    "pads": [
+      {
+        "pad": 1,
+        "signal": "1PPS",
+        "x": 10.16,
+        "y": 15.113,
+        "source_element": "JP1",
+        "source_pad": "1"
+      },
+      {
+        "pad": 2,
+        "signal": "VIN",
+        "x": 7.62,
+        "y": 15.113,
+        "source_element": "JP1",
+        "source_pad": "2"
+      },
+      {
+        "pad": 3,
+        "signal": "GND",
+        "x": 5.08,
+        "y": 15.113,
+        "source_element": "JP1",
+        "source_pad": "3"
+      },
+      {
+        "pad": 4,
+        "signal": "RX",
+        "x": 2.54,
+        "y": 15.113,
+        "source_element": "JP1",
+        "source_pad": "4"
+      },
+      {
+        "pad": 5,
+        "signal": "TX",
+        "x": 0.0,
+        "y": 15.113,
+        "source_element": "JP1",
+        "source_pad": "5"
+      },
+      {
+        "pad": 6,
+        "signal": "FIX",
+        "x": -2.54,
+        "y": 15.113,
+        "source_element": "JP1",
+        "source_pad": "6"
+      },
+      {
+        "pad": 7,
+        "signal": "VBACKUP",
+        "x": -5.08,
+        "y": 15.113,
+        "source_element": "JP1",
+        "source_pad": "7"
+      },
+      {
+        "pad": 8,
+        "signal": "ENABLE",
+        "x": -7.62,
+        "y": 15.113,
+        "source_element": "JP1",
+        "source_pad": "8"
+      },
+      {
+        "pad": 9,
+        "signal": "3.3V",
+        "x": -10.16,
+        "y": 15.113,
+        "source_element": "JP1",
+        "source_pad": "9"
+      }
+    ],
+    "holes": [
+      {
+        "x": -10.16,
+        "y": -14.605,
+        "drill": 2.5
+      },
+      {
+        "x": 10.16,
+        "y": -14.605,
+        "drill": 2.5
+      }
+    ],
+    "origin_eagle": [
+      12.7,
+      17.145
+    ]
+  }
+}

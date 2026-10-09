@@ -1,0 +1,4 @@
+PASS: 10 board components; 27 connected pins match exported schematic nets.
+PASS: Direct GPS TX/RX headers, receive-only QT monitor, LED polarity, Schottky direction and schematic paths.
+PASS: 15.24 mm QT row spacing, 2.54 mm pitches, nine GPS header pads and two GPS mounting holes.
+PCB intentionally unrouted; do not fabricate.

@@ -1,0 +1,1 @@
+(sym_lib_table (version 7) (lib (name "GPS_Carrier")(type "KiCad")(uri "${KIPRJMOD}/GPS_Carrier.kicad_sym")(options "")(descr "Carrier module and circuit symbols")))

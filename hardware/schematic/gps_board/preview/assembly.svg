@@ -1,0 +1,117 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="980" viewBox="0 0 1120 980">
+<rect width="1120" height="980" fill="#f4f6f8"/>
+<style>text{font-family:Arial,sans-serif;fill:#172a3a}</style>
+<text x="38" y="44" font-size="28">Serial GPS / QT Py — mounted on opposite faces</text>
+<text x="38" y="74" font-size="17">Revision B  |  26.40 × 35.29 mm carrier  |  Direct header connections</text>
+<text x="38" y="116" font-size="18">TOP — complete GPS breakout #746</text>
+<text x="638" y="116" font-size="18">BOTTOM — viewed from underneath</text>
+<rect x="115.0" y="135.0" width="264.0" height="352.9" rx="5" fill="#d6e9dc" stroke="#243746" stroke-width="1.5"/>
+<rect x="715.0000000000001" y="135.0" width="264.0" height="352.9" rx="5" fill="#d6e9dc" stroke="#243746" stroke-width="1.5"/>
+<rect x="120.0" y="140.0" width="254.0" height="342.9" rx="5" fill="#7c5aa6" stroke="#243746" stroke-width="1.5"/>
+<rect x="152.99999999999997" y="231.44999999999996" width="180" height="180" rx="5" fill="#e8d9b8" stroke="#243746" stroke-width="1.5"/>
+<text x="153" y="213" font-size="20" style="fill:white">Ultimate GPS</text>
+<text x="163" y="326" font-size="18">GPS antenna</text>
+<circle cx="145.40000000000006" cy="165.39999999999992" r="13" fill="#f4f6f8" stroke="#d8bb69" stroke-width="1.5"/>
+<circle cx="348.6" cy="165.39999999999992" r="13" fill="#f4f6f8" stroke="#d8bb69" stroke-width="1.5"/>
+<circle cx="348.6" cy="462.5799999999999" r="8.5" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<circle cx="348.6" cy="462.5799999999999" r="3.5" fill="#f4f6f8" stroke="#243746" stroke-width="1.5"/>
+<circle cx="323.20000000000005" cy="462.5799999999999" r="8.5" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<circle cx="323.20000000000005" cy="462.5799999999999" r="3.5" fill="#f4f6f8" stroke="#243746" stroke-width="1.5"/>
+<circle cx="297.8" cy="462.5799999999999" r="8.5" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<circle cx="297.8" cy="462.5799999999999" r="3.5" fill="#f4f6f8" stroke="#243746" stroke-width="1.5"/>
+<circle cx="272.4000000000001" cy="462.5799999999999" r="8.5" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<circle cx="272.4000000000001" cy="462.5799999999999" r="3.5" fill="#f4f6f8" stroke="#243746" stroke-width="1.5"/>
+<circle cx="247.00000000000003" cy="462.5799999999999" r="8.5" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<circle cx="247.00000000000003" cy="462.5799999999999" r="3.5" fill="#f4f6f8" stroke="#243746" stroke-width="1.5"/>
+<circle cx="221.59999999999997" cy="462.5799999999999" r="8.5" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<circle cx="221.59999999999997" cy="462.5799999999999" r="3.5" fill="#f4f6f8" stroke="#243746" stroke-width="1.5"/>
+<circle cx="196.20000000000005" cy="462.5799999999999" r="8.5" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<circle cx="196.20000000000005" cy="462.5799999999999" r="3.5" fill="#f4f6f8" stroke="#243746" stroke-width="1.5"/>
+<circle cx="170.79999999999998" cy="462.5799999999999" r="8.5" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<circle cx="170.79999999999998" cy="462.5799999999999" r="3.5" fill="#f4f6f8" stroke="#243746" stroke-width="1.5"/>
+<circle cx="145.40000000000006" cy="462.5799999999999" r="8.5" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<circle cx="145.40000000000006" cy="462.5799999999999" r="3.5" fill="#f4f6f8" stroke="#243746" stroke-width="1.5"/>
+<circle cx="948.6" cy="165.39999999999992" r="13" fill="#f4f6f8" stroke="#d8bb69" stroke-width="1.5"/>
+<circle cx="745.4000000000001" cy="165.39999999999992" r="13" fill="#f4f6f8" stroke="#d8bb69" stroke-width="1.5"/>
+<circle cx="745.4000000000001" cy="462.5799999999999" r="8.5" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<circle cx="745.4000000000001" cy="462.5799999999999" r="3.5" fill="#f4f6f8" stroke="#243746" stroke-width="1.5"/>
+<circle cx="770.8" cy="462.5799999999999" r="8.5" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<circle cx="770.8" cy="462.5799999999999" r="3.5" fill="#f4f6f8" stroke="#243746" stroke-width="1.5"/>
+<circle cx="796.2" cy="462.5799999999999" r="8.5" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<circle cx="796.2" cy="462.5799999999999" r="3.5" fill="#f4f6f8" stroke="#243746" stroke-width="1.5"/>
+<circle cx="821.5999999999999" cy="462.5799999999999" r="8.5" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<circle cx="821.5999999999999" cy="462.5799999999999" r="3.5" fill="#f4f6f8" stroke="#243746" stroke-width="1.5"/>
+<circle cx="847.0" cy="462.5799999999999" r="8.5" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<circle cx="847.0" cy="462.5799999999999" r="3.5" fill="#f4f6f8" stroke="#243746" stroke-width="1.5"/>
+<circle cx="872.4000000000001" cy="462.5799999999999" r="8.5" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<circle cx="872.4000000000001" cy="462.5799999999999" r="3.5" fill="#f4f6f8" stroke="#243746" stroke-width="1.5"/>
+<circle cx="897.8" cy="462.5799999999999" r="8.5" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<circle cx="897.8" cy="462.5799999999999" r="3.5" fill="#f4f6f8" stroke="#243746" stroke-width="1.5"/>
+<circle cx="923.2" cy="462.5799999999999" r="8.5" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<circle cx="923.2" cy="462.5799999999999" r="3.5" fill="#f4f6f8" stroke="#243746" stroke-width="1.5"/>
+<circle cx="948.6" cy="462.5799999999999" r="8.5" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<circle cx="948.6" cy="462.5799999999999" r="3.5" fill="#f4f6f8" stroke="#243746" stroke-width="1.5"/>
+<rect x="758.4949999999999" y="212.54999999999995" width="207.01" height="177.8" rx="5" fill="#7c5aa6" stroke="#243746" stroke-width="1.5"/>
+<rect x="901.0000000000001" y="256.44999999999993" width="75.5" height="90" rx="5" fill="#d6dbe0" stroke="#243746" stroke-width="1.5"/>
+<circle cx="938.2" cy="225.24999999999991" r="8" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<circle cx="938.2" cy="225.24999999999991" r="3.5" fill="#f4f6f8" stroke="#243746" stroke-width="1.5"/>
+<circle cx="912.8" cy="225.24999999999991" r="8" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<circle cx="912.8" cy="225.24999999999991" r="3.5" fill="#f4f6f8" stroke="#243746" stroke-width="1.5"/>
+<circle cx="887.4000000000001" cy="225.24999999999991" r="8" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<circle cx="887.4000000000001" cy="225.24999999999991" r="3.5" fill="#f4f6f8" stroke="#243746" stroke-width="1.5"/>
+<circle cx="862.0" cy="225.24999999999991" r="8" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<circle cx="862.0" cy="225.24999999999991" r="3.5" fill="#f4f6f8" stroke="#243746" stroke-width="1.5"/>
+<circle cx="836.5999999999999" cy="225.24999999999991" r="8" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<circle cx="836.5999999999999" cy="225.24999999999991" r="3.5" fill="#f4f6f8" stroke="#243746" stroke-width="1.5"/>
+<circle cx="811.2" cy="225.24999999999991" r="8" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<circle cx="811.2" cy="225.24999999999991" r="3.5" fill="#f4f6f8" stroke="#243746" stroke-width="1.5"/>
+<circle cx="785.8" cy="225.24999999999991" r="8" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<circle cx="785.8" cy="225.24999999999991" r="3.5" fill="#f4f6f8" stroke="#243746" stroke-width="1.5"/>
+<circle cx="785.8" cy="377.65" r="8" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<circle cx="785.8" cy="377.65" r="3.5" fill="#f4f6f8" stroke="#243746" stroke-width="1.5"/>
+<circle cx="811.2" cy="377.65" r="8" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<circle cx="811.2" cy="377.65" r="3.5" fill="#f4f6f8" stroke="#243746" stroke-width="1.5"/>
+<circle cx="836.5999999999999" cy="377.65" r="8" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<circle cx="836.5999999999999" cy="377.65" r="3.5" fill="#f4f6f8" stroke="#243746" stroke-width="1.5"/>
+<circle cx="862.0" cy="377.65" r="8" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<circle cx="862.0" cy="377.65" r="3.5" fill="#f4f6f8" stroke="#243746" stroke-width="1.5"/>
+<circle cx="887.4000000000001" cy="377.65" r="8" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<circle cx="887.4000000000001" cy="377.65" r="3.5" fill="#f4f6f8" stroke="#243746" stroke-width="1.5"/>
+<circle cx="912.8" cy="377.65" r="8" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<circle cx="912.8" cy="377.65" r="3.5" fill="#f4f6f8" stroke="#243746" stroke-width="1.5"/>
+<circle cx="938.2" cy="377.65" r="8" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<circle cx="938.2" cy="377.65" r="3.5" fill="#f4f6f8" stroke="#243746" stroke-width="1.5"/>
+<text x="789" y="301" font-size="21" style="fill:white">QT Py</text>
+<text x="783" y="324" font-size="14" style="fill:white">ESP32-S2</text>
+<rect x="866.5" y="400.45000000000005" width="75.0" height="39.0" rx="5" fill="#f7f4e8" stroke="#243746" stroke-width="1.5"/>
+<rect x="763.0" y="402.44999999999993" width="53.4" height="28.0" rx="5" fill="#34414b" stroke="#243746" stroke-width="1.5"/>
+<text x="980" y="393" font-size="14">PicoBlade</text>
+<path d="M977 389L940 422" stroke="#516171" stroke-width="1.5" fill="none"/>
+<text x="640" y="416" font-size="14">LED socket</text>
+<path d="M710 411L775 419" stroke="#516171" stroke-width="1.5" fill="none"/>
+<text x="969" y="282" font-size="14">USB-C</text>
+<text x="969" y="302" font-size="12">programming</text>
+<path d="M971 310L945 316" stroke="#516171" stroke-width="1.5" fill="none"/>
+<text x="38" y="524" font-size="16">Two mounting holes + a 9-pin header mount the GPS.</text>
+<text x="38" y="548" font-size="16">VIN, GND, TX and RX connect through that header.</text>
+<text x="638" y="524" font-size="16">Two 7-pin headers mount the QT Py on the other face.</text>
+<text x="638" y="548" font-size="16">PicoBlade and optional LED socket face outward.</text>
+<path d="M38 573L1082 573" stroke="#516171" stroke-width="1.5" fill="none"/>
+<text x="38" y="610" font-size="19">SIDE VIEW — vertical gaps illustrative; select spacers after fit check</text>
+<rect x="130" y="640" width="310" height="23" rx="0" fill="#7c5aa6" stroke="#243746" stroke-width="1.5"/>
+<text x="550" y="658" font-size="17">Complete GPS board — antenna faces up</text>
+<rect x="150" y="663" width="24" height="38" rx="0" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<rect x="400" y="663" width="24" height="38" rx="0" fill="#a8b3bd" stroke="#243746" stroke-width="1.5"/>
+<text x="550" y="689" font-size="16">Board-to-board header and spacers</text>
+<rect x="112" y="701" width="346" height="13" rx="0" fill="#699c79" stroke="#243746" stroke-width="1.5"/>
+<text x="550" y="716" font-size="17">Carrier PCB — 1.6 mm nominal</text>
+<rect x="175" y="714" width="22" height="32" rx="0" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<rect x="375" y="714" width="22" height="32" rx="0" fill="#d8bb69" stroke="#243746" stroke-width="1.5"/>
+<rect x="166" y="746" width="242" height="23" rx="0" fill="#7c5aa6" stroke="#243746" stroke-width="1.5"/>
+<text x="550" y="765" font-size="17">QT Py — components face down</text>
+<text x="38" y="818" font-size="19">Electrical path</text>
+<text x="38" y="849" font-size="17">Main-nav TX → GPS RX. GPS TX → main-nav RX and QT Py RX (through 4.7 kohm).</text>
+<text x="38" y="876" font-size="17">QT Py TX is unconnected. GPIO18 controls the optional status LED.</text>
+<text x="38" y="915" font-size="16">No flying-wire taps. No GPS USB connector. The PCB is still unrouted.</text>
+<text x="38" y="951" font-size="13">CAD-based module/header positions; illustrative component shapes and heights. See README for print/CAD discrepancy.</text>
+</svg>

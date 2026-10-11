@@ -35,18 +35,18 @@ module's "one copy" rule. It therefore needs **dive-map/ checked out alongside
 dpv-nav/**, the same sibling-checkout assumption `orient_equivalence.py` makes. If it
 isn't there the script says so and stops rather than quietly fitting a different way.
 
-That fit uses only the samples within 15° of level, tilt-compensated. The collection
-procedure deliberately gathers nose-up and nose-down rings (the device's mounted
-coverage grid requires them), and fitting those as if they were level pours vertical
-field into the XY plane — worth ~0.9 µT per degree of tilt, which is what produced the
-lopsided scales seen on real units. A CSV with no accel columns (pre-9-axis firmware)
-can't be fitted this way and falls back to the old all-samples fit, saying so in a NOTE.
-Check the **Fit path** line in the output: a mounted cal's RMS % is only comparable to
-another fitted by the same path.
+That fit uses only the samples that are within 15° of level **and still** (under 8°/s,
+accel within 0.03 g of 1 g), tilt-compensated. The collection procedure deliberately
+gathers nose-up and nose-down rings (the device's mounted coverage grid requires them),
+and fitting those as if they were level pours vertical field into the XY plane — worth
+~0.9 µT per degree of tilt, which is what produced the lopsided scales seen on real
+units. Samples taken in motion do the same thing on a smaller scale: a push reads as
+tilt.
 
-`--legacy-fit` forces this script's own pre-2026-09-13 fit. Its one job is reproducing
-what an already-installed cal contains (and measuring what refitting would change) — it
-is not the way to make a new calibration.
+There is no fallback. A collection without at least 30 still, level samples covering the
+circle (no gap over 90°), or a CSV with no accel/gyro columns (pre-9-axis firmware), is
+refused with the reason — the same message the server gives. Until 2026-10-11 such a
+collection was fitted the old all-samples way instead, which is the known-bad fit.
 
 ### Quality Indicators
 

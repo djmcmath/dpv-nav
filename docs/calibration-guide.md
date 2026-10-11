@@ -117,6 +117,8 @@ Mounted keeps the original live bin-coverage grid — its narrower ±30° operat
 1. **Mount device on DPV** in its normal installed position (all motors, batteries, and other magnetic sources present and at operational distance).
 2. Open menu (BTN1) → **CAL > Mounted**.
 3. Rotate the DPV through heading and tilt orientations. DPV operation is primarily horizontal so the grid only requires 3 elevation bands.
+   - **Do the level ring first, on its stand, and stop at each heading.** The server fits the correction only from samples that are within 15° of level (pitch *and* roll) and still (under 8°/s). A bin takes the first 18 samples it sees — about a fifth of a second — so a bin entered mid-swing is filled with samples the fit will throw away. Turn about 30°, stop, let it settle, then ease across into the next sector.
+   - The grid's "level" row is wider than that (±30° pitch, any roll) and has no stillness check yet, so **a green level row does not mean a usable one**. If the fit comes back "Too few still, level samples" or "Still level samples miss a … arc", that is what happened: re-collect, holding still. An on-screen stillness and level indicator is planned — see dive-map's `docs/architecture/mounted-cal-dwell-plan.md`.
 4. When all required bins are green, the nav device writes `/mag_mounted_samples.csv` to LittleFS.
 5. **If the unit has WiFi connected:** same cloud round trip as Baseline — CSV uploads automatically, the server fits it, and the display shows an accept/reject screen with quality band and RMS. Accept to install and hot-reload immediately.
 6. **If the unit has no WiFi:** offline notice is shown; CSV is still saved. Fall back to the manual path: export `/mag_mounted_samples.csv` and run

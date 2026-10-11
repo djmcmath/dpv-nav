@@ -43,8 +43,8 @@ def load_callib_fit():
     mode is exactly where that promise broke. The server learned to fit the
     correction from near-level samples only (compute_mounted_correction_level,
     2026-09-13) because the collection procedure deliberately gathers tilted
-    rings, while compute_mounted_correction() below went on fitting every
-    sample as if it were level. Copying the new fit down here would close
+    rings, while this script's own fit (removed 2026-10-11) went on fitting
+    every sample as if it were level. Copying the new fit down here would close
     today's gap and re-open the same one tomorrow, so mounted mode calls the
     server's fit_mounted() directly instead.
 
@@ -533,122 +533,6 @@ def save_json_calibration(filename, bias, soft_iron):
     print(f"\nSaved calibration to {filename}")
 
 
-def compute_mounted_correction(mounted_samples, base_bias, base_soft_iron):
-    """
-    Solve for mounted-cal correction (M_mount, b_mount) from base-corrected residuals.
-
-    Inputs:
-        mounted_samples  — (N, 3) raw logical-frame counts from mounted cal CSV
-        base_bias        — (3,) b_base from mag_base.json
-        base_soft_iron   — (3, 3) M_base from mag_base.json
-
-    Returns:
-        b_mount     — (3,) hard-iron offset in base-corrected space (b_z always 0)
-        M_mount     — (3, 3) soft-iron correction in base-corrected space (s_z always 1)
-        info        — diagnostic dict
-
-    Transform chain: corrected = M_mount * (M_base * (raw - b_base) - b_mount)
-
-    Constrained fit — only b_x, b_y, s_x, s_y are solved:
-      b_z = 0, s_z = 1 (locked)
-    Mounted cal only covers ±30° pitch, which is insufficient to constrain the Z
-    axis reliably.  Solving b_z / s_z from sparse, asymmetric vertical data would
-    produce noisy corrections that hurt heading accuracy more than they help.
-
-    Both b_x/b_y and s_x/s_y are regularized toward their priors (0 and 1) via a
-    weighted-prior blend: estimate = (raw * n + prior * LAMBDA) / (n + LAMBDA).
-    This prevents extreme corrections when the mounted cal dataset is small.
-
-    b_x, b_y are estimated via an algebraic 2D circle fit (more robust than
-    min/max midpoint for the heading-critical horizontal axes).
-    """
-    # Regularization strengths, in "equivalent prior sample counts".
-    # At n = 100 samples: bias shrinkage ~33%, scale shrinkage ~33%.
-    # At n = 500 samples: shrinkage ~9%.  Adjust if data is routinely sparse/dense.
-    LAMBDA_BIAS  = 50.0
-    LAMBDA_SCALE = 50.0
-
-    # Apply base calibration to all mounted samples
-    base_corrected = (base_soft_iron @ (mounted_samples - base_bias).T).T  # (N, 3)
-    n = len(base_corrected)
-
-    # --- Hard-iron offset: b_x, b_y only; b_z locked to 0 ---
-    # 2D algebraic circle fit on X,Y is more accurate than min/max midpoint:
-    # it's not thrown off by azimuth gaps and handles full or partial coverage.
-    b_x_raw, b_y_raw, r_flat = fit_circle_2d(base_corrected[:, :2])
-
-    # Regularize toward 0: b_reg = b_raw * n / (n + LAMBDA)
-    b_x = b_x_raw * n / (n + LAMBDA_BIAS)
-    b_y = b_y_raw * n / (n + LAMBDA_BIAS)
-    b_mount = np.array([b_x, b_y, 0.0])
-
-    # --- Scale correction: s_x, s_y only; s_z locked to 1 ---
-    # Solve A*u^2 + C*v^2 = 1 with known centre (2-parameter algebraic LS fit).
-    # More robust than per-axis RMS: RMS is biased when samples cluster near
-    # 0°/180° vs 90°/270° (common in hand-collected mounted-cal data because
-    # operators tend to hold one heading longer while turning around).
-    # The algebraic fit uses all samples optimally via normal equations.
-    centered = base_corrected - b_mount
-    u = centered[:, 0]
-    v = centered[:, 1]
-    M22 = np.array([
-        [np.sum(u**4),        np.sum(u**2 * v**2)],
-        [np.sum(u**2 * v**2), np.sum(v**4)       ],
-    ])
-    rhs22 = np.array([np.sum(u**2), np.sum(v**2)])
-    scale_method = "algebraic"
-    rx = ry = 1.0  # fallback values
-    try:
-        Ac = np.linalg.solve(M22, rhs22)  # [A, C]
-        if Ac[0] > 0 and Ac[1] > 0:
-            rx = 1.0 / np.sqrt(Ac[0])
-            ry = 1.0 / np.sqrt(Ac[1])
-        else:
-            raise ValueError("non-positive semi-axis")
-    except Exception:
-        # Fallback: per-axis RMS (less accurate for skewed distributions)
-        rms_xy = np.sqrt(np.mean(centered[:, :2]**2, axis=0))
-        rx, ry = rms_xy[0], rms_xy[1]
-        scale_method = "RMS (algebraic fallback)"
-        print("  WARNING: algebraic scale fit failed — using per-axis RMS fallback")
-
-    avg_r_fit = (rx + ry) / 2.0
-    s_xy_raw = np.array([avg_r_fit / rx, avg_r_fit / ry])
-
-    # Regularize toward 1: s_reg = (s_raw * n + 1.0 * LAMBDA) / (n + LAMBDA)
-    s_xy_reg = (s_xy_raw * n + LAMBDA_SCALE) / (n + LAMBDA_SCALE)
-    scale = np.array([s_xy_reg[0], s_xy_reg[1], 1.0])
-    M_mount = np.diag(scale)
-
-    # Heading error estimate from XY ellipticity (before correction)
-    diff_rc = abs(rx - ry)
-    hdg_err_raw = float(np.degrees(np.arctan2(diff_rc, avg_r_fit))) if avg_r_fit > 0 else 0.0
-
-    # Diagnostics (residuals after applying the full correction)
-    corrected_final = (M_mount @ centered.T).T
-    magnitudes = np.linalg.norm(corrected_final, axis=1)
-    avg_r = np.mean(magnitudes)
-    errors = magnitudes - avg_r
-    rms_err = np.sqrt(np.mean(errors**2))
-
-    info = {
-        'n_samples': n,
-        'b_mount': b_mount,
-        'b_raw': np.array([b_x_raw, b_y_raw, 0.0]),
-        'scale': scale,
-        'scale_raw': np.array([s_xy_raw[0], s_xy_raw[1], 1.0]),
-        'r_flat': r_flat,
-        'rx': rx, 'ry': ry,
-        'hdg_err_raw_deg': hdg_err_raw,
-        'scale_method': scale_method,
-        'avg_radius': avg_r,
-        'rms_error': rms_err,
-        'rms_pct': 100.0 * rms_err / avg_r if avg_r > 0 else float('nan'),
-    }
-
-    return b_mount, M_mount, info
-
-
 def load_json_calibration(filename):
     """Load MagCalib JSON produced by save_json_calibration()."""
     with open(filename, 'r') as f:
@@ -767,7 +651,7 @@ def run_mounted(args):
 
     The fit itself is dive-map's callib.fit.fit_mounted() rather than anything
     computed here, so this script and the server cannot answer differently for
-    the same CSV. --legacy-fit forces the local pre-2026-09-13 path instead.
+    the same CSV. There is no local mounted fit.
     """
     if not args.base:
         print("ERROR: --mode mounted requires --base <mag_base.json>")
@@ -782,19 +666,12 @@ def run_mounted(args):
     base_bias, base_soft_iron = load_json_calibration(args.base)
     print(f"  b_base: X={base_bias[0]:.2f}  Y={base_bias[1]:.2f}  Z={base_bias[2]:.2f}")
 
-    if args.legacy_fit:
-        run_mounted_legacy(args, output_file, base_bias, base_soft_iron)
-        return
-
     callib_fit = load_callib_fit()
     if callib_fit is None:
         print(f"\nERROR: could not import callib from {CALLIB_PARENT}")
         print("  Mounted mode fits through dive-map's calibration-processor so that this")
         print("  script and the server cannot disagree about the same CSV. Check out")
-        print("  dive-map/ alongside dpv-nav/ (and pip install numpy scipy), or pass")
-        print("  --legacy-fit to use this script's own pre-2026-09-13 fit — which fits")
-        print("  the procedure's tilted rings as if they were level, and is meant for")
-        print("  reproducing an already-installed cal, not for making a new one.")
+        print("  dive-map/ alongside dpv-nav/ (and pip install numpy scipy).")
         sys.exit(1)
 
     print(f"\nLoading mounted cal samples from {args.input}...")
@@ -805,14 +682,16 @@ def run_mounted(args):
         )
     except callib_fit.CalibrationError as exc:
         # The server's 422: a fact about the data, not a crash. Same wording
-        # the diver would see on the website for this upload.
+        # the diver would see on the website for this upload. A collection
+        # without enough still, level samples lands here -- there is no other
+        # fit it gets instead.
         print(f"\nERROR: {exc}")
         sys.exit(1)
 
     b_mount = np.array(result.bias)
     M_mount = np.array(result.soft_iron)
     diag = result.diagnostics
-    level = diag.get("level_fit")
+    level = diag["level_fit"]
 
     print("\n" + "="*60)
     print("MOUNTED CALIBRATION CORRECTION RESULTS")
@@ -829,23 +708,19 @@ def run_mounted(args):
     avg_radius = diag.get("avg_radius")
     print(f"\nDiagnostics:")
     print(f"  Samples: {result.num_samples}")
-    if level:
-        print(f"  Fit path: NEAR-LEVEL SUBSET, tilt-compensated")
-        print(f"    {level['num_level_samples']} of {level['num_samples']} samples within "
-              f"{level['tilt_window_deg']:.0f}° of level; largest azimuth gap "
-              f"{level['max_azimuth_gap_deg']:.0f}°")
-    else:
-        print(f"  Fit path: LEGACY all-samples XY (see notes below)")
+    print(f"  Fitted from the STILL, NEAR-LEVEL samples, tilt-compensated")
+    print(f"    {level['num_fit_samples']} used of {level['num_samples']}: "
+          f"{level['num_level_samples']} within {level['tilt_window_deg']:.0f}° of level, "
+          f"{level['num_level_moving']} of those left out as taken in motion "
+          f"(over {level['still_gyro_dps']:.0f}°/s, or accel more than "
+          f"{level['still_accel_dev_g']} g off 1 g)")
+    print(f"    largest azimuth gap {level['max_azimuth_gap_deg']:.0f}°")
     if avg_radius:
         print(f"  Circle radius: {avg_radius:.2f} counts  ({avg_radius/LSB_PER_UT:.2f} µT)")
     print(f"  Per-axis scale: X={M_mount[0, 0]:.4f}  Y={M_mount[1, 1]:.4f}  Z=1.0000 (locked)")
     print(f"  RMS error (after correction): {result.rms:.2f}  ({result.rms_pct:.2f}%)"
           f"  [{result.quality_band.upper()}]")
     print(f"  Max abs error: {result.max_abs_pct:.2f}%")
-    # The level path's residual is a horizontal circle residual and the legacy
-    # path's is an all-samples sphere residual, so they are graded against
-    # different bands. Two mounted cals' rms_pct are only comparable when the
-    # "Fit path" line above matches.
     print(f"  {result.recommendation}")
     for note in diag.get("notes", []):
         print(f"  NOTE: {note}")
@@ -859,66 +734,6 @@ def run_mounted(args):
     print(f"     corrected = M_mount * (M_base * (raw - b_base) - b_mount)")
     print(f"  3. Re-collect the heading (Fourier) cal from scratch — a mounted stage")
     print(f"     change invalidates hdg_fourier.json, and nothing catches that on device.")
-
-
-def run_mounted_legacy(args, output_file, base_bias, base_soft_iron):
-    """--legacy-fit: the pre-2026-09-13 all-samples XY fit, kept for one job.
-
-    This is the fit that produced every mounted cal now installed on a device,
-    so it is how you reproduce what a unit is actually running — and how you
-    measure what refitting would change. It is not the fit to use for a new
-    calibration: it treats the procedure's deliberately tilted rings as level.
-    See load_callib_fit().
-    """
-    print(f"\nLoading mounted cal samples from {args.input}...")
-    raw_samples = load_csv(args.input)
-    raw_samples = deduplicate(raw_samples)
-    print(f"  {len(raw_samples)} samples after dedup")
-
-    if len(raw_samples) < 50:
-        print("WARNING: Very few samples — mounted cal may be inaccurate.")
-
-    print("\nSolving mounted correction (diagonal soft-iron, full hard-iron)...")
-    b_mount, M_mount, info = compute_mounted_correction(raw_samples, base_bias, base_soft_iron)
-
-    print("\n" + "="*60)
-    print("MOUNTED CALIBRATION CORRECTION RESULTS")
-    print("="*60)
-    print(f"\nMounted hard-iron offset (b_mount, in base-corrected space):")
-    print(f"  X: {b_mount[0]:+8.4f}  (raw: {info['b_raw'][0]:+.4f})")
-    print(f"  Y: {b_mount[1]:+8.4f}  (raw: {info['b_raw'][1]:+.4f})")
-    print(f"  Z:     0.0000  (locked — insufficient vertical coverage to constrain)")
-    print(f"\nMounted soft-iron correction (M_mount, diagonal):")
-    for i in range(3):
-        print(f"  [{M_mount[i, 0]:8.6f}, {M_mount[i, 1]:8.6f}, {M_mount[i, 2]:8.6f}]")
-    LSB_PER_UT = 68.42
-    print(f"\nDiagnostics:")
-    print(f"  Samples: {info['n_samples']}  |  Scale fit method: {info['scale_method']}")
-    print(f"  Flat circle radius (base-corrected): {info['r_flat']:.2f} counts  ({info['r_flat']/LSB_PER_UT:.2f} µT)")
-    print(f"  XY semi-axes (algebraic):  rx={info['rx']:.2f}  ry={info['ry']:.2f}  ratio={info['ry']/info['rx']:.3f}")
-    print(f"  Ellipticity heading error (pre-correction): ±{info['hdg_err_raw_deg']:.1f}°")
-    print(f"  Per-axis scale (raw):        X={info['scale_raw'][0]:.4f}  Y={info['scale_raw'][1]:.4f}  Z=1.0000 (locked)")
-    print(f"  Per-axis scale (regularized): X={info['scale'][0]:.4f}  Y={info['scale'][1]:.4f}  Z=1.0000 (locked)")
-    print(f"  RMS error (after correction): {info['rms_error']:.2f}  ({info['rms_pct']:.2f}%)")
-
-    # Sanity check: if M_mount is close to identity, mounting effect is small
-    deviation = np.max(np.abs(info['scale'][:2] - 1.0))
-    if deviation < 0.02:
-        print(f"\n  NOTE: Scale correction < 2% — scooter's soft-iron effect is small.")
-        print(f"        Mounted cal primarily provides b_mount (hard-iron) correction.")
-    elif deviation > 0.15:
-        hdg_e = info['hdg_err_raw_deg']
-        print(f"\n  NOTE: Scale correction > 15% (ellipticity ±{hdg_e:.1f}°).")
-        print(f"        This level of XY asymmetry is plausible for a DPV with strong")
-        print(f"        motor/battery fields.  Verify by checking heading accuracy after upload.")
-
-    print("\n" + "="*60)
-    save_json_calibration(output_file, b_mount, M_mount)
-    warn_device_filename(output_file, "mag_mount.json")
-    print(f"\nNext steps:")
-    print(f"  1. Upload {output_file} to the device filesystem root as /mag_mount.json")
-    print(f"  2. Reboot device — it will apply the full base+mount correction chain")
-    print(f"     corrected = M_mount * (M_base * (raw - b_base) - b_mount)")
 
 
 def main():
@@ -935,9 +750,9 @@ Modes:
   mounted   Solve correction from base-corrected residuals → mag_mount.json
             Usage: python mag_calibration.py --mode mounted --base mag_base.json <mounted.csv>
             Fitted by dive-map/calibration-processor's callib.fit (the one copy of
-            the fit math), from the near-level samples only — so this and the
-            server cannot disagree about the same CSV. Needs dive-map/ checked out
-            alongside dpv-nav/; --legacy-fit falls back to this script's own fit.
+            the fit math), from the still, near-level samples only — so this and
+            the server cannot disagree about the same CSV, including about
+            refusing one. Needs dive-map/ checked out alongside dpv-nav/.
 
 Transform chain applied on device:
   corrected = M_mount * (M_base * (raw - b_base) - b_mount)
@@ -951,10 +766,6 @@ Transform chain applied on device:
                         help='(mounted mode) mag_base.json from previous baseline cal')
     parser.add_argument('--output', '-o', metavar='OUTPUT_JSON',
                         help='Output JSON filename (default: mag_base.json or mag_mount.json)')
-    parser.add_argument('--legacy-fit', action='store_true',
-                        help='(mounted mode) Use this script\'s own pre-2026-09-13 fit instead of '
-                             'calibration-processor\'s. Fits the procedure\'s tilted rings as if they '
-                             'were level; for reproducing an installed cal, not for making a new one.')
 
     args = parser.parse_args()
 

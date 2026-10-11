@@ -31,6 +31,31 @@ Silent loss. The diver gets no error, just bad data later.
   is the enforcement point, because the unit is where a wrong heading gets displayed and
   acted on.
 
+- [ ] **Mounted collection records samples the fit can't use**
+
+  A mounted bin takes the first 18 samples that land in it, about 0.2 s after the unit
+  swings across the boundary, with no stillness test. The server's fit tilt-compensates
+  from the accelerometer, so those samples carry a false tilt, and its "level" is ±15°
+  of pitch and roll where the grid's is ±30° of pitch with no roll limit. A fully green
+  grid can hold almost nothing usable. Once dive-map's fit corrections deploy, such a
+  collection is rejected instead of silently fitted badly.
+
+  *Wanted:* record a cell only from a still dwell inside the attitude the fit accepts,
+  and show the diver a motion bar and an attitude indicator so they can get there. Part A
+  of dive-map's
+  [`mounted-cal-dwell-plan.md`](../../dive-map/docs/architecture/mounted-cal-dwell-plan.md).
+
+- [ ] **A cal can't tell whether it was collected with thermal compensation on**
+
+  Compensation is applied inside the raw mag read, so cal samples are normalised to
+  `ref_temp_c` when `/mag_temp.json` is loaded and not at all when it is absent. Nothing
+  records which. A cal collected one way and used the other is off by the full thermal
+  drift (0.65 µT/°C), silently, and the item below is how the file goes missing.
+
+  *Wanted:* `mag_temp_c` and `tcomp` on every cal CSV row, a `thermal` block in the cal
+  JSON, and a load-time mismatch warning. Part D of
+  [`mounted-cal-dwell-plan.md`](../../dive-map/docs/architecture/mounted-cal-dwell-plan.md).
+
 - [ ] **`mag_temp.json` is local-only and `uploadfs` erases it**
 
   Thermal-compensation coefficients are per-unit and cost ~4 hours of heat testing to

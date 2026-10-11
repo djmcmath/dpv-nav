@@ -23,10 +23,13 @@ tools/lognames_test/lognames
 tools/mounted_dwell_test/dwell
 tools/logidle_test/logidle
 tools/logrecord_test/logrecord
-tools/logrecord_test/sample.bin
 
 # Device-auth bearer token written by the cloud-link tooling -- never commit.
 tools/device_token.json
+
+# Binary files: MID/HIGH dive logs pulled off the unit, firmware images, test
+# output. Data or build products, never source.
+*.bin
 
 # Dive-log CSVs captured off the device for analysis. Data, not source --
 # these are large and are kept locally rather than versioned.

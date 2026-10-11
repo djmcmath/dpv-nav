@@ -1519,32 +1519,50 @@ void showSpeedCalResult(uint16_t dist_ft, uint16_t elapsed_s,
 // flicker (every call used to start with an unconditional fillScreen()).
 //
 // Layout (320×240):
-//   y=  0  "HDG CAL  Step N/12"        cyan,   size 1  (static)
-//   y= 10  separator                   cyan
-//   y= 14  "TARGET"                    gray,   size 1  (static)
-//   y= 24  "XXX°" target               white,  size 6, centered (static)
-//   y= 78  separator                   cyan
-//   y= 82  "HDG"                       gray,   size 1  (static)
-//   y= 92  "XXX°" indicated            white,  size 6, centered (live)
-//   y=146  separator                   cyan
-//   y=152  "Mark with BTN2"            gray,   size 2  (static)
-//   y=178  "Avg err ±X°" / "Avg err --" yellow, size 2  (live, on capture)
+//   y=  2  "HDG CAL  Step N/12"        cyan,   size 2  (static)
+//   y= 20  separator                   cyan
+//   y= 28  "TGT"  "XXX°" target        gray size 3 / white size 6 (static)
+//   y= 80  separator                   cyan
+//   y= 88  "HDG"  "XXX°" indicated     gray size 3 / white size 6 (live)
+//   y=140  separator                   cyan
+//   y=150  "Mark with BTN2"            gray,   size 2  (static)
+//   y=176  "Avg err ±X°" / "Avg err --" yellow, size 2  (live, on capture)
+//
+// Each row's label sits LEFT of its number, not above it, so the label can be
+// large and nothing the live number redraws can reach it.
+//
+// Degree sign is "\xF7", not "\xB0" -- and plus-minus is "\xF0", not "\xB1".
+// The GFX classic font is CP437 (degree = 0xF8, plus-minus = 0xF1) and, with
+// cp437() left off, GFX bumps every code >= 176 by one. The Latin-1 codes
+// land on shade blocks -- the checkerboard that read as a fourth digit.
+// Holds for every screen in this file.
 // ---------------------------------------------------------------------------
 static int s_hdgCalLastStep     = -1;
 static int s_hdgCalLastIndInt   = INT32_MIN;
 static bool s_hdgCalLastAvgValid = false;
 static int s_hdgCalLastAvgInt   = INT32_MIN;
 
-// Shared by the TARGET (static, step entry) and HDG (live, every tick) rows.
+static constexpr int HDGCAL_ROW_TGT_Y = 28;
+static constexpr int HDGCAL_ROW_HDG_Y = 88;
+static constexpr int HDGCAL_NUM_X     = 160;   // 4 chars × 36 px = 144 → ends at 304
+
+static void drawHdgCalRowLabel(int y, const char* label) {
+    tft.setTextSize(3);
+    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+    tft.setCursor(4, y + 10);   // size-3 glyph (21 px) centred on the size-6 one (42 px)
+    tft.print(label);
+}
+
+// Shared by the TGT (static, step entry) and HDG (live, every tick) rows.
+// Always exactly 4 opaque-background glyphs, so it erases itself -- no
+// full-width fillRect, which would wipe the row label beside it.
 static void drawHdgCalBigNumber(int y, float deg) {
+    int d = ((int)lroundf(deg) % 360 + 360) % 360;
     char buf[8];
-    snprintf(buf, sizeof(buf), "%03.0f" "\xB0", deg);
-    tft.fillRect(0, y, SCREEN_WIDTH, 48, COLOR_BLACK);
+    snprintf(buf, sizeof(buf), "%03d" "\xF7", d);
     tft.setTextSize(6);
     tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
-    int charW = 6 * 6;
-    int x = (SCREEN_WIDTH - (int)strlen(buf) * charW) / 2;
-    tft.setCursor(x, y);
+    tft.setCursor(HDGCAL_NUM_X, y);
     tft.print(buf);
 }
 
@@ -1558,31 +1576,27 @@ void showHdgFourierCalPrompt(int step, int total, float targetDeg, float indicat
         invalidateNavCache();
         tft.fillScreen(COLOR_BLACK);
 
-        tft.setTextSize(1);
+        tft.setTextSize(2);
         tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
-        tft.setCursor(0, 0);
+        tft.setCursor(4, 2);
         char hdr[24];
         snprintf(hdr, sizeof(hdr), "HDG CAL  Step %d/%d", step + 1, total);
         tft.print(hdr);
-        tft.drawFastHLine(0, 10, SCREEN_WIDTH, COLOR_CYAN);
+        tft.drawFastHLine(0, 20, SCREEN_WIDTH, COLOR_CYAN);
 
-        tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
-        tft.setCursor(0, 14);
-        tft.print("TARGET");
-        drawHdgCalBigNumber(24, targetDeg);
+        drawHdgCalRowLabel(HDGCAL_ROW_TGT_Y, "TGT");
+        drawHdgCalBigNumber(HDGCAL_ROW_TGT_Y, targetDeg);
 
-        tft.drawFastHLine(0, 78, SCREEN_WIDTH, COLOR_CYAN);
+        tft.drawFastHLine(0, 80, SCREEN_WIDTH, COLOR_CYAN);
 
-        tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
-        tft.setCursor(0, 82);
-        tft.print("HDG");
+        drawHdgCalRowLabel(HDGCAL_ROW_HDG_Y, "HDG");
         // live number drawn unconditionally below, every call
 
-        tft.drawFastHLine(0, 146, SCREEN_WIDTH, COLOR_CYAN);
+        tft.drawFastHLine(0, 140, SCREEN_WIDTH, COLOR_CYAN);
 
         tft.setTextSize(2);
         tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
-        tft.setCursor(4, 152);
+        tft.setCursor(4, 150);
         tft.print("Mark with BTN2");
 
         g_hdgCalPromptStaticDrawn = true;
@@ -1595,7 +1609,7 @@ void showHdgFourierCalPrompt(int step, int total, float targetDeg, float indicat
     int indInt = (int)lroundf(indicatedDeg);
     if (indInt != s_hdgCalLastIndInt) {
         s_hdgCalLastIndInt = indInt;
-        drawHdgCalBigNumber(92, indicatedDeg);
+        drawHdgCalBigNumber(HDGCAL_ROW_HDG_Y, indicatedDeg);
     }
 
     // Avg error -- only changes when a new point is captured, not per tick.
@@ -1604,13 +1618,13 @@ void showHdgFourierCalPrompt(int step, int total, float targetDeg, float indicat
     if (avgValid != s_hdgCalLastAvgValid || (avgValid && avgInt != s_hdgCalLastAvgInt)) {
         s_hdgCalLastAvgValid = avgValid;
         s_hdgCalLastAvgInt   = avgInt;
-        tft.fillRect(0, 178, SCREEN_WIDTH, 16, COLOR_BLACK);
+        tft.fillRect(0, 176, SCREEN_WIDTH, 16, COLOR_BLACK);
         tft.setTextSize(2);
         tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
-        tft.setCursor(4, 178);
+        tft.setCursor(4, 176);
         char ebuf[24];
         if (avgValid) {
-            snprintf(ebuf, sizeof(ebuf), "Avg err %+d" "\xB0", avgInt);
+            snprintf(ebuf, sizeof(ebuf), "Avg err %+d" "\xF7", avgInt);
         } else {
             snprintf(ebuf, sizeof(ebuf), "Avg err --");
         }
@@ -1650,12 +1664,12 @@ void showHdgFourierCalAck(int step, int total, float targetDeg, float indicatedD
     tft.print(line);
 
     tft.setCursor(20, 130);
-    snprintf(line, sizeof(line), "Tgt %03.0f" "\xB0" "  Hdg %03.0f" "\xB0", targetDeg, indicatedDeg);
+    snprintf(line, sizeof(line), "Tgt %03.0f" "\xF7" "  Hdg %03.0f" "\xF7", targetDeg, indicatedDeg);
     tft.print(line);
 
     tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
     tft.setCursor(20, 160);
-    snprintf(line, sizeof(line), "err %+.0f" "\xB0" "  avg %+.0f" "\xB0", errDeg, avgErrDeg);
+    snprintf(line, sizeof(line), "err %+.0f" "\xF7" "  avg %+.0f" "\xF7", errDeg, avgErrDeg);
     tft.print(line);
 }
 
@@ -1848,7 +1862,7 @@ void showCloudCalResult(uint8_t quality, float rmsPct, const char* recommendatio
     const bool isHdg = (calType == (uint8_t)CalType::HDG);
     char buf[28];
     if (isHdg) {
-        snprintf(buf, sizeof(buf), "%s  %.1f" "\xF8" " max err", bandLabel, (double)rmsPct);
+        snprintf(buf, sizeof(buf), "%s  %.1f" "\xF7" " max err", bandLabel, (double)rmsPct);
     } else {
         snprintf(buf, sizeof(buf), "%s  %.0f%% RMS", bandLabel, (double)rmsPct);
     }
@@ -2362,7 +2376,7 @@ void showCalGrid(const CalProgressPacket& pkt, const char* title) {
             // (int), matching hdgSector()'s floor -- a rounded 360 would name
             // a column that isn't there.
             char gbuf[16];
-            snprintf(gbuf, sizeof(gbuf), "%03d\xB0 %+.0f\xB0", (int)hdg, pitch);
+            snprintf(gbuf, sizeof(gbuf), "%03d\xF7 %+.0f\xF7", (int)hdg, pitch);
             tft.setTextSize(2);
             tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
             tft.setCursor(4, STATUS_Y + 20);
@@ -2444,7 +2458,7 @@ void showCalGrid(const CalProgressPacket& pkt, const char* title) {
                           : (pkt.fit_hdg_err_deg < 7.0f) ? COLOR_YELLOW
                           : COLOR_RED;
             char fbuf[20];
-            snprintf(fbuf, sizeof(fbuf), "Fit:\xB1%.1f\xB0", pkt.fit_hdg_err_deg);
+            snprintf(fbuf, sizeof(fbuf), "Fit:\xF0%.1f\xF7", pkt.fit_hdg_err_deg);
             tft.setTextSize(2);
             tft.setTextColor(fcol, COLOR_BLACK);
             tft.setCursor(4, STATUS_Y + 20);
@@ -2466,7 +2480,7 @@ void showCalGrid(const CalProgressPacket& pkt, const char* title) {
             // Numeric for the same reason as the gap-fill readout above --
             // the mounted grid has the same 12 columns.
             char obuf[16];
-            snprintf(obuf, sizeof(obuf), "%03d\xB0 %+.0f\xB0", (int)hdg, pitch);
+            snprintf(obuf, sizeof(obuf), "%03d\xF7 %+.0f\xF7", (int)hdg, pitch);
             tft.setTextSize(2);
             tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
             tft.setCursor(4, STATUS_Y + 20);
@@ -2549,7 +2563,7 @@ void showBaselineRoughScan(const CalProgressPacket& pkt) {
                       : (pkt.fit_hdg_err_deg < 7.0f) ? COLOR_YELLOW
                       : COLOR_RED;
         char fbuf[20];
-        snprintf(fbuf, sizeof(fbuf), "Fit:\xB1%.1f\xB0", pkt.fit_hdg_err_deg);
+        snprintf(fbuf, sizeof(fbuf), "Fit:\xF0%.1f\xF7", pkt.fit_hdg_err_deg);
         tft.setTextSize(2);
         tft.setTextColor(fcol, COLOR_BLACK);
         tft.setCursor(4, 150);

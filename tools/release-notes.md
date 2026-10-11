@@ -1,1 +1,2 @@
-- Updating log-roll capability to prioritize not deleting logs with depth information (aka "dives")
+- Updates to heading check calibration display
+- Updates to logging; LOW is now gated so it won't log when you're not diving, even if it's on.

@@ -1,7 +1,7 @@
 #pragma once
 
 #include <cstdint>
-#include "../sensors/imu.h"
+#include "log_record.h"
 #include "log_names.h"
 
 namespace logging {
@@ -11,39 +11,20 @@ namespace logging {
 static constexpr size_t LOG_NAME_MAX = log_names::NAME_BUF_LEN;
 static constexpr size_t LOG_PATH_MAX = 32;
 
-// MID is appended as 3 rather than inserted between LOW and HIGH on purpose: the
-// numeric value is persisted in NVS (`log_level`) and shipped in NavPacket's
-// 2-bit FLAG_LOG_LEVEL field, and the two boards are flashed separately. Renumber
-// HIGH and a saved setting — or a display board still running the previous build —
-// silently means a different level. The diver-facing cycle order is still
-// OFF -> LOW -> MID -> HIGH; see cycleLevel().
-enum class LogLevel : uint8_t { LEVEL_OFF = 0, LEVEL_LOW, LEVEL_HIGH, LEVEL_MID };
-
-// All data needed for a log entry. mag_cal/pitch_deg/roll_deg are written at MID
-// as well as HIGH; the raw and accel/gyro fields are HIGH-only. Everything past
-// the common set is ignored at LOW.
-struct LogData {
-    uint32_t timestamp_ms;
-    float heading_deg;
-    float speed_ms;
-    bool  gpsSpeed;       // true = GPS, false = flowmeter
-    float pos_x_m;
-    float pos_y_m;
-    float lat;            // current latitude (GPS or DR-estimated)
-    float lon;            // current longitude (GPS or DR-estimated)
-    char  pos_src;        // 'G' = GPS, 'W' = waypoint snap, 'E' = DR estimate, 'M' = diver mark
-    uint8_t gps_satellites; // satellites tracked (0 if no GPS fix)
-    float   gps_hdop;       // HDOP (0.0 if no GPS fix)
-    float   depth_m;        // depth below surface, meters (0 if sensor absent)
-    float   water_temp_c;   // water temperature, degrees C (0 if sensor absent)
-    // All levels: LIS3MDL die temperature, degrees C. NaN (logged as "nan")
-    // when the read fails, rather than 0, which would read as a real value.
-    float   mag_temp_c;
-    // HIGH-level fields
-    imu::Vec3f mag_raw, accel_raw, gyro_raw;
-    imu::Vec3f mag_cal, accel_cal, gyro_cal;
-    float pitch_deg, roll_deg;
-};
+// The numeric value is persisted in NVS (`log_level`) and shipped in NavPacket's
+// 2-bit FLAG_LOG_LEVEL field, so the nav and display boards must be flashed
+// together when it changes. (Until October 2026 HIGH was 2 and MID 3.)
+//
+//   LOW   CSV, the common columns. What a diver runs; uploads itself.
+//   MID   binary, every field, gated like LOW -- a whole dive's worth of
+//         diagnostics without logging the wait on the beach.
+//   HIGH  binary, every field, never gated. For bench tests, where a unit
+//         sitting still is the thing being measured.
+//
+// "Gated" means decimated to one row per LOG_IDLE_HEARTBEAT_MS while the unit
+// is idle on the surface (util/log_idle.h). LogData and the binary record are
+// in log_record.h.
+enum class LogLevel : uint8_t { LEVEL_OFF = 0, LEVEL_LOW, LEVEL_MID, LEVEL_HIGH };
 
 // Initialize logging system: mount LittleFS (if not already mounted),
 // clean up old logs if free space is below threshold (logs with no dive in
@@ -65,7 +46,7 @@ LogLevel getLevel();
 LogLevel getActiveLevel();
 
 // Cycle OFF -> LOW -> MID -> HIGH -> OFF. Selecting OFF closes the open file at once.
-// Selecting LOW or HIGH only records the choice and (re)starts the settle timer;
+// Selecting LOW, MID or HIGH only records the choice and (re)starts the settle timer;
 // tick() opens the file once it has held still for LOG_COMMIT_DELAY_MS.
 void cycleLevel();
 
@@ -74,11 +55,14 @@ void cycleLevel();
 // No-op if already at that level.
 void setLevel(LogLevel level);
 
-// Call from the main loop. Opens the file for a pending LOW/HIGH selection once
+// Call from the main loop. Opens the file for a pending selection once
 // it has been stable for LOG_COMMIT_DELAY_MS. (OFF never gets this far.)
 void tick();
 
-// Log one entry. No-op if level == OFF. Respects the per-level rate limit.
+// Log one entry. No-op if level == OFF. Call at the loop's send rate: it keeps
+// the per-level rate limit itself, and at LOW/MID stretches that to
+// LOG_IDLE_HEARTBEAT_MS while the unit is idle, so it needs to see every sample
+// to know when idle ends.
 void log(const LogData& d);
 
 // Log one entry immediately, bypassing the rate limit. Use for rare events

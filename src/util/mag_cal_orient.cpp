@@ -109,6 +109,13 @@ float reconstructRoll(float ax, float ay, float az) {
     return roll;
 }
 
+void pitchRollDeg(float ax, float ay, float az, float& pitchDegOut, float& rollDegOut) {
+    float pitch, roll;
+    pitchRollRad(ax, ay, az, pitch, roll);
+    pitchDegOut = pitch * kRad2Deg;
+    rollDegOut  = roll * kRad2Deg;
+}
+
 int rollSector(float rollDeg) {
     int s = (int)floorf((rollDeg + 45.0f) / 90.0f);
     s %= MAG_CAL_ROLL_SECTORS;

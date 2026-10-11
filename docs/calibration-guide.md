@@ -83,9 +83,9 @@ The preferred calibration workflow uses two stages, each producing a JSON file t
 | Mounted | CAL > Mounted | `/mag_mount.json` | After baseline, with device installed on DPV. Corrects for DPV magnetic signature. |
 
 Mounted (and Baseline's `Fill gaps` patch pass) collect raw samples using a
-**bin-aware** approach: the screen shows a heading × elevation grid, and bins fill
-green as adequate samples are collected, completing automatically once all required
-bins are green. Baseline's first-time pass instead uses axis-range bars with no grid
+**bin-aware** approach: the screen shows a heading × elevation grid, and cells turn
+green as they are filled, completing automatically once all required
+cells are green. Baseline's first-time pass instead uses axis-range bars with no grid
 and completes when the diver presses BTN2 — see the note under **Running Baseline
 Calibration** below for why. Either way, the sample CSV is saved to LittleFS once
 collection ends.
@@ -112,16 +112,20 @@ collection ends.
 
 ### Running Mounted Calibration
 
-Mounted keeps the original live bin-coverage grid — its narrower ±30° operating range sidesteps the pole problem that motivated retiring Baseline's grid, so nothing about the collection UI changed here.
+Mounted records **one dwell per cell**: a cell fills only after the scooter has sat still, inside that row's attitude, for about half a second. Swinging through a cell records nothing. The server's fit takes "down" from the accelerometer, so a sample taken while the scooter is being moved carries a false tilt and the fit has to throw it away — which is what happened to most of every collection before this (firmware up to 0.7.19 took the first 18 samples to land in a cell). Background: dive-map's [mounted-cal-dwell-plan.md](../../dive-map/docs/architecture/mounted-cal-dwell-plan.md).
 
 1. **Mount device on DPV** in its normal installed position (all motors, batteries, and other magnetic sources present and at operational distance).
 2. Open menu (BTN1) → **CAL > Mounted**.
-3. Rotate the DPV through heading and tilt orientations. DPV operation is primarily horizontal so the grid only requires 3 elevation bands.
-   - **Do the level ring first, on its stand, and stop at each heading.** The server fits the correction only from samples that are within 15° of level (pitch *and* roll) and still (under 8°/s). A bin takes the first 18 samples it sees — about a fifth of a second — so a bin entered mid-swing is filled with samples the fit will throw away. Turn about 30°, stop, let it settle, then ease across into the next sector.
-   - The grid's "level" row is wider than that (±30° pitch, any roll) and has no stillness check yet, so **a green level row does not mean a usable one**. If the fit comes back "Too few still, level samples" or "Still level samples miss a … arc", that is what happened: re-collect, holding still. An on-screen stillness and level indicator is planned — see dive-map's `docs/architecture/mounted-cal-dwell-plan.md`.
-4. When all required bins are green, the nav device writes `/mag_mounted_samples.csv` to LittleFS.
-5. **If the unit has WiFi connected:** same cloud round trip as Baseline — CSV uploads automatically, the server fits it, and the display shows an accept/reject screen with quality band and RMS. Accept to install and hot-reload immediately.
-6. **If the unit has no WiFi:** offline notice is shown; CSV is still saved. Fall back to the manual path: export `/mag_mounted_samples.csv` and run
+3. The screen shows a 3 × 12 grid on top and, below it, an attitude indicator on the left with a **MOTION** bar, a **HOLD** bar, a heading/pitch/roll readout and one instruction line on the right.
+   - **Attitude indicator.** The white line is the horizon. Put it inside the brackets and it turns them green: that is the attitude this row wants. Level row: within 10° of level in both pitch and roll. Tilted rows: nose up or down 20–40°, within 15° of roll.
+   - **MOTION bar.** Hold until it is empty. The word beside it says what is moving: `turning` (gyro), `pushed` or `shaking` (accelerometer). If it will not empty with the scooter resting on its stand, that sensor's calibration is off, not your hands.
+   - **HOLD bar.** Fills while the unit settles and then records. When it is full the cell turns green and the line reads `Got it - turn`.
+   - `Turn a bit more` means you are within 3° of the line between two cells; a dwell will not start there.
+4. **Level row first, on the stand: all 12 headings.** Turn about 30°, let go, wait for the cell to go green, repeat.
+5. **Then each tilted row: 6 headings, spread around the circle** (every other one is ideal; no gap wider than 90°). The count top right is out of the 24 cells needed.
+6. When the count reaches 24/24 the nav device writes `/mag_mounted_samples.csv` to LittleFS.
+7. **If the unit has WiFi connected:** same cloud round trip as Baseline — CSV uploads automatically, the server fits it, and the display shows an accept/reject screen with quality band and RMS. Accept to install and hot-reload immediately. If the server cannot fit the samples the screen says **Fit rejected** with its reason; the upload itself worked, so collect again rather than retrying.
+8. **If the unit has no WiFi:** offline notice is shown; CSV is still saved. Fall back to the manual path: export `/mag_mounted_samples.csv` and run
    `python tools/mag_calibration.py --mode mounted --base mag_base.json mag_mounted_samples.csv`,
    then upload the generated `mag_mount.json` to LittleFS **under exactly that name** (`/mag_mount.json`). Do not pass `--output` with a different name unless you rename it on upload — the firmware only reads `/mag_mount.json` and silently ignores anything else (this only applies to the manual fallback path; the cloud path always writes the correct filename). See the heading troubleshooting notes for why this bites.
 

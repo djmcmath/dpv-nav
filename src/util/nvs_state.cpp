@@ -13,6 +13,21 @@ static constexpr char DISP_NS[] = "disp_state";
 // ---------------------------------------------------------------------------
 namespace nvs_nav {
 
+// Log level keys. "log_level" was written as 0=OFF 1=LOW 2=HIGH 3=MID; the
+// renumbering to 0=OFF 1=LOW 2=MID 3=HIGH got a new key rather than a new
+// meaning for the old one, so a stored number always means what it meant when
+// it was stored. Renumber again and this needs another key.
+static constexpr char LOG_KEY[]        = "log_lvl";
+static constexpr char LOG_KEY_LEGACY[] = "log_level";
+
+static uint8_t logLevelFromLegacy(uint8_t v) {
+    switch (v) {
+        case 2:  return 3;   // HIGH
+        case 3:  return 2;   // MID
+        default: return v;   // OFF and LOW kept their values
+    }
+}
+
 State load() {
     State s;
     Preferences prefs;
@@ -31,11 +46,16 @@ State load() {
     s.gps        = prefs.getBool ("gps",        true);
     s.wifi       = prefs.getBool ("wifi",       true);
     s.dive_mode  = prefs.getBool ("dive_mode",  false);
-    s.log_level  = prefs.getUChar("log_level",  0);
-    // Only 0..3 are real levels (OFF/LOW/HIGH/MID — MID appended as 3, see
-    // logging.h). Anything else is a corrupt record or one written by a build
-    // that numbered them differently; casting it to LogLevel would select a
-    // schema that doesn't exist.
+    // The level is read back under the numbering it was written in. LOG_KEY
+    // holds today's (logging.h); a unit last saved by firmware from before the
+    // October 2026 renumbering has only LOG_KEY_LEGACY, which is translated.
+    // save() writes LOG_KEY and deletes the legacy key, so this branch runs at
+    // most until the first save after the update.
+    s.log_level  = prefs.isKey(LOG_KEY)
+                 ? prefs.getUChar(LOG_KEY, 0)
+                 : logLevelFromLegacy(prefs.getUChar(LOG_KEY_LEGACY, 0));
+    // Only 0..3 are real levels. Anything else is a corrupt record; casting it
+    // to LogLevel would select a schema that doesn't exist.
     if (s.log_level > 3) s.log_level = 0;
     s.pos_x      = prefs.getFloat("pos_x",      0.0f);
     s.pos_y      = prefs.getFloat("pos_y",      0.0f);
@@ -75,7 +95,8 @@ void save(const State& s) {
     prefs.putBool ("gps",       s.gps);
     prefs.putBool ("wifi",      s.wifi);
     prefs.putBool ("dive_mode", s.dive_mode);
-    prefs.putUChar("log_level", s.log_level);
+    prefs.putUChar(LOG_KEY, s.log_level);
+    if (prefs.isKey(LOG_KEY_LEGACY)) prefs.remove(LOG_KEY_LEGACY);
     // Same guard as savePosition(): keep the last good position rather than
     // overwriting it with NaN when a full save is triggered by some other toggle.
     if (isfinite(s.pos_x) && isfinite(s.pos_y)) {

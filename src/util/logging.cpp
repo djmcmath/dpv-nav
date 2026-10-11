@@ -1,5 +1,6 @@
 #include "logging.h"
 #include "log_names.h"
+#include "log_idle.h"
 #include "boot_log.h"
 #include "../config.h"
 #include <Arduino.h>
@@ -18,7 +19,7 @@ static bool     gReady    = false;   // init() succeeded
 // Two levels, because selecting one and acting on it are deliberately separated
 // by LOG_COMMIT_DELAY_MS (see config.h). gLevel is what the diver picked and
 // what the UI reports; gActiveLevel is what the open file — if any — actually
-// is, and it alone decides the CSV schema.
+// is, and it alone decides the file format and schema.
 static LogLevel gLevel       = LogLevel::LEVEL_OFF;
 static LogLevel gActiveLevel = LogLevel::LEVEL_OFF;
 static uint32_t gLevelSetMs  = 0;    // millis() of the last cycleLevel()
@@ -32,8 +33,8 @@ static constexpr const char* LOG_DIR = "/logs";
 // Rolling-log cleanup (cleanupOldLogs() below) prefers to delete a log that
 // never recorded a dive -- just a GPS-only track, e.g. left logging after the
 // diver forgot to stop -- over one that did, even when the dive log is older.
-// depth_m is column 13 (0-based 12) in every schema; LOW/MID/HIGH share that
-// prefix (see writeHeader()). A unit with no depth sensor logs depth_m as 0.0
+// depth_m is column 13 (0-based 12) in every CSV schema this firmware has
+// written, and at LOG_RECORD_DEPTH_OFFSET in a binary record. A unit with no depth sensor logs depth_m as 0.0
 // for every row regardless of level (see nav_main.cpp's depth::isPresent()
 // checks), so every log on it reads as non-dive and cleanup quietly falls
 // back to today's plain oldest-first order -- not a regression, just no
@@ -46,11 +47,26 @@ static constexpr int   DEPTH_COLUMN_INDEX         = 12;
 // local_time column.
 static constexpr time_t CLOCK_VALID_EPOCH = 1700000000L;
 
-// Log files are named /logs/YYYYMMDD-NNN.csv -- see util/log_names.h for the
-// grammar and why it is dated. Sequence numbers are resolved per file at open
+// Log files are named /logs/YYYYMMDD-NNN.csv (LOW) or .bin (MID/HIGH) -- see
+// util/log_names.h for the grammar and why it is dated. Sequence numbers are resolved per file at open
 // time from what is on disk (openNextFile), not from a counter, so deleting a
 // log can never hand its name to a later one.
 static constexpr uint16_t LOG_SEQ_MAX = 999;
+
+// MID and HIGH write fixed binary records (log_record.h); LOW writes CSV.
+static bool levelIsBinary(LogLevel l) {
+    return l == LogLevel::LEVEL_MID || l == LogLevel::LEVEL_HIGH;
+}
+
+// LOW and MID thin out to a heartbeat while the unit is idle on the surface;
+// HIGH never does. See util/log_idle.h.
+static bool levelIsGated(LogLevel l) {
+    return l == LogLevel::LEVEL_LOW || l == LogLevel::LEVEL_MID;
+}
+
+static log_idle::Gate  gIdleGate;
+static log_idle::Pacer gPacer;
+static LogData         gHeldSample{};   // newest idle sample not written, see log_idle::Pacer
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -104,6 +120,28 @@ static void scanLogDir(LogScan& out, const char* seqPrefix) {
 static bool isNonDiveLog(const char* path) {
     File f = LittleFS.open(path, FILE_READ);
     if (!f) return true;
+
+    if (log_names::isBinary(path)) {
+        // Sizes come from the file's own header, not this build's structs, so
+        // a log written by a later record version is still read correctly.
+        LogFileHeader h{};
+        bool ok = f.read((uint8_t*)&h, sizeof(h)) == sizeof(h) &&
+                  memcmp(h.magic, LOG_BIN_MAGIC, sizeof(h.magic)) == 0 &&
+                  h.header_size >= sizeof(h) &&
+                  h.record_size >= LOG_RECORD_DEPTH_OFFSET + sizeof(int16_t);
+        const int16_t threshold = (int16_t)(NON_DIVE_DEPTH_THRESHOLD_M / LOG_SCALE_DEPTH);
+        for (uint32_t pos = h.header_size; ok; pos += h.record_size) {
+            int16_t depth;
+            if (!f.seek(pos + LOG_RECORD_DEPTH_OFFSET) ||
+                f.read((uint8_t*)&depth, sizeof(depth)) != sizeof(depth)) break;
+            if (depth >= threshold) {   // LOG_NAN_I16 is the lowest value, so never
+                f.close();
+                return false;
+            }
+        }
+        f.close();
+        return true;
+    }
 
     f.readStringUntil('\n');  // header
     while (f.available()) {
@@ -196,30 +234,17 @@ static void cleanupOldLogs() {
     }
 }
 
-// Write CSV header appropriate for the current level.
+// Write the file header for the current level: the binary preamble for
+// MID/HIGH, the CSV column names for LOW.
 static void writeHeader() {
     if (!gLogFile) return;
-    if (gActiveLevel == LogLevel::LEVEL_LOW) {
+    if (levelIsBinary(gActiveLevel)) {
+        LogFileHeader h = makeLogFileHeader(static_cast<uint8_t>(gActiveLevel));
+        gLogFile.write((const uint8_t*)&h, sizeof(h));
+    } else {
         gLogFile.print("timestamp_ms,local_time,heading_deg,speed_ms,speed_src,"
                        "pos_x_m,pos_y_m,lat,lon,pos_src,"
                        "gps_satellites,gps_hdop,depth_m,water_temp_c,mag_temp_c\n");
-    } else if (gActiveLevel == LogLevel::LEVEL_MID) {
-        gLogFile.print("timestamp_ms,local_time,heading_deg,speed_ms,speed_src,"
-                       "pos_x_m,pos_y_m,lat,lon,pos_src,"
-                       "gps_satellites,gps_hdop,depth_m,water_temp_c,"
-                       "mag_x_cal,mag_y_cal,mag_z_cal,"
-                       "pitch_deg,roll_deg,mag_temp_c\n");
-    } else if (gActiveLevel == LogLevel::LEVEL_HIGH) {
-        gLogFile.print("timestamp_ms,local_time,heading_deg,speed_ms,speed_src,"
-                       "pos_x_m,pos_y_m,lat,lon,pos_src,"
-                       "gps_satellites,gps_hdop,depth_m,water_temp_c,"
-                       "mag_x_raw,mag_y_raw,mag_z_raw,"
-                       "accel_x_raw,accel_y_raw,accel_z_raw,"
-                       "gyro_x_raw,gyro_y_raw,gyro_z_raw,"
-                       "mag_x_cal,mag_y_cal,mag_z_cal,"
-                       "accel_x_cal,accel_y_cal,accel_z_cal,"
-                       "gyro_x_cal,gyro_y_cal,gyro_z_cal,"
-                       "pitch_deg,roll_deg,mag_temp_c\n");
     }
 }
 
@@ -246,8 +271,9 @@ static bool openNextFile() {
         Serial.printf("[LOG] Error: %s is full (%u logs today)\n", prefix, LOG_SEQ_MAX);
         return false;
     }
-    snprintf(gLogPath, sizeof(gLogPath), "%s/%s-%03u.csv", LOG_DIR, prefix,
-             (unsigned)(scan.highestSeq + 1));
+    snprintf(gLogPath, sizeof(gLogPath), "%s/%s-%03u%s", LOG_DIR, prefix,
+             (unsigned)(scan.highestSeq + 1),
+             levelIsBinary(gActiveLevel) ? log_names::EXT_BIN : log_names::EXT_CSV);
 
     gLogFile = LittleFS.open(gLogPath, FILE_WRITE);
     if (!gLogFile) {
@@ -258,6 +284,9 @@ static bool openNextFile() {
     Serial.printf("[LOG] Opened %s (level %s)\n", gLogPath, levelName(gActiveLevel));
     boot_log::setActiveLogPath(gLogPath);
     writeHeader();
+    // A new file always starts at full rate; idle has to be earned again.
+    gIdleGate.reset();
+    gPacer.reset();
     return true;
 }
 
@@ -358,7 +387,7 @@ void cycleLevel() {
         return;
     }
 
-    // LOW/HIGH are a selection only — tick() opens the file once the diver has
+    // LOW/MID/HIGH are a selection only — tick() opens the file once the diver has
     // stopped pressing for LOG_COMMIT_DELAY_MS.
     Serial.printf("[LOG] Level: %s -> %s (pending, %lu ms)\n",
                   levelName(prev), levelName(gLevel),
@@ -375,7 +404,7 @@ void setLevel(LogLevel level) {
 
 void tick() {
     if (!gReady) return;
-    // Only ever LOW or HIGH: cycleLevel() applies OFF on the spot, so a pending
+    // Never OFF: cycleLevel() applies OFF on the spot, so a pending
     // change here always ends in a file being opened.
     if (gLevel == gActiveLevel) return;                        // nothing pending
     if (millis() - gLevelSetMs < LOG_COMMIT_DELAY_MS) return;  // still settling
@@ -397,68 +426,44 @@ bool isLogging() {
     return gReady && gActiveLevel != LogLevel::LEVEL_OFF;
 }
 
-// Columns beyond LOW's common set, per level. Shared by log() and logImmediate()
-// so the two can't drift apart on schema — they already duplicated the common
-// set, and a third copy of the per-level tail is how a header stops matching its
-// rows.
-static void writeLevelColumns(const LogData& d) {
-    if (gActiveLevel == LogLevel::LEVEL_LOW) {
-        // Die temperature at every level: the mag readings are thermally
-        // compensated with it, so a dive log without it can't be re-examined.
-        gLogFile.printf(",%.2f", d.mag_temp_c);
-    } else if (gActiveLevel == LogLevel::LEVEL_MID) {
-        gLogFile.printf(",%.3f,%.3f,%.3f,%.2f,%.2f,%.2f",
-                        d.mag_cal.x, d.mag_cal.y, d.mag_cal.z,
-                        d.pitch_deg, d.roll_deg, d.mag_temp_c);
-    } else if (gActiveLevel == LogLevel::LEVEL_HIGH) {
-        gLogFile.printf(",%.3f,%.3f,%.3f"
-                        ",%.3f,%.3f,%.3f"
-                        ",%.3f,%.3f,%.3f"
-                        ",%.3f,%.3f,%.3f"
-                        ",%.3f,%.3f,%.3f"
-                        ",%.3f,%.3f,%.3f"
-                        ",%.2f,%.2f,%.2f",
-                        d.mag_raw.x, d.mag_raw.y, d.mag_raw.z,
-                        d.accel_raw.x, d.accel_raw.y, d.accel_raw.z,
-                        d.gyro_raw.x, d.gyro_raw.y, d.gyro_raw.z,
-                        d.mag_cal.x, d.mag_cal.y, d.mag_cal.z,
-                        d.accel_cal.x, d.accel_cal.y, d.accel_cal.z,
-                        d.gyro_cal.x, d.gyro_cal.y, d.gyro_cal.z,
-                        d.pitch_deg, d.roll_deg, d.mag_temp_c);
-    }
+// Local wall-clock time, or tm_year == 0 when no clock has been set (GPS or NTP).
+static bool localNow(struct tm& out) {
+    time_t now_t = time(nullptr);
+    if (now_t < CLOCK_VALID_EPOCH) return false;
+    localtime_r(&now_t, &out);
+    return true;
 }
 
-void log(const LogData& d) {
-    if (!gReady || gActiveLevel == LogLevel::LEVEL_OFF || !gLogFile) return;
+// Seconds since 1970 of a broken-down *local* time, i.e. timegm() of it. The
+// binary record stores this rather than the UTC epoch so the decoder can print
+// the same local_time the CSV carries without knowing the unit's time zone.
+static uint32_t localSeconds(const struct tm& t) {
+    // Days from 1970-01-01 to the civil date (Howard Hinnant's algorithm).
+    int y = t.tm_year + 1900, m = t.tm_mon + 1, d = t.tm_mday;
+    y -= m <= 2;
+    int      era = (y >= 0 ? y : y - 399) / 400;
+    unsigned yoe = (unsigned)(y - era * 400);
+    unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    long days = (long)era * 146097 + (long)doe - 719468;
+    return (uint32_t)(days * 86400L + t.tm_hour * 3600L + t.tm_min * 60L + t.tm_sec);
+}
 
-    // Throttle log rate per level.
-    {
-        static uint32_t lastLowLogMs  = 0;
-        static uint32_t lastMidLogMs  = 0;
-        static uint32_t lastHighLogMs = 0;
-        uint32_t now = millis();
-        if (gActiveLevel == LogLevel::LEVEL_LOW) {
-            if (now - lastLowLogMs < LOG_LOW_INTERVAL_MS) return;
-            lastLowLogMs = now;
-        } else if (gActiveLevel == LogLevel::LEVEL_MID) {
-            if (now - lastMidLogMs < LOG_MID_INTERVAL_MS) return;
-            lastMidLogMs = now;
-        } else if (gActiveLevel == LogLevel::LEVEL_HIGH) {
-            if (now - lastHighLogMs < LOG_HIGH_INTERVAL_MS) return;
-            lastHighLogMs = now;
-        }
+// Write one row in the open file's format. Shared by log() and logImmediate()
+// so the two can't drift apart on schema.
+static void writeRow(const LogData& d) {
+    struct tm tm_info{};
+    bool haveClock = localNow(tm_info);
+
+    if (levelIsBinary(gActiveLevel)) {
+        LogRecord r = packLogRecord(d, haveClock ? localSeconds(tm_info) : 0);
+        gLogFile.write((const uint8_t*)&r, sizeof(r));
+        return;
     }
 
-    // Format local time if the system clock has been set (GPS or NTP).
     char localTimeBuf[24] = "";  // empty = no valid time source
-    time_t now_t = time(nullptr);
-    if (now_t >= CLOCK_VALID_EPOCH) {
-        struct tm tm_info{};
-        localtime_r(&now_t, &tm_info);
-        strftime(localTimeBuf, sizeof(localTimeBuf), "%Y-%m-%dT%H:%M:%S", &tm_info);
-    }
+    if (haveClock) strftime(localTimeBuf, sizeof(localTimeBuf), "%Y-%m-%dT%H:%M:%S", &tm_info);
 
-    // Common columns (LOW and HIGH)
     gLogFile.printf("%lu,%s,%.2f,%.3f,%c,%.2f,%.2f,%.8f,%.8f,%c",
                     d.timestamp_ms,
                     localTimeBuf,
@@ -477,11 +482,35 @@ void log(const LogData& d) {
         gLogFile.print(",,");
     }
 
-    gLogFile.printf(",%.2f,%.2f", d.depth_m, d.water_temp_c);
+    // Die temperature at every level: the mag readings are thermally
+    // compensated with it, so a dive log without it can't be re-examined.
+    gLogFile.printf(",%.2f,%.2f,%.2f\n", d.depth_m, d.water_temp_c, d.mag_temp_c);
+}
 
-    writeLevelColumns(d);
+void log(const LogData& d) {
+    if (!gReady || gActiveLevel == LogLevel::LEVEL_OFF || !gLogFile) return;
 
-    gLogFile.print('\n');
+    // The gate sees every sample, not just the ones that get written -- that
+    // is what lets the first sample that breaks idle be logged at once rather
+    // than up to a heartbeat late.
+    bool idle = false;
+    if (levelIsGated(gActiveLevel)) {
+        static constexpr log_idle::Params kIdleParams{
+            LOG_IDLE_MAX_DEPTH_M, LOG_IDLE_MAX_SPEED_MS, LOG_IDLE_MAX_DRIFT_M, LOG_IDLE_ENTER_MS};
+        idle = gIdleGate.update({d.timestamp_ms, d.depth_m, d.speed_ms, d.pos_src == 'G',
+                                 d.pos_x_m, d.pos_y_m}, kIdleParams);
+    }
+
+    // Throttle log rate per level.
+    uint32_t interval = gActiveLevel == LogLevel::LEVEL_LOW ? LOG_LOW_INTERVAL_MS
+                      : gActiveLevel == LogLevel::LEVEL_MID ? LOG_MID_INTERVAL_MS
+                      : LOG_HIGH_INTERVAL_MS;
+    log_idle::Pacer::Plan plan = gPacer.step(d.timestamp_ms, idle, interval, LOG_IDLE_HEARTBEAT_MS);
+    if (plan.flushHeld) writeRow(gHeldSample);
+    if (plan.hold) gHeldSample = d;
+    if (!plan.write) return;
+
+    writeRow(d);
 
     // Time-based flush to avoid SPI stalls from frequent flash erases.
     static uint32_t lastFlushMs = 0;
@@ -494,38 +523,7 @@ void log(const LogData& d) {
 
 void logImmediate(const LogData& d) {
     if (!gReady || gActiveLevel == LogLevel::LEVEL_OFF || !gLogFile) return;
-
-    char localTimeBuf[24] = "";
-    time_t now_t = time(nullptr);
-    if (now_t >= CLOCK_VALID_EPOCH) {
-        struct tm tm_info{};
-        localtime_r(&now_t, &tm_info);
-        strftime(localTimeBuf, sizeof(localTimeBuf), "%Y-%m-%dT%H:%M:%S", &tm_info);
-    }
-
-    gLogFile.printf("%lu,%s,%.2f,%.3f,%c,%.2f,%.2f,%.8f,%.8f,%c",
-                    d.timestamp_ms,
-                    localTimeBuf,
-                    d.heading_deg,
-                    d.speed_ms,
-                    d.gpsSpeed ? 'G' : 'F',
-                    d.pos_x_m,
-                    d.pos_y_m,
-                    d.lat,
-                    d.lon,
-                    d.pos_src);
-
-    if (d.pos_src == 'G') {
-        gLogFile.printf(",%u,%.1f", d.gps_satellites, d.gps_hdop);
-    } else {
-        gLogFile.print(",,");
-    }
-
-    gLogFile.printf(",%.2f,%.2f", d.depth_m, d.water_temp_c);
-
-    writeLevelColumns(d);
-
-    gLogFile.print('\n');
+    writeRow(d);
     gLogFile.flush();
 }
 

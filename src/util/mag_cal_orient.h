@@ -141,6 +141,14 @@ int binIndexFor(float mx, float my, float mz, float ax, float ay, float az);
 // case rather than dividing near-zero by near-zero.
 float reconstructRoll(float ax, float ay, float az);
 
+// Accel-only pitch and SIGNED roll, in degrees: pitch in [-90, +90] (nose up
+// positive), roll in (-180, +180] (right side down positive). The same split
+// reconstructOrientation() and reconstructRoll() use, exposed for mounted
+// dwell capture (util/mounted_dwell.h), which tests "is it level" and so needs
+// roll about zero, not in [0, 360). The server's level window had exactly that
+// bug: abs() of a [0, 360) roll dropped every sample banked one way.
+void pitchRollDeg(float ax, float ay, float az, float& pitchDegOut, float& rollDegOut);
+
 // Roll sector [0, MAG_CAL_ROLL_SECTORS): 0 = upright, 1 = right-side,
 // 2 = upside-down, 3 = left-side. Sector 0 is centred on 0 deg (boundaries
 // at +-45 deg), matching dive-map's _roll_sector.

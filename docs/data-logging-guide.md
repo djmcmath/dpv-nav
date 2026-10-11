@@ -2,20 +2,80 @@
 
 ## Overview
 
-The logging system provides persistent CSV-format data logging to ESP32 LittleFS flash storage. What each row contains depends on the log level (below): position and depth telemetry always, sensor and attitude data only at the higher levels.
+The logging system writes dive logs to ESP32 LittleFS flash storage. LOW is the level a diver runs: a CSV that uploads itself to Dive Map. MID and HIGH are diagnostics: every sensor field, in a compact binary file that is decoded on a laptop.
 
 ## Log Levels
 
-Cycled from the display with `CONFIG > Log`: OFF → LOW → MID → HIGH → OFF. Each
-level writes its own header, so a file's schema is fixed when it opens
-(`getActiveLevel()`), not when the diver next changes the selection.
+Cycled from the display with `CONFIG > Log`: OFF → LOW → MID → HIGH → OFF. A file's
+format is fixed when it opens (`getActiveLevel()`), not when the diver next changes
+the selection.
 
-| Level | Wire/NVS value | Interval | Columns | Cost |
-|---|---|---|---|---|
-| OFF | 0 | — | nothing is open | — |
-| LOW | 1 | `LOG_LOW_INTERVAL_MS` (1 s) | timestamp, local time, heading, speed + source, position, lat/lon + source, GPS sats/HDOP, depth, water temp, `mag_temp_c` | ~103 B/row, ~360 KiB/hour |
-| MID | 3 | `LOG_MID_INTERVAL_MS` (1.5 s) | LOW's columns plus `mag_x/y/z_cal`, `pitch_deg`, `roll_deg` | ~140 B/row, ~330 KiB/hour |
-| HIGH | 2 | `LOG_HIGH_INTERVAL_MS` (1 s) | MID's columns plus raw mag/accel/gyro and calibrated accel/gyro | ~241 B/row, ~850 KiB/hour |
+| Level | Wire/NVS value | File | Rate | Gated | Contents | Cost |
+|---|---|---|---|---|---|---|
+| OFF | 0 | — | — | — | nothing is open | — |
+| LOW | 1 | `.csv` | 1 s | yes | timestamp, local time, heading, speed + source, position, lat/lon + source, GPS sats/HDOP, depth, water temp, `mag_temp_c` | ~103 B/row, ~360 KiB/hour |
+| MID | 2 | `.bin` | 1 s | yes | LOW's fields plus raw and calibrated mag/accel/gyro, pitch, roll | 77 B/row, ~270 KiB/hour |
+| HIGH | 3 | `.bin` | 1 s | no | same as MID | 77 B/row, ~270 KiB/hour |
+
+MID and HIGH differ only in gating. Use MID to record a whole dive with every
+field; use HIGH on the bench, where a unit sitting still is the thing being
+measured. The display's level badge reads `L0`/`L1`/`LM`/`L2` for OFF/LOW/MID/HIGH.
+
+Until October 2026 HIGH was value 2 and MID value 3, and both wrote CSV. The value
+is sent in the 2-bit `FLAG_LOG_LEVEL` field, so **the nav and display boards must
+be flashed together** across that change. The level saved in NVS carries over
+correctly: the new numbering is stored under a new key (`log_lvl`), and a value
+left under the old `log_level` key is translated on first read.
+
+### Idle gating (LOW and MID)
+
+A dive's log is usually bracketed by dead time: the scooter sits powered on the
+beach while the diver gears up, and again afterwards. While the unit is **idle**,
+LOW and MID write one row per minute (`LOG_IDLE_HEARTBEAT_MS`) instead of one per
+second. Idle means all of these have held for a minute (`LOG_IDLE_ENTER_MS`):
+
+- shallower than 1 m (`LOG_IDLE_MAX_DEPTH_M`)
+- a live GPS position (`pos_src` is `G`)
+- speed exactly 0
+- position within 15 m of where the quiet spell began (`LOG_IDLE_MAX_DRIFT_M`)
+
+Any one failing restores full rate on that very sample. No GPS — indoors, dive
+mode, GPS switched off — means never idle. The one-minute entry delay is also what
+keeps the surfacing fix: the first minute of GPS rows after a dive, which the track
+correction anchors on, is always written at full rate. Mark, waypoint and current
+rows are never gated. The logic is [log_idle.h](../src/util/log_idle.h), tested by
+`tools/logidle_test/run.sh`.
+
+The track processor reads any step longer than `DEFAULT_MAX_DT_S` as a gap in the
+log. That is 90 s (raised from 30 s for this), so heartbeat rows are one continuous
+log; keep the heartbeat well under it. It also integrates each row's speed over the
+time since the previous row, so when idle ends the logger first writes the last
+still sample it was holding and then the row that ended idle. The first moving row
+therefore spans one tick, never the idle gap.
+
+### Binary logs (MID and HIGH)
+
+`/logs/YYYYMMDD-NNN.bin`: a 16-byte header, then fixed 77-byte records
+([log_record.h](../src/util/log_record.h)). Values are scaled integers — accel and
+gyro at the step the old CSV printed, mag at 0.01 µT, finer than the sensor's own
+0.0146 µT step. As CSV these rows were ~240 bytes and filled the 768 KiB partition
+in under an hour; a two-hour HIGH log is now ~540 KiB.
+
+The unit does no decoding. Download the file from `tern.local` and run:
+
+```bash
+python tools/decode_binlog.py 20261011-003.bin     # writes 20261011-003.csv
+```
+
+The CSV has the columns the old HIGH log had, so existing scripts
+(`tools/circle_audit.py`, `tools/mag_temp_fit.py`) read it unchanged. **Binary logs
+never upload** — neither automatically nor from the `tern.local` button — because
+the server reads CSV only. To put a MID dive on Dive Map, decode it and upload the
+CSV by hand. `.csv` and `.bin` share one sequence number per date.
+
+**Nothing prunes while a log is open.** `cleanupOldLogs()` runs at boot only, and
+only until 32 KiB is free, so the space a long log needs has to be free before it
+starts. Check the Storage line on `tern.local` and delete old logs first.
 
 `mag_temp_c` is the **LIS3MDL's own die temperature**, enabled 2026-09-11
 (`CTRL_REG1` TEMP_EN) and written at every level since 2026-09-14. The
@@ -107,17 +167,6 @@ left. A hold with no complete second saves nothing, and the display says so.
 **Adding a new `pos_src` value requires a coordinated dive-map change first.**
 `validate_blocks` in `tracklib/correct.py` hard-fails on an unrecognised value, so a single
 unknown row makes an entire dive uncorrectable.
-
-**MID exists because HIGH cannot cover a dive.** The LittleFS partition is 768 KiB
-(`partitions_nav.csv`), so HIGH fills it in under an hour while MID runs about 2.3
-hours — and MID still carries everything a heading post-mortem needs
-(`tools/circle_audit.py` reads exactly these columns). `cleanupOldLogs()` prunes
-oldest-first to a 32 KiB floor, so overrunning costs you your *older* logs.
-
-**MID is value 3, not 2.** It was appended rather than inserted so that existing
-NVS records and the 2-bit `FLAG_LOG_LEVEL` field keep their meanings across a
-firmware update, since the nav and display boards are flashed separately. The
-display's level badge reads `L0`/`L1`/`LM`/`L2` for OFF/LOW/MID/HIGH.
 
 > **The rest of this document is stale** (2026-09-11): it describes a
 > `logEntry()`/`LogEntry`/`rotateLog()` API and a `log_<minutes>_<seconds>.csv`

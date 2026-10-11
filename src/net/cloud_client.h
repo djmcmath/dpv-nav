@@ -89,6 +89,9 @@ String         lastAuthorizeError();
 struct CalibrationResult {
     bool   ok = false;          // false if any network/auth/fit step failed
     String errorMessage;        // set when !ok; safe to show the diver as-is
+    bool   fitRejected = false; // !ok because the server refused to fit these samples
+                                // (HTTP 422): the upload itself worked, and retrying
+                                // the same samples cannot help
     String calibrationId;
     String qualityBand;         // "good" | "warn" | "bad"
     float  rmsPct = 0.0f;

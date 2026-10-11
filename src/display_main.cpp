@@ -211,6 +211,8 @@ static float             gCloudCalRmsPct         = 0.0f;
 static int16_t           gCloudCalCoverageGaps   = -1;  // baseline only; -1 = n/a
 static char              gCloudCalRecommendation[96] = "";
 static char              gCloudCalError[64]          = "";
+// The server refused to fit the samples, as opposed to never receiving them.
+static bool              gCloudCalRejected           = false;
 static char              gCloudCalId[40]             = "";
 
 // ---- Cloud account-link UI state (device-auth bootstrap, RFC 8628) --------
@@ -324,9 +326,10 @@ static void renderCalProgress(const CalProgressPacket& pkt) {
         display::showBaselineRoughScan(pkt);   // baseline: no grid, honestly
     } else if (pkt.phase == (uint8_t)CalPhase::GAP_FILL) {
         display::showCalGrid(pkt, "FILL GAPS");
+    } else if (pkt.cal_type == (uint8_t)CalType::MOUNTED) {
+        display::showMountedCal(pkt);          // mounted: dwell capture
     } else {
-        display::showCalGrid(pkt, pkt.cal_type == (uint8_t)CalType::MOUNTED
-                                      ? "MOUNTED CAL" : "BASELINE CAL");
+        display::showCalGrid(pkt, "BASELINE CAL");
     }
 }
 
@@ -748,10 +751,11 @@ void loop() {
                     case CloudCalUiPhase::WAITING:
                         if (now - gCloudCalWaitStartMs >= CLOUD_CAL_WAIT_TIMEOUT_MS) {
                             gCloudCalPhase = CloudCalUiPhase::FAILED;
+                            gCloudCalRejected = false;
                             strncpy(gCloudCalError, "No response from nav device",
                                     sizeof(gCloudCalError) - 1);
                             gCloudCalError[sizeof(gCloudCalError) - 1] = '\0';
-                            display::showCloudCalFailed(gCloudCalError);
+                            display::showCloudCalFailed(gCloudCalError, gCloudCalRejected);
                         } else {
                             display::showCloudCalWaiting((now - gCloudCalWaitStartMs) / 1000);
                         }
@@ -760,7 +764,7 @@ void loop() {
                         display::showCloudCalOffline();
                         break;
                     case CloudCalUiPhase::FAILED:
-                        display::showCloudCalFailed(gCloudCalError);
+                        display::showCloudCalFailed(gCloudCalError, gCloudCalRejected);
                         break;
                     case CloudCalUiPhase::RESULT:
                         if (gCloudCalInstallable) {
@@ -1044,6 +1048,12 @@ static void processNavLine() {
 #endif
     } else if (ptype == PacketType::CAL_PROGRESS) {
         if (bytesToCalProgressPacket(rxBuf, rxPos, lastCalProgress)) {
+            // First packet of a session: wipe the screen and the cal screens'
+            // "static layout already drawn" flags. A session that was
+            // abandoned (rather than completed) never cleared them, so the
+            // next one would paint only its changing parts over whatever
+            // screen came between.
+            if (!calProgressValid) display::clear();
             calProgressValid   = true;
             lastCalProgressMs  = millis();
             lastNavMs          = millis();  // keep link-alive timer refreshed
@@ -1071,6 +1081,13 @@ static void processNavLine() {
             lastCalProgress.current_bin   = opkt.current_bin;
             lastCalProgress.cur_pitch_deg = opkt.cur_pitch_deg;
             lastCalProgress.cur_hdg_deg   = opkt.cur_hdg_deg;
+            // Mounted's dwell readout. The 10 Hz copy is the one the diver is
+            // steering by; the 2 Hz packet's is only there for the first frame.
+            lastCalProgress.cur_roll_deg  = opkt.cur_roll_deg;
+            lastCalProgress.motion        = opkt.motion;
+            lastCalProgress.motion_term   = opkt.motion_term;
+            lastCalProgress.dwell_pct     = opkt.dwell_pct;
+            lastCalProgress.capture_state = opkt.capture_state;
             // Roll fields move WITH current_bin, never separately: the widget
             // describes the cell under the highlight, so splitting them would
             // paint one cell's roll coverage under another cell's box.
@@ -1103,6 +1120,7 @@ static void processNavLine() {
                 gCloudCalPhase = CloudCalUiPhase::OFFLINE;
             } else if (pkt.stage == (uint8_t)CalCloudStage::FAILED) {
                 gCloudCalPhase = CloudCalUiPhase::FAILED;
+                gCloudCalRejected = pkt.rejected;
                 strncpy(gCloudCalError, pkt.error, sizeof(gCloudCalError) - 1);
                 gCloudCalError[sizeof(gCloudCalError) - 1] = '\0';
             } else {

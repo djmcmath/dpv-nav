@@ -103,9 +103,14 @@ void showCal(uint8_t remaining_s, uint8_t coverage_pct, bool isFull);
 
 // Draw the bin-coverage calibration grid screen and flush to display.
 // Shows a color-coded heading × elevation grid (black/red/yellow/green per bin).
+// Gap-fill's screen; mounted has showMountedCal().
 //   pkt     — CalProgressPacket with bin counts and totals
-//   title   — short title string ("BASELINE CAL" or "MOUNTED CAL")
+//   title   — short title string
 void showCalGrid(const struct CalProgressPacket& pkt, const char* title);
+// Mounted cal's dwell-capture screen: the 3 x 12 grid, an attitude indicator,
+// a motion bar and a hold bar. A cell records only once the unit has sat
+// still inside its row's attitude window, and this shows how close that is.
+void showMountedCal(const struct CalProgressPacket& pkt);
 // Baseline pass 1 (ROUGH_SCAN): no grid, axis-range bars + live fit stats + "good enough" prompt.
 void showBaselineRoughScan(const struct CalProgressPacket& pkt);
 // Shown immediately when BTN2 requests FINISH_BASELINE_COLLECTION, before nav
@@ -171,7 +176,9 @@ void showCloudCalWaiting(uint32_t secondsWaiting);
 void showCloudCalOffline();
 
 // Upload/fit failed, or the nav device never responded. BTN2 dismisses.
-void showCloudCalFailed(const char* message);
+// `rejected` = the upload worked and the server refused to fit the samples;
+// the screen then says so instead of offering a retry that cannot help.
+void showCloudCalFailed(const char* message, bool rejected = false);
 
 // Fit succeeded — accept/reject the result.
 //   quality:      0=good, 1=warn, 2=bad (CalCloudQuality)

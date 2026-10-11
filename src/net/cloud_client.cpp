@@ -658,6 +658,7 @@ CalibrationResult runCalibrationUpload(const char* mode, const char* csvPath, co
 
         if (code != 200) {
             result.errorMessage = extractError(body, code);
+            result.fitRejected  = (code == 422);
             return result;
         }
 

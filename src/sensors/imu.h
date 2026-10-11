@@ -128,8 +128,7 @@ void   magCalNBGetProgress(uint32_t& elapsed_ms, uint32_t& remaining_ms,
                            int& covX, int& covY, int& covZ);
 
 // --- Bin-aware magnetometer calibration collection ---
-// Used for both Baseline cal (60 bins, full sphere) and Mounted cal (36 bins, limited range).
-// Samples are collected from raw sensor + AHRS pitch/heading to bin them by orientation.
+// Used for both Baseline cal (60 bins, full sphere) and Mounted cal (36 cells, limited range).
 // Once a bin is green (>= MAG_CAL_BIN_GREEN_THRESHOLD samples), new samples are
 // rejected for that bin to avoid skewing the fit with duplicate data.
 // Caller provides pitch_deg (from AHRS accel) and heading_deg (from AHRS yaw).
@@ -147,9 +146,11 @@ void   magCalNBGetProgress(uint32_t& elapsed_ms, uint32_t& remaining_ms,
 //     (magBinCalFinishBaseline()) — there's no auto-detected completion —
 //     which uploads the 9-axis CSV for real server-side grading and
 //     coverage-gap feedback.
-//   Mounted — COLLECT only, unchanged: the familiar grid, auto-completes
-//     when all bins are green. Its narrower ±30° range mostly sidesteps the
-//     pole problem that forced baseline off this design.
+//   Mounted — COLLECT only: a 3 x 12 grid filled one dwell at a time. A cell
+//     is recorded only after the unit has sat still inside that row's attitude
+//     window (util/mounted_dwell.h), because the mounted fit takes "down" from
+//     the accelerometer and cannot use a sample taken in motion. Completes on
+//     its own: the whole level row, and six spread cells in each tilted row.
 //   Gap-fill — GAP_FILL: a *second* baseline pass that patches the cells the
 //     server flagged thin or empty. It gets the live grid baseline can't have,
 //     because it runs only with a good baseline cal already installed: bins
@@ -166,12 +167,12 @@ void   magCalNBGetProgress(uint32_t& elapsed_ms, uint32_t& remaining_ms,
 //   // in main loop:
 //   magBinCalTick(pitch_deg, heading_deg, rawMag, accelCal, gyroCal);  // add one sample
 //   magBinCalFinishBaseline();           // baseline/gap-fill: diver declares "done", uploads for grading
-//   if (magBinCalIsComplete()) { ... }   // mounted: all bins green; gap-fill: every target satisfied
+//   if (magBinCalIsComplete()) { ... }   // mounted: rows complete; gap-fill: every target satisfied
 //                                        // (or diver finished); baseline: finish requested
 //   // retrieve:
 //   magBinCalGetProgress(pkt);           // fill CalProgressPacket
 //   magBinCalDumpCSV(file);              // write samples to open LittleFS File
-//   magBinCalFreeSamples();              // give the 69 KB back before uploading
+//   magBinCalFreeSamples();              // give the 47 KB back before uploading
 //   magBinCalEnd();                      // clean up
 
 enum class BinCalMode : uint8_t { BASELINE = 0, MOUNTED = 1, GAP_FILL = 2 };
@@ -221,12 +222,13 @@ bool   magBinCalBegin(BinCalMode mode, const uint8_t* targets60 = nullptr,
 // rad/s; same logical frame as rawMagLogical) — logged (not used for binning) so the server can
 // reconstruct a trustworthy per-sample orientation after a real mag fit exists. See
 // divemap/docs/architecture/baseline-cal-coverage-feedback-plan.md.
-// Returns true if sample was accepted (bin not yet green in COLLECT; always accepted in ROUGH_SCAN
-// subject to the sample cap and exact-duplicate rejection)
+// Returns true if sample was accepted (always accepted in ROUGH_SCAN, subject to the sample cap
+// and exact-duplicate rejection; in mounted COLLECT, only while a dwell is recording, and such a
+// sample is still dropped if the dwell is abandoned before its last one)
 bool   magBinCalTick(float pitch_deg, float heading_deg, const Vec3i16& rawMagLogical,
                       const Vec3f& accelCal, const Vec3f& gyroCal);
 bool   magBinCalIsActive();
-// Mounted: true when all bins green. Baseline: true once the diver has called
+// Mounted: true when every row is complete. Baseline: true once the diver has called
 // magBinCalFinishBaseline() (no bin/grid concept applies to baseline anymore).
 // Gap-fill: true when every targeted cell has reached its cap, or the diver
 // called magBinCalFinishBaseline() -- whichever comes first. Auto-completion
@@ -251,9 +253,12 @@ void   magBinCalGetProgress(struct CalProgressPacket& pkt);
 // next magBinCalGetProgress() would report for those fields.
 void   magBinCalGetOrient(struct CalOrientPacket& pkt);
 // Write raw samples as CSV to an already-open File object
-// Format: mx,my,mz,ax,ay,az,gx,gy,gz (mag = raw sensor counts, accel = g, gyro = rad/s; one sample per line)
+// Format: mx,my,mz,ax,ay,az,gx,gy,gz,mag_temp_c,tcomp,dwell, one sample per line. mag = raw
+// sensor counts, accel = g, gyro = rad/s; mag_temp_c = die temperature ("nan" if never read);
+// tcomp = 1 if thermal compensation had already been applied to that row's mag; dwell = which
+// mounted dwell the row belongs to, counting from 1 (0 in baseline and gap-fill).
 void   magBinCalDumpCSV(void* filePtr);  // void* to avoid #include <LittleFS.h> here
-// Release the 69,120-byte sample buffer without tearing down the rest of the
+// Release the 47,520-byte sample buffer without tearing down the rest of the
 // cal state. Call this the moment the CSV is on disk and before anything that
 // needs heap -- above all the cloud upload, which shares this heap with the
 // WiFi driver's dynamic RX buffers. Safe to call more than once; magBinCalEnd()

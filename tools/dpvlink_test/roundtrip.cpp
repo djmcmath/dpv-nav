@@ -419,6 +419,11 @@ int main() {
         tx.current_bin_roll_targeted[2] = 1;
         tx.current_bin_roll_targeted[3] = 1;
         tx.current_roll_sector = 2;
+        tx.cur_roll_deg  = -7.5f;
+        tx.motion        = 137;
+        tx.motion_term   = (uint8_t)CalMotionTerm::ACCEL_JITTER;
+        tx.dwell_pct     = 64;
+        tx.capture_state = (uint8_t)CalDwellState::CAPTURING;
 
         size_t n = calOrientPacketToBytes(tx, buf, sizeof(buf));
         check(n > 0, "orient encode produced bytes");
@@ -442,6 +447,12 @@ int main() {
             if (rx.current_bin_roll_targeted[k] != tx.current_bin_roll_targeted[k]) rollOk = false;
         }
         check(rollOk, "orient roll breakdown survived");
+        // Mounted's dwell readout: what the diver steers by at 10 Hz.
+        check(fabsf(rx.cur_roll_deg - (-7.5f)) < 0.01f, "orient signed roll survived");
+        check(rx.motion == 137, "orient motion survived");
+        check(rx.motion_term == (uint8_t)CalMotionTerm::ACCEL_JITTER, "orient motion term survived");
+        check(rx.dwell_pct == 64, "orient dwell percent survived");
+        check(rx.capture_state == (uint8_t)CalDwellState::CAPTURING, "orient capture state survived");
 
         // Key compatibility: the display merges these fields straight into its
         // cached CalProgressPacket, so both encoders must spell them the same.
@@ -474,6 +485,60 @@ int main() {
         }
         check(safeDefault, "missing roll status defaults to 'none', not 'satisfied'");
         check(bare.current_roll_sector == -1, "missing roll sector defaults to -1");
+        // Missing dwell fields must not read as "recording": out of window,
+        // nothing held, is the one state that promises the diver nothing.
+        check(bare.capture_state == (uint8_t)CalDwellState::OUT_OF_WINDOW && bare.dwell_pct == 0,
+              "missing dwell fields default to 'not recording'");
+    }
+
+    // --- Mounted: the dwell readout rides the 2 Hz packet too ----------------
+    // Same key names as the orient packet, because the display merges one
+    // straight over the other.
+    {
+        CalProgressPacket tx = basePkt((uint8_t)CalPhase::COLLECT);
+        tx.cal_type      = (uint8_t)CalType::MOUNTED;
+        tx.bins_total    = 36;
+        tx.cur_roll_deg  = 4.25f;
+        tx.motion        = 55;
+        tx.dwell_pct     = 100;
+        tx.capture_state = (uint8_t)CalDwellState::CELL_DONE;
+        size_t n = calProgressPacketToBytes(tx, buf, sizeof(buf));
+        check(n > 0, "mounted progress encode produced bytes");
+        CalProgressPacket rx{};
+        check(bytesToCalProgressPacket(buf, n, rx), "mounted progress decode succeeded");
+        check(fabsf(rx.cur_roll_deg - 4.25f) < 0.01f && rx.motion == 55 && rx.dwell_pct == 100 &&
+              rx.capture_state == (uint8_t)CalDwellState::CELL_DONE,
+              "mounted dwell readout survived the progress packet");
+        const char* keys[] = { "\"rl\"", "\"mo\"", "\"mt\"", "\"dw\"", "\"ds\"" };
+        CalOrientPacket o{};
+        char obuf[200];
+        calOrientPacketToBytes(o, obuf, sizeof(obuf));
+        bool keysOk = true;
+        for (const char* k : keys) {
+            if (strstr(buf, k) == nullptr || strstr(obuf, k) == nullptr) keysOk = false;
+        }
+        check(keysOk, "orient and progress spell the dwell keys the same");
+        printf("  mounted progress packet length: %zu bytes (buffer is 512)\n", n);
+    }
+
+    // --- CalCloudResultPacket: a fit rejection is not an upload failure ------
+    {
+        CalCloudResultPacket tx{};
+        tx.cal_type = (uint8_t)CalType::MOUNTED;
+        tx.stage    = (uint8_t)CalCloudStage::FAILED;
+        tx.rejected = true;
+        strncpy(tx.error, "Too few still, level samples (12 of 30).", sizeof(tx.error) - 1);
+        size_t n = calCloudResultPacketToBytes(tx, buf, sizeof(buf));
+        CalCloudResultPacket rx{};
+        check(n > 0 && bytesToCalCloudResultPacket(buf, n, rx), "rejection round-trips");
+        check(rx.rejected, "rejected flag survived");
+        check(strcmp(rx.error, tx.error) == 0, "rejection reason survived");
+
+        tx.rejected = false;
+        n = calCloudResultPacketToBytes(tx, buf, sizeof(buf));
+        rx.rejected = true;   // poison
+        check(bytesToCalCloudResultPacket(buf, n, rx) && !rx.rejected,
+              "an ordinary failure does not read as a rejection");
     }
 
     if (failures == 0) printf("  all dpvlink round-trip checks passed\n");

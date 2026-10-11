@@ -1152,6 +1152,13 @@ static void handleDiveLogUpload() {
         server.send(400, "text/plain", "Invalid file path");
         return;
     }
+    // Binary MID/HIGH logs are diagnostics for tools/decode_binlog.py; the
+    // server only reads CSV. The page never offers this for one (see
+    // classifyUpload), so this is the backstop.
+    if (!path.endsWith(".csv")) {
+        server.send(400, "text/plain", "Only CSV dive logs can be uploaded");
+        return;
+    }
     if (!LittleFS.exists(path)) {
         server.send(404, "text/plain", "File not found");
         return;

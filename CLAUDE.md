@@ -69,7 +69,10 @@ without hardware:
 
 ```bash
 tools/dpvlink_test/run.sh    # NavPacket / CalProgressPacket / CalOrientPacket wire round-trips
+tools/mounted_dwell_test/run.sh  # mounted cal: when a cell may record (dwell capture)
 tools/lognames_test/run.sh   # dive-log filename grammar and age ordering
+tools/logidle_test/run.sh    # log idle gate: when LOW/MID drop to a heartbeat
+tools/logrecord_test/run.sh  # binary MID/HIGH record vs. tools/decode_binlog.py
 tools/orient_equiv/          # per-sample orientation vs. the server's port
 ```
 
@@ -89,7 +92,7 @@ Code is organized into namespaces by subsystem:
 - `flow::` - Flow sensor driver (hall-effect pulse, speed calculation)
 - `display::` - TFT display driver (ST7789 320×240, direct hardware writes, nav + debug screen rendering)
 - `menu::` - Hierarchical menu system (compiled in, button-driven, on display device)
-- `logging::` - Data logging system (LittleFS-based; `/logs/YYYYMMDD-NNN.csv`)
+- `logging::` - Data logging system (LittleFS-based; `/logs/YYYYMMDD-NNN.csv` at LOW, `.bin` at MID/HIGH — decode with `tools/decode_binlog.py`)
 - `boot_log::` - Persistent (NVS) reset-reason/cleanup-event history and the active-log-path marker that stops a brownout-interrupted dive log from being swept by `logging::`'s boot-time cleanup (see below)
 - `log_sync::` - Automatic dive-log upload once the unit joins a known network
 - `storage::` - Calibration persistence (JSON files in LittleFS)
@@ -125,12 +128,15 @@ src/
 ├── util/                      # Utilities
 │   ├── logging.cpp/h          # Data logging to LittleFS (see log_names.h for the filename grammar)
 │   ├── log_names.h            # Dive-log filename grammar; pure C++ so tools/lognames_test/ can exercise it
+│   ├── log_record.h           # LogData + the 77-byte binary record MID/HIGH write. Pure C++, host-tested (tools/logrecord_test/)
+│   ├── log_idle.h             # Idle gate that thins LOW/MID to one row a minute on the surface. Pure C++, host-tested (tools/logidle_test/)
 │   ├── boot_log.cpp/h         # NVS-backed boot/crash history + active-log-path crash protection (see "Log rotation vs. a mid-dive brownout" below)
 │   ├── storage.cpp/h          # Calibration save/load (JSON)
 │   ├── nvs_state.cpp/h        # Runtime state persistence (ESP32 NVS: toggles, position)
 │   ├── hdg_cal.cpp/h          # Fourier heading calibration (load /hdg_fourier.json, apply Fourier-series correction)
 │   ├── speed_cal.cpp/h        # Speed cal k-factor history (LittleFS /speed_cal.json, rolling 6-run average)
 │   ├── motor_cal.cpp/h        # Motor-on heading offset (load /motor_cal.json, single fixed correction)
+│   ├── mounted_dwell.cpp/h    # Mounted cal dwell capture: when a cell may record. Pure C++, host-tested (tools/mounted_dwell_test/)
 │   └── mag_cal_orient.cpp/h   # Algebraic per-sample orientation for gap-fill cal — VERBATIM PORT of the server's callib/coverage.py (read its header first: the axis convention is a 180° trap)
 └── types/
     └── types.h                # Core data types (Vec3i16, Vec3f, Calib3, MagCalib, etc.)
@@ -198,7 +204,8 @@ The system supports automatic calibration with persistence to LittleFS (flash st
 
 **Magnetometer (two-stage, menu-triggered, cloud-fit):**
 - **Baseline** (CAL > Baseline): Device off DPV, full sphere coverage. No live grid (retired 2026-07-25 after six failed attempts, see [docs/baseline-cal-two-pass.md](docs/baseline-cal-two-pass.md)) — shows axis-range bars + live fit stats instead; diver presses BTN2 when coverage looks good enough (`FINISH_BASELINE_COLLECTION`). Collects samples to `/mag_baseline_samples.csv`.
-- **Mounted** (CAL > Mounted): Device installed on DPV, horizontal rotations. Still shows the original live heading×elevation bin-coverage grid (narrower ±30° range sidesteps the pole problem Baseline's grid had) — auto-completes when required bins are green. Collects samples to `/mag_mounted_samples.csv`.
+- **Mounted** (CAL > Mounted): Device installed on DPV. A 3×12 grid filled **one dwell per cell**: a cell records only after the unit has sat still inside that row's attitude window ([mounted_dwell.h](src/util/mounted_dwell.h)), because the server's fit takes "down" from the accelerometer and cannot use a sample taken in motion. `showMountedCal()` shows an attitude indicator, a motion bar and a hold bar so the diver can see how close they are. Auto-completes at the whole level row plus six spread cells in each tilted row. Collects samples to `/mag_mounted_samples.csv`. The stillness and attitude limits (`MAG_CAL_DWELL_*` in [config.h](src/config.h)) are deliberately tighter than the server's in `callib/fit.py`; nothing forces the two to agree. See dive-map's [mounted-cal-dwell-plan.md](../dive-map/docs/architecture/mounted-cal-dwell-plan.md).
+- **Every cal CSV row carries `mag_temp_c` and `tcomp`** (was thermal compensation already applied to that row), and mounted rows a `dwell` number. They trail the nine columns the server reads by position — never reorder those nine.
 - **Both stages upload and fit in the cloud automatically** if the unit has WiFi at completion (`cloud::runCalibrationUpload`, same round trip described under Fourier Heading Calibration below): result is staged, not written over the active file, and the display shows an accept/reject screen with quality band + RMS. Accept copies staged → active and hot-reloads immediately.
 - **No WiFi at completion:** display shows an offline notice; the CSV is still saved to LittleFS, so the old manual fallback still works — run `python tools/mag_calibration.py --mode baseline mag_baseline_samples.csv` (or `--mode mounted --base mag_base.json mag_mounted_samples.csv`), then upload the result to LittleFS root.
 - **Filename matters for the manual fallback only** (the cloud path always writes the right name): the firmware only ever reads `/mag_base.json` and `/mag_mount.json` from the root (see [src/util/storage.h](src/util/storage.h)). Do **not** pass `--output` with a different name (e.g. `mag_mounted.json`) unless you rename it to `/mag_mount.json` on upload — otherwise the device silently ignores it and keeps running the previous (stale) calibration. The script warns if the output name won't be read.
@@ -234,7 +241,7 @@ The system supports automatic calibration with persistence to LittleFS (flash st
 - Per-cell acceptance caps (`MAG_CAL_GAPFILL_TARGET_CAP` / `_UNTARGETED_CAP` in [config.h](src/config.h)) keep gap-fill from creating the next over-weighted bin while closing an empty one.
 - Auto-completes when every target is satisfied; BTN2 still finishes early, since a targeted cell can be physically unreachable.
 - Host-side tests in [tools/README.md](tools/README.md) prove the port matches the server and that a flagged cell reaches the device as the same cell — run them after touching either side.
-- **Steering feedback (2026-09-17):** the grid packet is 319 bytes and so is capped at 2 Hz, but a diver aiming at a target cell is running a closed hand-eye loop, and 2 Hz of *unfiltered instantaneous* position is too slow and too aliased to close it — while the unit moves, each frame lands somewhere effectively random inside the motion envelope, which is what made the highlight look like it jumped. `CalOrientPacket` ("O", 78 bytes) carries only the attitude-varying subset at 10 Hz (`CAL_ORIENT_INTERVAL_MS`), for the two grid modes only; the display merges it into its cached `CalProgressPacket` and re-renders. The roll fields travel **with** `current_bin` deliberately — the widget describes the cell under the highlight, so splitting them would paint one cell's roll coverage under another's box. `showCalGrid` also draws a live sub-cell **dot** at the fractional (heading, pitch), since a cell border alone quantizes attitude to 30° before the diver sees it and gives them no continuous error signal to steer on; its elevation-band table must match `getBinIndex()`/`elevBand()`, and the level band being 60° tall while the rest are 30° is why it is a table and not arithmetic. The orientation readout is now numeric (`284° -37°`) because an 8-point compass rose cannot name which of 12 columns you are in.
+- **Steering feedback (2026-09-17):** the grid packet is 319 bytes and so is capped at 2 Hz, but a diver aiming at a target cell is running a closed hand-eye loop, and 2 Hz of *unfiltered instantaneous* position is too slow and too aliased to close it — while the unit moves, each frame lands somewhere effectively random inside the motion envelope, which is what made the highlight look like it jumped. `CalOrientPacket` ("O", 78 bytes) carries only the attitude-varying subset at 10 Hz (`CAL_ORIENT_INTERVAL_MS`), for the two grid modes only; the display merges it into its cached `CalProgressPacket` and re-renders. (Since 2026-10-11 it is ~120 bytes: it also carries mounted's roll, motion, hold and capture-state fields.) The roll fields travel **with** `current_bin` deliberately — the widget describes the cell under the highlight, so splitting them would paint one cell's roll coverage under another's box. `showCalGrid` also draws a live sub-cell **dot** at the fractional (heading, pitch), since a cell border alone quantizes attitude to 30° before the diver sees it and gives them no continuous error signal to steer on; its elevation-band table must match `elevBand()`, and the level band being 60° tall while the rest are 30° is why it is a table and not arithmetic. The orientation readout is now numeric (`284° -37°`) because an 8-point compass rose cannot name which of 12 columns you are in.
 - **One definition of "finished" (2026-09-17).** The grid coloured a targeted cell green at `MAG_CAL_GAPFILL_TARGET_CAP` (15) *total* samples, while the "N/M cells" counter and auto-completion used `binRollSatisfied()` — upright 15 **plus** 5 in each other roll sector. So 15 upright-only samples painted a cell green exactly when its roll coverage was missing, the counter didn't move, and the device kept accepting samples in a "finished" cell. `CalProgressPacket` now carries a packed per-cell finished map (`"dn"`, 1 bit per cell, 16 hex chars) straight from `binRollSatisfied()`, and the display colours by it — one predicate behind the grid, the counter and completion. Falls back to the count rule only against a nav build too old to send the map.
 - **Gap-fill bins on the BASELINE-ONLY cal (2026-09-17).** It used to bin live orientation through the installed base∘mount chain. Gap-fill is an **off-DPV** pass and the server's target grid lives in the baseline frame — `magBinCalDumpCSV()` stores **raw** counts, so `coverage.py` bins them through its own fit of the baseline collection and never sees a mounted correction. Applying the mount off-scooter corrects for iron that isn't there: with this unit's `mag_mount.json` (soft-iron `diag(0.81, 1.32, 1.0)`, a 63% X/Y anisotropy) that measured up to **22° of heading error, ~29% of level headings binned into the wrong cell**, and a **roll-dependent swing of ±6…±12°** — because rolling the unit turns the field through an anisotropic matrix. `magBinCalBegin()` takes the binning cal explicitly; nav_main loads base (then legacy) only. The old code's justifying comment claimed the chain was "precisely what DumpCSV writes and coverage.py reads", which was simply false.
 - **Near-vertical roll noise is ACCEPTED, decided 2026-09-17 — do not re-litigate.** In the outer elevation rows, roll is read from the `cos(elevation)` component of gravity across the tracked axis (0.035 g at 88°, so mostly sensor noise) and heading gains `tan(elevation)` (a 3° wobble smears three heading columns at 88°). Both are geometry, not filter/cal/wire-format defects. `reconstructRoll`'s degenerate guard is 1e-6 g and so never fires; it returns 0.0 = sector 0 = upright, meaning near-vertical roll is *credited*, not withheld. Gating it (no roll credit above ~84°) was considered and rejected: it would discard hard-won samples in the row that is already hardest to fill. The mitigation is technique — work the band **edge** (~65°, still in the top row) rather than the pole, which is ~12× steadier in heading and ~12× cleaner in roll. See [docs/calibration-guide.md](docs/calibration-guide.md)'s "aim for the edge of the band".
@@ -277,7 +284,7 @@ Runtime toggle states and estimated position are persisted to ESP32 NVS (Non-Vol
 | GPS speed enabled | `nav_state` | `gps_spd` | On toggle |
 | WiFi enabled | `nav_state` | `wifi` | On toggle |
 | Dive mode | `nav_state` | `dive_mode` | On toggle |
-| Log level (0=OFF/1=LOW/2=HIGH/3=MID) | `nav_state` | `log_level` | On cycle |
+| Log level (0=OFF/1=LOW/2=MID/3=HIGH) | `nav_state` | `log_lvl` (the pre-renumbering `log_level` key is read once, translated, then deleted) | On cycle |
 | Estimated X position | `nav_state` | `pos_x` | Every `NVS_POS_SAVE_INTERVAL_MS` (30 s) |
 | Estimated Y position | `nav_state` | `pos_y` | Every `NVS_POS_SAVE_INTERVAL_MS` (30 s) |
 | Show ETA vs speed | `disp_state` | `show_eta` | On toggle |
@@ -397,7 +404,7 @@ and stay open after toggle.
 **`CONFIG > Log` starts logging on a delay and stops it immediately.** The cycle
 is OFF → LOW → MID → HIGH → OFF, so every level is reachable only by passing through
 another, and opening on the keypress left a stub file every time a diver went
-past a level en route to the one they wanted. Now a LOW/HIGH selection only
+past a level en route to the one they wanted. Now a LOW/MID/HIGH selection only
 arms: the label and the NavPacket log-level flags change at once, but the file
 opens `LOG_COMMIT_DELAY_MS` (5 s) later via `logging::tick()` in the nav loop.
 **OFF is applied on the spot** by `cycleLevel()` itself — it opens nothing, and
@@ -499,7 +506,8 @@ The display driver uses a 320×240 ST7789 TFT with direct hardware writes via th
 - `showDebug(DebugPacket)` — debug screen: raw sensor values (mag/accel/gyro XYZ, heading, pitch/roll)
 - `showHdgFourierCalPrompt(int step, int total, float targetDeg, float indicatedDeg)` — heading cal step prompt with live heading readout
 - `showHdgFourierCalDone(int nPoints)` — done screen with instructions to run offline fit and upload JSON
-- `showMagCalProgress(...)` — bin-coverage grid for magnetometer calibration (Baseline/Mounted)
+- `showCalGrid(...)` — bin-coverage grid for gap-fill
+- `showMountedCal(...)` — mounted cal: grid, attitude indicator, motion and hold bars
 
 ## Critical Conventions
 
@@ -569,7 +577,7 @@ Calibration timing is configured at the call sites in [nav_main.cpp](src/nav_mai
 - **Gyro cal (boot)**: `imu::calibrateGyroscope(gyroCal, 10000)` — 10 sec at rest
 - **Accel cal (boot)**: `imu::calibrateAccelerometer(accelCal, 2500)` — 2.5 sec per orientation (15 sec total)
 - **Baseline (rough-scan)**: axis-range-bar collection ends when the diver presses BTN2 (no fixed time, no bin grid)
-- **Mounted bin-aware cal**: sample collection runs until required bins are green (no fixed time)
+- **Mounted dwell cal**: runs until the level row and both tilted rows are complete (no fixed time); the per-dwell limits are `MAG_CAL_DWELL_*` in [config.h](src/config.h)
 
 To force recalibration, delete the JSON files from LittleFS and reboot. Preferred workflow: CAL > Baseline (off DPV) → cloud-fit + accept on-device (WiFi) or offline fit + upload `mag_base.json` (no WiFi); then CAL > Mounted (on DPV), same either/or.
 

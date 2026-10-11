@@ -31,19 +31,19 @@ Silent loss. The diver gets no error, just bad data later.
   is the enforcement point, because the unit is where a wrong heading gets displayed and
   acted on.
 
-- [ ] **Mounted collection records samples the fit can't use**
+- [ ] **Mounted dwell capture: server-side acceptance run still owed**
 
-  A mounted bin takes the first 18 samples that land in it, about 0.2 s after the unit
-  swings across the boundary, with no stillness test. The server's fit tilt-compensates
-  from the accelerometer, so those samples carry a false tilt, and its "level" is ±15°
-  of pitch and roll where the grid's is ±30° of pitch with no roll limit. A fully green
-  grid can hold almost nothing usable. Once dive-map's fit corrections deploy, such a
-  collection is rejected instead of silently fitted badly.
+  Built and bench-run 2026-10-11: a mounted cell fills only from a still dwell inside its
+  row's attitude window (`src/util/mounted_dwell.h`), with an attitude indicator, motion
+  bar and hold bar on screen. On the unit the stillness limits were workable as shipped
+  and the screen did not flicker. The horizon's roll was backwards in the first build and
+  is fixed; the horizon is now drawn as 2x-exaggerated error from the row's target so it
+  reads from the far end of the scooter.
 
-  *Wanted:* record a cell only from a still dwell inside the attitude the fit accepts,
-  and show the diver a motion bar and an attitude indicator so they can get there. Part A
-  of dive-map's
-  [`mounted-cal-dwell-plan.md`](../../dive-map/docs/architecture/mounted-cal-dwell-plan.md).
+  *Owed:* the acceptance run in Part A of dive-map's
+  [`mounted-cal-dwell-plan.md`](../../dive-map/docs/architecture/mounted-cal-dwell-plan.md):
+  a server fit of one dwell collection, with within-dwell scatter near 0.4 µT. That needs
+  dive-map's fit corrections deployed.
 
 - [ ] **A cal can't tell whether it was collected with thermal compensation on**
 
@@ -52,7 +52,8 @@ Silent loss. The diver gets no error, just bad data later.
   records which. A cal collected one way and used the other is off by the full thermal
   drift (0.65 µT/°C), silently, and the item below is how the file goes missing.
 
-  *Wanted:* `mag_temp_c` and `tcomp` on every cal CSV row, a `thermal` block in the cal
+  *Done 2026-10-11:* `mag_temp_c` and `tcomp` on every cal CSV row (baseline, gap-fill,
+  mounted, heading samples). *Still wanted:* a `thermal` block in the cal
   JSON, and a load-time mismatch warning. Part D of
   [`mounted-cal-dwell-plan.md`](../../dive-map/docs/architecture/mounted-cal-dwell-plan.md).
 
@@ -275,17 +276,13 @@ Features and UX with a design already thought through.
 
 Real, small, not urgent. Good candidates when something above is blocked on hardware or a dive.
 
-- [ ] **Logging runs at full rate while the diver is stationary**
+- [ ] **Nothing frees space for a log once it is open**
 
-  Worst-case LittleFS sizing assumes a continuous ~2 hr dive at 1 row/sec (~500 KB), but a
-  meaningful chunk of that is kitting up on the beach or holding position looking at a wreck,
-  where DR isn't advancing and a row adds little. Gating on the existing flow-threshold signal
-  (`DR_MIN_FLOW_SPEED_MS`, or speed cal's `SPEED_CAL_START_THRESHOLD_HZ` /
-  `SPEED_CAL_STOP_THRESHOLD_MS` pair) would shrink the realistic worst case and buy partition
-  margin without touching the LittleFS allocation.
-
-  *Needs a decision:* whether HIGH-level logging should still log at rest — that mode is
-  sometimes used specifically to debug stationary sensor behaviour.
+  `cleanupOldLogs()` runs at boot only, and only until 32 KiB is free. A log that outgrows the
+  free space drops rows silently: `logging.cpp` never checks a write's result. A two-hour
+  HIGH or ungated MID log is ~540 KiB of the 768 KiB partition, so old logs have to be
+  cleared by hand first. Wanted: when a log opens, free what its level could need, deleting
+  already-uploaded logs first (`log_sync::isUploaded`), and warn on the display if it can't.
 
 - [ ] **Cal axis bars are labelled X/Y/Z, which a diver can't act on**
 

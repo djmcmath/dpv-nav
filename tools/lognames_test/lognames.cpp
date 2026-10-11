@@ -38,7 +38,8 @@ static void expectReject(const char* name) {
 // Mirrors logging.cpp's openNextFile(): today's date if the clock is set,
 // otherwise the newest prefix already on disk, then the next free sequence
 // under whichever prefix that is.
-static std::string nextName(const std::vector<std::string>& dir, const char* today) {
+static std::string nextName(const std::vector<std::string>& dir, const char* today,
+                            const char* ext = log_names::EXT_CSV) {
     std::string prefix = today ? today : "";
     if (prefix.empty()) {
         for (const auto& n : dir) {
@@ -53,7 +54,7 @@ static std::string nextName(const std::vector<std::string>& dir, const char* tod
         if (log_names::parse(n.c_str(), p, s) && prefix == p && s > highest) highest = s;
     }
     char out[log_names::NAME_BUF_LEN];
-    snprintf(out, sizeof(out), "%s-%03u.csv", prefix.c_str(), (unsigned)(highest + 1));
+    snprintf(out, sizeof(out), "%s-%03u%s", prefix.c_str(), (unsigned)(highest + 1), ext);
     return out;
 }
 
@@ -62,6 +63,9 @@ int main() {
     expectParse("20260908-001.csv", "20260908", 1);
     expectParse("20260908-999.csv", "20260908", 999);
     expectParse("00000000-001.csv", "00000000", 1);   // never-had-a-clock fallback
+    expectParse("20260908-001.bin", "20260908", 1);   // binary MID/HIGH log
+    expectReject("20260908-001.bin.bak");
+    expectReject("20260908-001.binx");
     expectReject("001.csv");                          // pre-dating logs
     expectReject("2026098-001.csv");                  // 7-digit prefix
     expectReject("20260908_001.csv");                 // wrong separator
@@ -71,6 +75,13 @@ int main() {
     expectReject("2026090a-001.csv");                 // non-digit in prefix
     expectReject("mag_base.json");
     expectReject("");
+
+    printf("binary logs\n");
+    check(log_names::isBinary("20260908-001.bin"), ".bin is binary");
+    check(log_names::isBinary("/logs/20260908-001.bin"), "full path .bin is binary");
+    check(!log_names::isBinary("20260908-001.csv"), ".csv is not binary");
+    check(!log_names::isBinary("bin"), "too short to carry the extension");
+    check(!log_names::isBinary(""), "empty name is not binary");
 
     printf("buffer sizing\n");
     check(strlen("20260908-999.csv") + 1 <= log_names::NAME_BUF_LEN, "NAME_BUF_LEN fits the grammar");
@@ -84,7 +95,8 @@ int main() {
         "001.csv", "017.csv",                            // oldest: pre-dating
         "00000000-001.csv",                              // clockless unit
         "20251231-002.csv", "20260101-001.csv",          // year boundary
-        "20260908-001.csv", "20260908-002.csv", "20260908-010.csv",
+        "20260908-001.csv", "20260908-002.bin", "20260908-003.csv",
+        "20260908-010.bin", "20260908-011.csv",
     };
     check(!std::is_sorted(chronological.begin(), chronological.end()),
           "plain string order would get this wrong (guards the test itself)");
@@ -123,6 +135,21 @@ int main() {
     // Deleting the middle of a day still moves forward, never backward.
     std::vector<std::string> gapped = {"20260908-001.csv", "20260908-003.csv"};
     check(nextName(gapped, "20260908") == "20260908-004.csv", "gap does not rewind the sequence");
+
+    // CSV and binary logs share one sequence. Counted separately, the second
+    // .bin of a day would be handed the first one's name and truncate it.
+    std::vector<std::string> mixed = {"20260908-001.csv", "20260908-002.bin"};
+    check(nextName(mixed, "20260908", log_names::EXT_BIN) == "20260908-003.bin",
+          "second .bin does not reuse the first one's name");
+    check(nextName(mixed, "20260908") == "20260908-003.csv", ".csv counts .bin files too");
+    std::vector<std::string> binOnly = {"20260908-001.bin"};
+    check(nextName(binOnly, "20260908") == "20260908-002.csv", "a lone .bin still advances the sequence");
+    check(nextName(binOnly, nullptr, log_names::EXT_BIN) == "20260908-002.bin",
+          "no clock -> a .bin supplies the newest prefix");
+    // Extension never outranks sequence, in either direction.
+    check(log_names::olderThan("20260908-001.csv", "20260908-002.bin"), "csv 001 older than bin 002");
+    check(log_names::olderThan("20260908-001.bin", "20260908-002.csv"), "bin 001 older than csv 002");
+    check(!log_names::olderThan("20260908-002.bin", "20260908-001.csv"), "bin 002 not older than csv 001");
 
     printf("clockless fallback\n");
     std::vector<std::string> dated = {"20260908-001.csv", "20251231-009.csv"};

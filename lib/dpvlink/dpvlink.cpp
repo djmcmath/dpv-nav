@@ -434,6 +434,16 @@ size_t calProgressPacketToBytes(const CalProgressPacket& pkt, char* buf, size_t 
     doc["hh"]  = pkt.cur_hdg_deg;
     doc["sc"]  = pkt.sample_count;
 
+    // Mounted only: the dwell-capture readout (see CalOrientPacket, which
+    // refreshes these same keys at 10 Hz).
+    if (pkt.cal_type == (uint8_t)CalType::MOUNTED) {
+        doc["rl"] = pkt.cur_roll_deg;
+        doc["mo"] = pkt.motion;
+        doc["mt"] = pkt.motion_term;
+        doc["dw"] = pkt.dwell_pct;
+        doc["ds"] = pkt.capture_state;
+    }
+
     // Encode bin counts as a JSON array
     JsonArray bins = doc["bc"].to<JsonArray>();
     for (int i = 0; i < pkt.bins_total; i++) {
@@ -532,6 +542,11 @@ bool bytesToCalProgressPacket(const char* buf, size_t len, CalProgressPacket& ou
     out.current_bin   = doc["cb"]  | (int8_t)-1;
     out.cur_pitch_deg = doc["pp"]  | 0.0f;
     out.cur_hdg_deg   = doc["hh"]  | 0.0f;
+    out.cur_roll_deg  = doc["rl"]  | 0.0f;
+    out.motion        = doc["mo"]  | (uint8_t)0;
+    out.motion_term   = doc["mt"]  | (uint8_t)0;
+    out.dwell_pct     = doc["dw"]  | (uint8_t)0;
+    out.capture_state = doc["ds"]  | (uint8_t)0;
     out.sample_count  = doc["sc"]  | (uint16_t)0;
 
     JsonArray bins = doc["bc"];
@@ -634,7 +649,7 @@ bool bytesToCalProgressPacket(const char* buf, size_t len, CalProgressPacket& ou
 // CalOrientPacket -- the attitude-varying subset of CalProgressPacket, sent
 // 5x more often. See the struct comment in dpvlink.h for why.
 // Deliberately reuses CalProgressPacket's key names ("cb"/"pp"/"hh"/"rc"/
-// "rt"/"rs") for the identical fields: the display merges this straight into
+// "rt"/"rs"/"rl"/"mo"/"mt"/"dw"/"ds") for the identical fields: the display merges this straight into
 // its cached progress packet, and two spellings for one field is how they
 // drift apart.
 // ---------------------------------------------------------------------------
@@ -644,6 +659,11 @@ size_t calOrientPacketToBytes(const CalOrientPacket& pkt, char* buf, size_t bufL
     doc["cb"] = pkt.current_bin;
     doc["pp"] = pkt.cur_pitch_deg;
     doc["hh"] = pkt.cur_hdg_deg;
+    doc["rl"] = pkt.cur_roll_deg;
+    doc["mo"] = pkt.motion;
+    doc["mt"] = pkt.motion_term;
+    doc["dw"] = pkt.dwell_pct;
+    doc["ds"] = pkt.capture_state;
 
     JsonArray rc = doc["rc"].to<JsonArray>();
     JsonArray rt = doc["rt"].to<JsonArray>();
@@ -668,6 +688,13 @@ bool bytesToCalOrientPacket(const char* buf, size_t len, CalOrientPacket& out) {
     out.current_bin   = doc["cb"] | (int8_t)-1;
     out.cur_pitch_deg = doc["pp"] | 0.0f;
     out.cur_hdg_deg   = doc["hh"] | 0.0f;
+    // Missing dwell fields decode as "out of window, nothing captured": the
+    // one reading that never tells the diver a sample is being taken.
+    out.cur_roll_deg  = doc["rl"] | 0.0f;
+    out.motion        = doc["mo"] | (uint8_t)0;
+    out.motion_term   = doc["mt"] | (uint8_t)0;
+    out.dwell_pct     = doc["dw"] | (uint8_t)0;
+    out.capture_state = doc["ds"] | (uint8_t)0;
 
     JsonArray rc = doc["rc"];
     JsonArray rt = doc["rt"];
@@ -701,6 +728,7 @@ size_t calCloudResultPacketToBytes(const CalCloudResultPacket& pkt, char* buf, s
         if (!pkt.installable) doc["in"] = false;
     } else if (pkt.stage == (uint8_t)CalCloudStage::FAILED) {
         doc["cer"] = pkt.error;
+        if (pkt.rejected) doc["rj"] = true;
     }
 
     size_t n = serializeJson(doc, buf, bufLen - 1);
@@ -733,6 +761,7 @@ bool bytesToCalCloudResultPacket(const char* buf, size_t len, CalCloudResultPack
     out.calibration_id[sizeof(out.calibration_id) - 1] = '\0';
 
     out.installable = doc["in"] | true;
+    out.rejected    = doc["rj"] | false;
     return true;
 }
 

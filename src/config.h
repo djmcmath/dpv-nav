@@ -72,17 +72,30 @@ constexpr uint32_t NVS_POS_SAVE_INTERVAL_MS = 30000;  // 30 seconds
 
 // Data logging intervals (ms) — minimum time between log entries per level
 constexpr uint32_t LOG_LOW_INTERVAL_MS  = 1000;   // 1 entry per second (LOW level)
+constexpr uint32_t LOG_MID_INTERVAL_MS  = 1000;   // 1 entry per second (MID level)
 constexpr uint32_t LOG_HIGH_INTERVAL_MS = 1000;   // 1 entry per second (HIGH level)
-// MID: LOW's columns (which include mag_temp_c) plus mag_*_cal and pitch/roll — enough to
-// diagnose a heading problem on a real dive, which HIGH cannot cover. HIGH costs
-// ~241 B/row (~850 KiB/hour at 1 Hz) against a 768 KiB LittleFS partition
-// (partitions_nav.csv), so it runs dry in under an hour; MID is ~140 B/row, and
-// at 1.5 s that is ~330 KiB/hour — roughly 2.2 hours before cleanupOldLogs()
-// starts pruning.
-constexpr uint32_t LOG_MID_INTERVAL_MS  = 1500;   // 1 entry per 1.5 s (MID level)
+// MID and HIGH write the same 77-byte binary record (util/log_record.h):
+// ~270 KiB/hour, so a two-hour dive is ~540 KiB of the 768 KiB LittleFS
+// partition (partitions_nav.csv). As CSV those rows were ~240 bytes and ran the
+// partition dry in under an hour. Nothing prunes while a log is open --
+// cleanupOldLogs() runs at boot only -- so that space has to be free at the start.
 
-// How long a LOW or HIGH selection must be left alone before a log file is
-// actually opened. CONFIG > Log cycles OFF -> LOW -> HIGH -> OFF, so reaching
+// Idle gate for LOW and MID (util/log_idle.h): once the unit has been on the
+// surface, with a GPS position, not moving, for LOG_IDLE_ENTER_MS, rows drop
+// from the per-level rate to one per LOG_IDLE_HEARTBEAT_MS. Any one condition
+// failing restores full rate on that sample. HIGH is never gated.
+constexpr float    LOG_IDLE_MAX_DEPTH_M  = 1.0f;    // shallower than this counts as surfaced
+constexpr float    LOG_IDLE_MAX_SPEED_MS = 0.0f;    // speed is exactly 0 below DR_MIN_FLOW_SPEED_MS
+// GPS scatter at a standstill is a few metres; carrying the scooter up the
+// beach is not. Stays under the track processor's HOLD_MAX_DRIFT_M (30 m).
+constexpr float    LOG_IDLE_MAX_DRIFT_M  = 15.0f;
+// Also how many full-rate rows the surfacing GPS fix gets before idle begins --
+// those rows are what the track correction anchors on.
+constexpr uint32_t LOG_IDLE_ENTER_MS     = 60000;
+constexpr uint32_t LOG_IDLE_HEARTBEAT_MS = 60000;   // 1 entry per minute while idle
+
+// How long a LOW, MID or HIGH selection must be left alone before a log file is
+// actually opened. CONFIG > Log cycles OFF -> LOW -> MID -> HIGH -> OFF, so reaching
 // any given level means passing *through* the others; opening on the keypress
 // left a stub file every time a diver went past a level on the way to the one
 // they wanted. The level shown on screen still changes immediately, and OFF
@@ -104,8 +117,9 @@ constexpr int MAG_CAL_BASELINE_HDG_SECTORS = 12;
 constexpr int MAG_CAL_BASELINE_ELEV_BANDS  = 5;
 constexpr int MAG_CAL_BASELINE_BINS        = MAG_CAL_BASELINE_HDG_SECTORS * MAG_CAL_BASELINE_ELEV_BANDS;  // 60
 
-// Mounted cal: 12 heading sectors × 3 elevation bands = 36 bins
-// Elevation bands (degrees pitch): -30..-15, -15..+15 (level), +15..+30 (and beyond threshold)
+// Mounted cal: 12 heading sectors × 3 elevation rows = 36 cells. The rows are
+// the attitude windows in the "Mounted dwell capture" block below, not bands
+// that tile the pitch axis: between rows nothing is recorded.
 constexpr int MAG_CAL_MOUNTED_HDG_SECTORS  = 12;
 constexpr int MAG_CAL_MOUNTED_ELEV_BANDS   = 3;
 constexpr int MAG_CAL_MOUNTED_BINS         = MAG_CAL_MOUNTED_HDG_SECTORS * MAG_CAL_MOUNTED_ELEV_BANDS;  // 36
@@ -130,14 +144,65 @@ constexpr float MAG_CAL_MOUNTED_OOR_WEIGHT = 0.25f;
 // still improves fit quality; requiring 100% is unnecessary.
 //
 //   Level (0°):     12/12 = 100%  — must be fully covered for reliable horizontal heading
-//   ±30° rows:      11/12 ≈ 92%  — one missed sector per tilt row is acceptable
+//   ±30° rows:       6/12 =  50%  — with no gap over MAG_CAL_DWELL_TILT_MAX_GAP_SECTORS;
+//                                   see "Mounted dwell capture" below for why six is enough
 //   ±60° rows:       9/12 = 75%  — three missed sectors at extreme tilt is acceptable
 constexpr int MAG_CAL_SECTORS_LEVEL   = 12;  // 100% — level row
-constexpr int MAG_CAL_SECTORS_MID     = 11;  // ~92% — ±30° rows
+constexpr int MAG_CAL_SECTORS_MID     =  6;  //  50% — ±30° rows
 constexpr int MAG_CAL_SECTORS_EXTREME =  3;  //  25% — ±60° rows (baseline only)
 // Note: extreme rows need only 3/12 sectors because DPV operation rarely exceeds ±45°
 // pitch.  A handful of extreme-tilt samples is enough to constrain the Z-axis of the
 // ellipsoid fit without requiring sustained upside-down maneuvers.
+
+// ---------------------------------------------------------------------------
+// Mounted dwell capture (2026-10-11) — see
+// divemap/docs/architecture/mounted-cal-dwell-plan.md, Part A, and
+// src/util/mounted_dwell.h, which implements it.
+//
+// The mounted fit takes "down" from the accelerometer, so a sample taken while
+// the scooter is being moved carries a false tilt, and 1° of false tilt leaks
+// about 5% of the horizontal field into the fit. The collector therefore
+// records nothing until the unit has sat still inside a row's attitude window,
+// and then takes one cell's MAG_CAL_BIN_GREEN_THRESHOLD samples in one go.
+//
+// Every limit here is deliberately tighter than the server's
+// (callib/fit.py: 8°/s, 0.03 g, ±15° level window), so the server never drops
+// a sample the unit accepted. Nothing forces the two to agree — the server
+// reports any it had to drop on the calibration's web page.
+// ---------------------------------------------------------------------------
+
+// "Still": all three must hold.
+constexpr float MAG_CAL_DWELL_GYRO_DPS       = 5.0f;   // gyro magnitude, deg/s
+constexpr float MAG_CAL_DWELL_ACCEL_DEV_G    = 0.02f;  // | |a| - 1 g |
+constexpr float MAG_CAL_DWELL_ACCEL_JITTER_G = 0.02f;  // peak-to-peak, worst axis, over the window
+
+// Accel history the jitter test and the attitude both use: 25 ticks of the
+// 100 Hz loop = 250 ms. The attitude is this window's mean, which is what
+// smooths the on-screen horizon.
+constexpr int MAG_CAL_DWELL_WINDOW_TICKS = 25;
+
+// Still for this long before the first sample is taken.
+constexpr uint32_t MAG_CAL_DWELL_SETTLE_MS = 400;
+
+// Attitude windows, from accel-only pitch and roll (mag_orient::pitchRollDeg).
+// Level is ±10° on both axes; the tilted rows are ±10° of pitch about ±30°,
+// with a looser roll because they are propped by hand.
+constexpr float MAG_CAL_DWELL_LEVEL_TOL_DEG    = 10.0f;
+constexpr float MAG_CAL_DWELL_TILT_CENTER_DEG  = 30.0f;
+constexpr float MAG_CAL_DWELL_TILT_PITCH_TOL_DEG = 10.0f;
+constexpr float MAG_CAL_DWELL_TILT_ROLL_TOL_DEG  = 15.0f;
+
+// A dwell will not START within this many degrees of a heading-sector edge.
+// Heading noise at an edge would otherwise flip the cell mid-dwell and discard
+// it, and two neighbouring cells could be filled from the same heading.
+constexpr float MAG_CAL_DWELL_HDG_GUARD_DEG = 3.0f;
+
+// A tilted row is complete at MAG_CAL_SECTORS_MID cells with no run of empty
+// headings wider than this between filled ones: 3 sectors = 90°.
+constexpr int MAG_CAL_DWELL_TILT_MAX_GAP_SECTORS = 3;
+
+// The on-screen motion bar holds its peak this long so it does not flicker.
+constexpr uint32_t MAG_CAL_DWELL_MOTION_HOLD_MS = 300;
 
 // ---------------------------------------------------------------------------
 // Baseline cal (2026-07-25) — no live grid; see

@@ -6,7 +6,10 @@
 // Dive-log filename grammar, split out of logging.cpp so it can be exercised
 // on the host without an Arduino/LittleFS stub -- see tools/lognames_test/.
 //
-// A log is /logs/YYYYMMDD-NNN.csv: date first so that lexicographic order
+// A log is /logs/YYYYMMDD-NNN.csv (LOW) or /logs/YYYYMMDD-NNN.bin (MID/HIGH,
+// see log_record.h). Both extensions share one sequence under a date, so NNN is
+// unique across them and still gives the order the files were opened in. Date
+// first so that lexicographic order
 // equals chronological order (logging.cpp's cleanupOldLogs() prunes the
 // lexicographically first name and must not prune a newer file), and so that a
 // name is not reused after the directory is emptied. Reuse was the real
@@ -16,9 +19,20 @@
 namespace log_names {
 
 static constexpr size_t PREFIX_LEN = 8;   // "YYYYMMDD"
-// Buffer size for a basename: "YYYYMMDD-NNN.csv" + NUL. Not NAME_MAX --
+// Buffer size for a basename: "YYYYMMDD-NNN.csv" (or .bin) + NUL. Not NAME_MAX --
 // that is a POSIX macro, and the host tests include <cstdio>.
 static constexpr size_t NAME_BUF_LEN = 20;
+
+static constexpr const char* EXT_CSV = ".csv";
+static constexpr const char* EXT_BIN = ".bin";
+
+// True for a name ending in EXT_BIN -- a binary MID/HIGH log. These never
+// upload (net/log_sync.cpp, web_server.cpp): the server only reads CSV.
+inline bool isBinary(const char* name) {
+    if (!name) return false;
+    size_t len = strlen(name);
+    return len >= 4 && strcmp(name + len - 4, EXT_BIN) == 0;
+}
 
 // Split a basename into its date prefix and sequence number. False for
 // anything that isn't this grammar -- notably the pre-dating "NNN.csv" logs,
@@ -40,7 +54,7 @@ inline bool parse(const char* name, char prefixOut[PREFIX_LEN + 1], uint16_t& se
         digits++;
         if (seq > 65535u) return false;
     }
-    if (digits == 0 || strcmp(p, ".csv") != 0) return false;
+    if (digits == 0 || (strcmp(p, EXT_CSV) != 0 && strcmp(p, EXT_BIN) != 0)) return false;
 
     memcpy(prefixOut, name, PREFIX_LEN);
     prefixOut[PREFIX_LEN] = '\0';
@@ -64,7 +78,12 @@ inline bool olderThan(const char* a, const char* b) {
     bool datedA = parse(a, pa, sa);
     bool datedB = parse(b, pb, sb);
     if (datedA != datedB) return !datedA;  // undated is always the older class
-    return strcmp(a, b) < 0;
+    if (!datedA) return strcmp(a, b) < 0;
+    // Dated: by date, then sequence. Not a whole-name compare -- the extension
+    // must not get a vote, and it would the moment a sequence outgrew %03u.
+    int c = strcmp(pa, pb);
+    if (c != 0) return c < 0;
+    return sa < sb;
 }
 
 }  // namespace log_names

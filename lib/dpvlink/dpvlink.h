@@ -96,7 +96,7 @@ constexpr uint8_t FLAG_HAS_HOME        = 0x04;  // 1 = home position set
 constexpr uint8_t FLAG_GPS_ENABLED     = 0x08;  // 1 = GPS usage enabled (position + speed)
 constexpr uint8_t FLAG_WIFI_ENABLED    = 0x10;  // 1 = WiFi radio enabled
 // 0x20 retired (was FLAG_GPS_SPD_ENABLED — GPS position/speed toggles merged into one)
-constexpr uint8_t FLAG_LOG_LEVEL_MASK  = 0xC0;  // bits 7:6 — log level (0=OFF, 1=LOW, 2=HIGH, 3=MID)
+constexpr uint8_t FLAG_LOG_LEVEL_MASK  = 0xC0;  // bits 7:6 — log level (0=OFF, 1=LOW, 2=MID, 3=HIGH)
 constexpr uint8_t FLAG_LOG_LEVEL_SHIFT = 6;
 
 // NavPacket.flags2 bit definitions
@@ -168,8 +168,16 @@ struct CalProgressPacket {
     bool     complete;          // true when all bins green (CSV being dumped)
     uint8_t  bin_counts[60];    // sample count per bin, capped at 255 (baseline uses all 60; mounted uses first 36)
     int8_t   current_bin;       // bin index of current device orientation (-1 if unmappable)
-    float    cur_pitch_deg;     // actual AHRS pitch at packet-send time (for orientation readout)
+    float    cur_pitch_deg;     // pitch at packet-send time: accel-only in mounted and gap-fill
     float    cur_hdg_deg;       // actual heading at packet-send time (for orientation readout)
+
+    // Mounted only: the live half of dwell capture. Same meaning as the
+    // CalOrientPacket fields of the same name, which overwrite these at 10 Hz.
+    float    cur_roll_deg;      // signed, right side down positive
+    uint8_t  motion;            // see CalOrientPacket
+    uint8_t  motion_term;       // CalMotionTerm
+    uint8_t  dwell_pct;
+    uint8_t  capture_state;     // CalDwellState
 
     // ROUGH_SCAN only: per-axis raw-range coverage (0-100%, vs an expected
     // range), and total accepted sample count. No bin/grid meaning in this
@@ -236,6 +244,33 @@ struct CalProgressPacket {
 };
 
 // ---------------------------------------------------------------------------
+// Mounted dwell capture: why the collector is or is not recording right now.
+// Sent in `capture_state`; the display turns it into the one-line instruction.
+// ---------------------------------------------------------------------------
+enum class CalDwellState : uint8_t {
+    OUT_OF_WINDOW = 0,  // attitude is outside every row's window
+    EDGE          = 1,  // still and in a window, but too near a heading-sector edge to start
+    MOVING        = 2,  // in a window, not still
+    SETTLING      = 3,  // still; waiting out the settle time
+    CAPTURING     = 4,  // recording this cell's samples
+    CELL_DONE     = 5,  // the cell under the unit is already filled
+};
+
+// Which stillness test `motion` is reporting. Shown beside the bar, because a
+// bar that will not empty on a scooter sitting on a stool is a sensor
+// calibration fault, and which sensor is the whole diagnosis: the unit is
+// sealed, so there is no serial port to ask.
+enum class CalMotionTerm : uint8_t {
+    GYRO         = 0,  // turning: gyro magnitude
+    ACCEL_MAG    = 1,  // pushed: accel magnitude away from 1 g
+    ACCEL_JITTER = 2,  // shaking: accel spread over the last quarter second
+};
+
+// `motion` value at which a stillness term sits exactly on its limit: below
+// this the unit counts as still. 50 leaves room to show up to 5x the limit.
+constexpr uint8_t CAL_MOTION_AT_LIMIT = 50;
+
+// ---------------------------------------------------------------------------
 // Live-orientation packet  (nav -> display, grid phases only, ~10 Hz)
 // ---------------------------------------------------------------------------
 // CalProgressPacket carries the whole 60-cell grid and so is rate-limited to
@@ -257,8 +292,21 @@ struct CalProgressPacket {
 // CalProgressPacket must ignore it.
 struct CalOrientPacket {
     int8_t current_bin;          // grid cell of current orientation (-1 if unmappable)
-    float  cur_pitch_deg;        // same source as CalProgressPacket's -- algebraic in
-    float  cur_hdg_deg;          // gap-fill, AHRS in mounted COLLECT
+    float  cur_pitch_deg;        // same source as CalProgressPacket's. Pitch is accel-only
+    float  cur_hdg_deg;          // in both grid modes; heading is algebraic in gap-fill
+                                 // and the AHRS's in mounted.
+
+    // Mounted only (zero in gap-fill): what the dwell-capture screen draws.
+    // The mounted collector records a cell only after the unit has sat still
+    // inside that row's attitude window (src/util/mounted_dwell.h), and these
+    // are how the diver sees how close they are to that.
+    float   cur_roll_deg;        // signed, right side down positive; with cur_pitch_deg,
+                                 // the attitude the capture rule itself is testing
+    uint8_t motion;              // worst stillness term as a fraction of its limit,
+                                 // x CAL_MOTION_AT_LIMIT, peak-held and capped at 255
+    uint8_t motion_term;         // CalMotionTerm: which term that was
+    uint8_t dwell_pct;           // 0-100 through settle then capture
+    uint8_t capture_state;       // CalDwellState
 
     // Roll widget, GAP_FILL only. These travel WITH current_bin deliberately:
     // the widget shows the roll breakdown *of the cell under the highlight*,
@@ -291,6 +339,11 @@ struct CalCloudResultPacket {
     float   rms_pct;              // stage == DONE only
     char    recommendation[96];   // shown to the diver as-is; stage == DONE only
     char    error[64];            // shown to the diver as-is; stage == FAILED only
+    // stage == FAILED only. True when the upload worked and the server
+    // refused to fit the samples (HTTP 422), so retrying the same samples
+    // cannot help; `error` is then the server's reason. False for a transport
+    // or auth failure, where the samples are still on the unit to retry.
+    bool    rejected = false;
     char    calibration_id[40];   // UUID string; needed to accept/reject
     int16_t coverage_gaps;        // stage == DONE only; baseline only. -1 = not
                                    // applicable (mounted, or pre-9-axis-firmware CSV).

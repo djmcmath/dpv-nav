@@ -6,6 +6,7 @@
 #include <Arduino.h>
 #include "imu.h"
 #include "../util/mag_cal_orient.h"
+#include "../util/mounted_dwell.h"
 #include <math.h>
 #include "../config.h"
 #include <LittleFS.h>
@@ -607,21 +608,67 @@ static bool magFit2DSolve() {
 // Maximum total samples we ever store across all bins
 static constexpr int BIN_CAL_MAX_SAMPLES = 60 * MAG_CAL_BIN_GREEN_THRESHOLD * 2;  // 2160
 
+// Accel and gyro are stored as scaled int16, not float: 22 bytes a sample
+// against 32, which is 21 KB less of the heap this buffer has starved before
+// (see magBinCalFreeSamples). The steps are 0.12 mg and 0.057 deg/s, both
+// well under the sensors' own noise, and the CSV is written back out in g and
+// rad/s exactly as before.
+static constexpr float BIN_CAL_ACCEL_LSB_PER_G     = 8192.0f;  // +-4 g
+static constexpr float BIN_CAL_GYRO_LSB_PER_RAD_S  = 1000.0f;  // +-32.7 rad/s
+static constexpr int16_t BIN_CAL_NO_TEMP           = INT16_MIN;
+
 struct BinCalSample {
     int16_t x, y, z;        // mag: raw logical-frame counts (post-axis-map, from readMagRaw())
-    float   ax, ay, az;     // accel: calibrated, g (logical frame, same axis-map as mag)
-    float   gx, gy, gz;     // gyro: calibrated, rad/s (logical frame, same axis-map as mag)
+    int16_t ax, ay, az;     // accel: calibrated, logical frame, g * BIN_CAL_ACCEL_LSB_PER_G
+    int16_t gx, gy, gz;     // gyro: calibrated, logical frame, rad/s * BIN_CAL_GYRO_LSB_PER_RAD_S
+    int16_t temp_centi_c;   // mag die temperature, 0.01 degC; BIN_CAL_NO_TEMP if never read
+    uint8_t tcomp;          // 1 if thermal compensation was applied to x/y/z
+    uint8_t dwell;          // mounted: 1-based dwell this sample belongs to; 0 otherwise
 };
+
+static inline int16_t binCalScale(float v, float lsbPerUnit) {
+    const float c = v * lsbPerUnit;
+    if (!(c > -32767.0f)) return -32767;  // also catches NaN
+    if (c > 32767.0f) return 32767;
+    return (int16_t)lroundf(c);
+}
+
+// The mag reading passed to magBinCalTick() has already been through
+// readMagRaw_SensorFrame()'s thermal compensation, when that is on. Record
+// the die temperature and whether it was, or a calibration's thermal state is
+// unknowable after the fact.
+static BinCalSample makeBinCalSample(const Vec3i16& rawMag, const Vec3f& accelCal,
+                                     const Vec3f& gyroCal, uint8_t dwell) {
+    BinCalSample s;
+    s.x = rawMag.x;  s.y = rawMag.y;  s.z = rawMag.z;
+    s.ax = binCalScale(accelCal.x, BIN_CAL_ACCEL_LSB_PER_G);
+    s.ay = binCalScale(accelCal.y, BIN_CAL_ACCEL_LSB_PER_G);
+    s.az = binCalScale(accelCal.z, BIN_CAL_ACCEL_LSB_PER_G);
+    s.gx = binCalScale(gyroCal.x, BIN_CAL_GYRO_LSB_PER_RAD_S);
+    s.gy = binCalScale(gyroCal.y, BIN_CAL_GYRO_LSB_PER_RAD_S);
+    s.gz = binCalScale(gyroCal.z, BIN_CAL_GYRO_LSB_PER_RAD_S);
+    s.temp_centi_c = (g_magTempSeen && isfinite(g_magTemp_c))
+                     ? binCalScale(g_magTemp_c, 100.0f) : BIN_CAL_NO_TEMP;
+    s.tcomp = (g_magTempCompOn && g_magTempSeen && scaleReady(g_mag_lsb_per_uT)) ? 1 : 0;
+    s.dwell = dwell;
+    return s;
+}
 
 static bool          g_binCalActive    = false;
 static BinCalMode    g_binCalMode      = BinCalMode::BASELINE;
 static int           g_binCalBinCount  = 0;         // 60 or 36
 
-// Convenience: mounted is the only mode with a 36-bin grid and auto-green
-// completion. Baseline and gap-fill are both 60-bin baseline collections that
-// produce the same 9-axis CSV -- they differ in what feedback they can honestly
-// give while collecting, not in what they produce.
+// Convenience: mounted is the only mode with a 36-cell grid, and the only one
+// that records by dwell. Baseline and gap-fill are both 60-bin baseline
+// collections that produce the same CSV -- they differ in what feedback they
+// can honestly give while collecting, not in what they produce.
 static inline bool binCalIsMounted() { return g_binCalMode == BinCalMode::MOUNTED; }
+
+// MOUNTED only: decides when a cell may be recorded (util/mounted_dwell.h).
+static mounted_dwell::Tracker g_mountedDwell;
+// Last mag reading the mounted path saw, to spot a tick with no new reading.
+static Vec3i16 g_mountedLastMag{};
+static bool    g_mountedHasLastMag = false;
 
 // GAP_FILL only: the server's per-cell status map (0=ok, 1=thin, 2=empty,
 // 3=over) and the derived "is this a cell the diver was sent to" test.
@@ -731,34 +778,6 @@ static bool         g_binHasSample[60]  = {};
 enum class BinCalSubPhase : uint8_t { ROUGH_SCAN, COLLECT, GAP_FILL };
 static BinCalSubPhase g_binCalSubPhase = BinCalSubPhase::COLLECT;
 
-// Map a sample's orientation to a bin index, or -1 if out of range for mounted
-static int getBinIndex(float pitch_deg, float heading_deg, bool isMounted) {
-    if (heading_deg < 0.0f) heading_deg += 360.0f;
-    if (heading_deg >= 360.0f) heading_deg -= 360.0f;
-    int hdgSector = (int)(heading_deg / 30.0f);
-    if (hdgSector < 0) hdgSector = 0;
-    if (hdgSector > 11) hdgSector = 11;
-
-    int elevBand;
-    if (isMounted) {
-        // 3 bands: 0 = nose-up (≥+30°), 1 = level (-30°..+30°), 2 = nose-down (<-30°)
-        // MAG_CAL_ELEV_L1 = -30.0f, so -MAG_CAL_ELEV_L1 = +30.0f
-        if (pitch_deg >= -MAG_CAL_ELEV_L1)      elevBand = 0;  // pitch ≥ +30
-        else if (pitch_deg >= MAG_CAL_ELEV_L1)  elevBand = 1;  // pitch ≥ -30 (level)
-        else                                    elevBand = 2;  // pitch < -30
-    } else {
-        // 5 bands: 0=high2(>60), 1=high1(30-60), 2=level(-30-+30), 3=low1(-60..-30), 4=low2(<-60)
-        if (pitch_deg >= MAG_CAL_ELEV_H2)        elevBand = 0;
-        else if (pitch_deg >= MAG_CAL_ELEV_H1)   elevBand = 1;
-        else if (pitch_deg >= MAG_CAL_ELEV_L1)   elevBand = 2;
-        else if (pitch_deg >= MAG_CAL_ELEV_L2)   elevBand = 3;
-        else                                      elevBand = 4;
-    }
-
-    int sectors = isMounted ? MAG_CAL_MOUNTED_HDG_SECTORS : MAG_CAL_BASELINE_HDG_SECTORS;
-    return elevBand * sectors + hdgSector;
-}
-
 // Running min/max per axis — tracked during baseline ROUGH_SCAN, purely to
 // render the per-axis coverage bars (magBinCalGetProgress's cov_x/y/z). Not
 // soft-iron-aware and never applied as a calibration; the real bias/soft-iron
@@ -827,6 +846,8 @@ bool magBinCalBegin(BinCalMode mode, const uint8_t* targets60,
     g_lastRollSector = -1;
     memset(g_binHasSample,  0, sizeof(g_binHasSample));
     memset(g_binLastSample, 0, sizeof(g_binLastSample));
+    g_mountedDwell.reset();
+    g_mountedHasLastMag = false;
 
     g_roughMin[0] = g_roughMin[1] = g_roughMin[2] = INT16_MAX;
     g_roughMax[0] = g_roughMax[1] = g_roughMax[2] = INT16_MIN;
@@ -903,9 +924,7 @@ bool magBinCalTick(float pitch_deg, float heading_deg, const Vec3i16& rawMagSens
             return false;
         }
 
-        BinCalSample s = { rawMagSensor.x, rawMagSensor.y, rawMagSensor.z,
-                            accelCal.x, accelCal.y, accelCal.z,
-                            gyroCal.x, gyroCal.y, gyroCal.z };
+        BinCalSample s = makeBinCalSample(rawMagSensor, accelCal, gyroCal, 0);
         g_binSamples[g_binSampleCount++] = s;
         s_lastRough    = s;
         s_hasLastRough = true;
@@ -1000,9 +1019,7 @@ bool magBinCalTick(float pitch_deg, float heading_deg, const Vec3i16& rawMagSens
 
         if (g_binSampleCount >= BIN_CAL_MAX_SAMPLES) return false;
 
-        BinCalSample s = { rawMagSensor.x, rawMagSensor.y, rawMagSensor.z,
-                            accelCal.x, accelCal.y, accelCal.z,
-                            gyroCal.x, gyroCal.y, gyroCal.z };
+        BinCalSample s = makeBinCalSample(rawMagSensor, accelCal, gyroCal, 0);
         g_binSamples[g_binSampleCount++] = s;
         g_binLastSample[gbin] = s;
         g_binHasSample[gbin]  = true;
@@ -1013,36 +1030,46 @@ bool magBinCalTick(float pitch_deg, float heading_deg, const Vec3i16& rawMagSens
         return true;
     }
 
-    // --- COLLECT: unchanged from the original AHRS-based grid ---
-    int bin = getBinIndex(pitch_deg, heading_deg, /*isMounted=*/true);
-    g_lastComputedBin = bin;  // always track current orientation, even if sample rejected
-    if (bin < 0 || bin >= g_binCalBinCount) return false;
+    // --- COLLECT (mounted): one dwell per cell ------------------------------
+    // Nothing is recorded until the unit has sat still inside a row's attitude
+    // window; see util/mounted_dwell.h for the rule and why it replaced "the
+    // first 18 samples to land in the bin". Only the heading sector still
+    // comes from the AHRS. Pitch and roll are accel-only, the same maths the
+    // server's fit applies to these samples, so the two cannot disagree about
+    // whether one is level.
+    const bool magIsNew = !g_mountedHasLastMag ||
+                          rawMagSensor.x != g_mountedLastMag.x ||
+                          rawMagSensor.y != g_mountedLastMag.y ||
+                          rawMagSensor.z != g_mountedLastMag.z;
+    g_mountedLastMag    = rawMagSensor;
+    g_mountedHasLastMag = true;
 
-    // Reject if bin is already green
-    if (g_binCounts[bin] >= MAG_CAL_BIN_GREEN_THRESHOLD) return false;
+    const float gyroDps = sqrtf(gyroCal.x * gyroCal.x + gyroCal.y * gyroCal.y +
+                                gyroCal.z * gyroCal.z) * 57.2957795f;
+    const mounted_dwell::Action action = g_mountedDwell.tick(
+        millis(), accelCal.x, accelCal.y, accelCal.z, gyroDps, heading_deg, magIsNew);
 
-    // Reject exact duplicate — the magnetometer ODR (~80 Hz) is slower than the AHRS
-    // loop (100 Hz), so consecutive reads often return the same raw value.
-    if (g_binHasSample[bin]) {
-        const BinCalSample& prev = g_binLastSample[bin];
-        if (prev.x == rawMagSensor.x && prev.y == rawMagSensor.y && prev.z == rawMagSensor.z) {
-            return false;
-        }
+    g_lastPitchDeg    = g_mountedDwell.pitchDeg();
+    g_lastRollDeg     = g_mountedDwell.rollDeg();
+    g_lastComputedBin = g_mountedDwell.highlightCell();
+    if (action == mounted_dwell::Action::NONE) return false;
+
+    // A dwell's samples sit past g_binSampleCount until its last one arrives,
+    // so an abandoned dwell costs nothing to discard: the next one overwrites
+    // it. 36 cells x 18 is well inside the buffer, so this cannot run off the
+    // end, but a full buffer must fail closed rather than write past it.
+    const bool commit = (action == mounted_dwell::Action::COMMIT);
+    const int  slot   = commit ? MAG_CAL_BIN_GREEN_THRESHOLD - 1 : g_mountedDwell.captured() - 1;
+    if (g_binSampleCount + MAG_CAL_BIN_GREEN_THRESHOLD > BIN_CAL_MAX_SAMPLES) return false;
+    g_binSamples[g_binSampleCount + slot] =
+        makeBinCalSample(rawMagSensor, accelCal, gyroCal, (uint8_t)g_mountedDwell.dwellNumber());
+    if (commit) {
+        g_binSampleCount += MAG_CAL_BIN_GREEN_THRESHOLD;
+        memcpy(g_binCounts, g_mountedDwell.cells(), mounted_dwell::kCells);
+        Serial.printf("[BIN_CAL] Dwell %d captured: cell %d, pitch %+.1f roll %+.1f\n",
+                      g_mountedDwell.dwellNumber(), g_lastComputedBin,
+                      (double)g_lastPitchDeg, (double)g_lastRollDeg);
     }
-
-    // Reject if sample buffer is full
-    if (g_binSampleCount >= BIN_CAL_MAX_SAMPLES) return false;
-
-    BinCalSample s = { rawMagSensor.x, rawMagSensor.y, rawMagSensor.z,
-                        accelCal.x, accelCal.y, accelCal.z,
-                        gyroCal.x, gyroCal.y, gyroCal.z };
-    g_binSamples[g_binSampleCount++] = s;
-    g_binLastSample[bin]  = s;
-    g_binHasSample[bin]   = true;
-    g_binCounts[bin]++;
-
-    // Feed accepted sample to incremental 2-D fitter (applies current cal internally)
-    magFit2DAdd(rawMagSensor);
     return true;
 }
 
@@ -1108,21 +1135,9 @@ bool magBinCalIsComplete() {
         return g_baselineUserDone;
     }
 
-    // Mounted: row-weighted grid completion, unchanged.
-    const int sectors = MAG_CAL_BASELINE_HDG_SECTORS;  // 12
-    const int rows    = MAG_CAL_MOUNTED_ELEV_BANDS;
-
-    for (int r = 0; r < rows; r++) {
-        // row 1 = level, rows 0/2 = +/-30 deg
-        int required = (r == 1) ? MAG_CAL_SECTORS_LEVEL : MAG_CAL_SECTORS_MID;
-
-        int greenInRow = 0;
-        for (int c = 0; c < sectors; c++) {
-            if (g_binCounts[r * sectors + c] >= MAG_CAL_BIN_GREEN_THRESHOLD) greenInRow++;
-        }
-        if (greenInRow < required) return false;
-    }
-    return true;
+    // Mounted: the whole level row, and enough of each tilted row spread
+    // around the circle (mounted_dwell::rowComplete).
+    return g_mountedDwell.complete();
 }
 
 // Fills the attitude-varying fields that CalProgressPacket and
@@ -1151,6 +1166,20 @@ static void fillLiveOrient(PktT& pkt) {
                         ? (int8_t)g_lastComputedBin : (int8_t)-1;
     pkt.cur_pitch_deg = g_lastPitchDeg;
     pkt.cur_hdg_deg   = g_lastHdgDeg;
+
+    if (binCalIsMounted()) {
+        pkt.cur_roll_deg  = g_lastRollDeg;
+        pkt.motion        = g_mountedDwell.motion();
+        pkt.motion_term   = (uint8_t)g_mountedDwell.motionTerm();
+        pkt.dwell_pct     = g_mountedDwell.dwellPct();
+        pkt.capture_state = (uint8_t)g_mountedDwell.state();
+    } else {
+        pkt.cur_roll_deg  = 0.0f;
+        pkt.motion        = 0;
+        pkt.motion_term   = 0;
+        pkt.dwell_pct     = 0;
+        pkt.capture_state = (uint8_t)CalDwellState::OUT_OF_WINDOW;
+    }
 
     if (g_binCalSubPhase == BinCalSubPhase::GAP_FILL && pkt.current_bin >= 0) {
         const int bin = pkt.current_bin;
@@ -1195,6 +1224,10 @@ void magBinCalGetProgress(CalProgressPacket& pkt) {
             green++;
         }
     }
+    // Mounted counts toward what the diver has to fill (24 cells), not the 36
+    // on the grid, and never reads full while a tilted row is still bunched
+    // on one side. The display's denominator is mounted_dwell::kNeedTotal.
+    if (binCalIsMounted()) green = (uint8_t)mounted_dwell::progressCount(g_binCounts);
     // Zero-fill remaining slots (for baseline → 60, mounted → 36, rest = 0)
     for (int i = g_binCalBinCount; i < 60; i++) {
         pkt.bin_counts[i] = 0;
@@ -1251,19 +1284,30 @@ void magBinCalGetProgress(CalProgressPacket& pkt) {
 void magBinCalDumpCSV(void* filePtr) {
     if (!g_binSamples || !filePtr) return;
     File& f = *reinterpret_cast<File*>(filePtr);
-    f.println("mx,my,mz,ax,ay,az,gx,gy,gz");
+    // The three trailing columns were added 2026-10-11. Both server loaders
+    // (callib/fit.py, callib/coverage.py) read the leading nine by position
+    // and ignore the rest, so the order of the first nine is fixed.
+    f.println("mx,my,mz,ax,ay,az,gx,gy,gz,mag_temp_c,tcomp,dwell");
     for (int i = 0; i < g_binSampleCount; i++) {
         const BinCalSample& s = g_binSamples[i];
-        f.printf("%d,%d,%d,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f\n",
-                 s.x, s.y, s.z, (double)s.ax, (double)s.ay, (double)s.az,
-                 (double)s.gx, (double)s.gy, (double)s.gz);
+        char temp[12];
+        if (s.temp_centi_c == BIN_CAL_NO_TEMP) snprintf(temp, sizeof(temp), "nan");
+        else snprintf(temp, sizeof(temp), "%.2f", (double)s.temp_centi_c / 100.0);
+        f.printf("%d,%d,%d,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%s,%u,%u\n",
+                 s.x, s.y, s.z,
+                 (double)(s.ax / BIN_CAL_ACCEL_LSB_PER_G), (double)(s.ay / BIN_CAL_ACCEL_LSB_PER_G),
+                 (double)(s.az / BIN_CAL_ACCEL_LSB_PER_G),
+                 (double)(s.gx / BIN_CAL_GYRO_LSB_PER_RAD_S), (double)(s.gy / BIN_CAL_GYRO_LSB_PER_RAD_S),
+                 (double)(s.gz / BIN_CAL_GYRO_LSB_PER_RAD_S),
+                 temp, (unsigned)s.tcomp, (unsigned)s.dwell);
     }
     Serial.printf("[BIN_CAL] Wrote %d samples to CSV\n", g_binSampleCount);
 }
 
 // Frees only the sample buffer. Split out of magBinCalEnd() because the cloud
-// upload sits between the CSV dump and the end of the cal, and holding 69,120
-// bytes across it starves the WiFi driver -- see the call site in nav_main.cpp.
+// upload sits between the CSV dump and the end of the cal, and holding the
+// buffer (69,120 bytes when this was found, 47,520 now) across it starves the
+// WiFi driver -- see the call site in nav_main.cpp.
 void magBinCalFreeSamples() {
     if (g_binSamples) {
         free(g_binSamples);
@@ -1300,6 +1344,8 @@ void magBinCalEnd() {
     memset(g_binRollCounts, 0, sizeof(g_binRollCounts));
     memset(g_binHasSample,  0, sizeof(g_binHasSample));
     memset(g_binLastSample, 0, sizeof(g_binLastSample));
+    g_mountedDwell.reset();
+    g_mountedHasLastMag = false;
 }
 
 // ----------- Gyroscope Calibration -----------

@@ -22,7 +22,7 @@ static uint32_t lastActivityMs = 0;          // for idle timeout
 static SendCmdFn gSendCmd = nullptr;
 
 static bool gDiveMode = false;  // Dive/surface mode, synced from NavPacket flags2 (updateNavState)
-static uint8_t gLogLevel = 0;  // Log level tracking (0=OFF, 1=LOW, 2=HIGH)
+static uint8_t gLogLevel = 0;  // Log level tracking (0=OFF, 1=LOW, 2=MID, 3=HIGH)
 static bool gSpeedCalPending        = false;
 static bool gHdgCalPending          = false;
 static bool gPowerOffPending        = false;
@@ -271,10 +271,9 @@ static void getDisplayLabel(const MenuItem& item, char* buf, size_t bufLen) {
             suffix = gWifiEnabled ? "ON" : "OFF";
             break;
         case Action::INPUT_LOG_CYCLE:
-            // Wire values, not cycle order: MID is 3 (appended, see logging.h).
             suffix = gLogLevel == 0 ? "OFF"
                    : gLogLevel == 1 ? "LOW"
-                   : gLogLevel == 3 ? "MID"
+                   : gLogLevel == 2 ? "MID"
                    : "HI";
             break;
         case Action::INPUT_WATER:

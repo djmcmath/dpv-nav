@@ -116,6 +116,10 @@ static void loadMagTempCompensation(const char* tag) {
 static constexpr int HDG_SAMPLE_MAX = 24;
 static float gHdgSamplesTarget[HDG_SAMPLE_MAX];
 static float gHdgSamplesIndicated[HDG_SAMPLE_MAX];
+// Mag die temperature at each capture (NAN if never read) and whether thermal
+// compensation was on, so a heading cal's thermal state is on record too.
+static float gHdgSamplesMagTempC[HDG_SAMPLE_MAX];
+static bool  gHdgSamplesTcomp[HDG_SAMPLE_MAX];
 static int   gHdgSampleCount = 0;
 static float gCurrentHeadingRawDeg = 0.0f;  // updated each loop; read by CAPTURE handler
 
@@ -196,6 +200,27 @@ struct CloudCalOutcome {
 // live CAL-menu completion sites below and by retryCalibrationUpload()
 // (tern.local's calibration-recovery action), so both trigger the exact same
 // staging/notify behavior.
+// Copy a message into a display-bound buffer. One that will not fit is cut at
+// the end of its last whole sentence, or failing that its last whole word,
+// instead of mid-word: the server writes a fit rejection so that its first
+// sentence is the instruction and fits (callib/fit.py, DEVICE_ERROR_CHARS).
+static void copyForDisplay(char* dst, size_t dstLen, const char* src) {
+    if (dstLen == 0) return;
+    const size_t room = dstLen - 1;
+    size_t n = strlen(src);
+    if (n > room) {
+        size_t sentenceEnd = 0, wordEnd = 0;
+        for (size_t i = 0; i < room; i++) {
+            const bool atBreak = (src[i + 1] == ' ');
+            if (atBreak) wordEnd = i + 1;
+            if (atBreak && (src[i] == '.' || src[i] == '!' || src[i] == '?')) sentenceEnd = i + 1;
+        }
+        n = sentenceEnd ? sentenceEnd : wordEnd ? wordEnd : room;
+    }
+    memcpy(dst, src, n);
+    dst[n] = '\0';
+}
+
 static CloudCalOutcome runCalUploadAndNotify(CalType calType, const char* mode,
                                               const char* csvPath, const char* pendingPath,
                                               const char* activePath, bool installable) {
@@ -245,8 +270,9 @@ static CloudCalOutcome runCalUploadAndNotify(CalType calType, const char* mode,
             outcome.calibrationId  = cr.calibrationId;
             outcome.coverageGaps   = cr.coverageGaps;
         } else {
-            rpkt.stage = (uint8_t)CalCloudStage::FAILED;
-            strncpy(rpkt.error, cr.errorMessage.c_str(), sizeof(rpkt.error) - 1);
+            rpkt.stage    = (uint8_t)CalCloudStage::FAILED;
+            rpkt.rejected = cr.fitRejected;
+            copyForDisplay(rpkt.error, sizeof(rpkt.error), cr.errorMessage.c_str());
             outcome.error = cr.errorMessage;
         }
     }
@@ -1046,7 +1072,8 @@ void loop() {
                      nav::distanceToHome_m(), nav::bearingToHome_deg(),
                      pos.x_m, pos.y_m, fix);
 
-        // Data logging at 10 Hz (same rate as NavPacket)
+        // Offered to the logger at 10 Hz (same rate as NavPacket); it keeps
+        // its own per-level rate limit and idle gate, see logging::log().
         if (logging::isLogging()) {
             logging::LogData ld{};
             ld.timestamp_ms = nowMs;
@@ -1295,7 +1322,7 @@ void loop() {
                 gLastCalOrientMs = nowMs;
                 CalOrientPacket opkt{};
                 imu::magBinCalGetOrient(opkt);
-                char orientBuf[160];
+                char orientBuf[224];
                 size_t on = calOrientPacketToBytes(opkt, orientBuf, sizeof(orientBuf));
                 if (on > 0) Serial1.write(orientBuf, on);
             }
@@ -1321,7 +1348,8 @@ void loop() {
                         f.close();
                         Serial.printf("[BIN_CAL] CSV saved to %s\n", gBinCalCsvPath);
 
-                        // Hand back the 69,120-byte sample buffer BEFORE the upload.
+                        // Hand back the sample buffer (69,120 bytes when this was
+                        // written; 47,520 since the samples went to int16) BEFORE the upload.
                         // The samples are on LittleFS now and nothing below reads them
                         // again; magBinCalEnd() at the bottom of this block used to be
                         // the only free, which meant every cloud upload ran with that
@@ -2469,6 +2497,12 @@ static void handleDisplayCmd() {
                         if (gHdgSampleCount < HDG_SAMPLE_MAX) {
                             gHdgSamplesTarget[gHdgSampleCount]    = target;
                             gHdgSamplesIndicated[gHdgSampleCount] = gCurrentHeadingRawDeg;
+                            float magTempC = NAN;
+                            imu::readMagTemp_c(magTempC);   // leaves NAN if never read
+                            const bool haveTemp = !isnan(magTempC);
+                            gHdgSamplesMagTempC[gHdgSampleCount] = magTempC;
+                            gHdgSamplesTcomp[gHdgSampleCount] =
+                                haveTemp && imu::magTempCompensationActive();
                             Serial.printf("[HDG_CAL] Point %d: target=%.0f indicated=%.1f\n",
                                           gHdgSampleCount + 1, target, gCurrentHeadingRawDeg);
                             gHdgSampleCount++;
@@ -2481,11 +2515,17 @@ static void handleDisplayCmd() {
                         File f = LittleFS.open(hdg_cal::SAMPLES_FILE_PATH, FILE_WRITE);
                         bool saved = false;
                         if (f) {
-                            f.println("actual,indicated");
+                            // callib/hdg.py finds "actual" and "indicated" by
+                            // name, so the trailing columns are invisible to it.
+                            f.println("actual,indicated,mag_temp_c,tcomp");
                             for (int i = 0; i < gHdgSampleCount; i++) {
-                                f.printf("%.1f,%.1f\n",
+                                char temp[12];
+                                if (isnan(gHdgSamplesMagTempC[i])) snprintf(temp, sizeof(temp), "nan");
+                                else snprintf(temp, sizeof(temp), "%.2f", (double)gHdgSamplesMagTempC[i]);
+                                f.printf("%.1f,%.1f,%s,%d\n",
                                          gHdgSamplesTarget[i],
-                                         gHdgSamplesIndicated[i]);
+                                         gHdgSamplesIndicated[i],
+                                         temp, gHdgSamplesTcomp[i] ? 1 : 0);
                             }
                             f.close();
                             saved = true;

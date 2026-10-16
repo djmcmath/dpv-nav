@@ -240,7 +240,13 @@ static CloudCalOutcome runCalUploadAndNotify(CalType calType, const char* mode,
             rpkt.quality       = (cr.qualityBand == "good") ? (uint8_t)CalCloudQuality::GOOD
                                : (cr.qualityBand == "warn") ? (uint8_t)CalCloudQuality::WARN
                                                              : (uint8_t)CalCloudQuality::BAD;
-            rpkt.rms_pct       = cr.rmsPct;
+            // One headline number per cal. For hdg that is the leave-one-out
+            // worst case the band is graded on; rms_pct holds the RMS for hdg
+            // (callib/hdg.py summary()), which this used to forward and the
+            // display labelled "max err" -- beside a recommendation text
+            // quoting the real max. -1 (older backend) renders as "--".
+            const float headline = (calType == CalType::HDG) ? cr.maxErrDeg : cr.rmsPct;
+            rpkt.rms_pct       = headline;
             rpkt.coverage_gaps = (int16_t)cr.coverageGaps;
             strncpy(rpkt.recommendation, cr.recommendation.c_str(), sizeof(rpkt.recommendation) - 1);
             strncpy(rpkt.calibration_id, cr.calibrationId.c_str(), sizeof(rpkt.calibration_id) - 1);
@@ -265,7 +271,7 @@ static CloudCalOutcome runCalUploadAndNotify(CalType calType, const char* mode,
 
             outcome.ok             = true;
             outcome.qualityBand    = cr.qualityBand;
-            outcome.rmsPct         = cr.rmsPct;
+            outcome.rmsPct         = headline;
             outcome.recommendation = cr.recommendation;
             outcome.calibrationId  = cr.calibrationId;
             outcome.coverageGaps   = cr.coverageGaps;

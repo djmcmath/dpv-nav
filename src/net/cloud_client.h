@@ -94,7 +94,10 @@ struct CalibrationResult {
                                 // the same samples cannot help
     String calibrationId;
     String qualityBand;         // "good" | "warn" | "bad"
-    float  rmsPct = 0.0f;
+    float  rmsPct = 0.0f;       // hdg: the RMS in degrees -- NOT what the band grades
+    float  maxErrDeg = -1.0f;   // hdg only: leave-one-out worst case in degrees, the number
+                                // quality_band is graded on. -1 = not sent (baseline/
+                                // mounted, or a backend older than `max_err_deg`).
     String recommendation;      // shown to the diver as-is, e.g. "Bad cal; 47% RMS. ..."
     int    coverageGaps = -1;   // baseline only; empty coverage-grid cells. -1 = not
                                 // applicable (mounted fit, or a baseline CSV collected

@@ -143,6 +143,14 @@ static char g_cloudLinkWaitingLastCode[16] = "";
 // redraw on the next prompt call.
 static bool g_hdgCalPromptStaticDrawn = false;
 
+// Heading cal result screen: headline is drawn once, and only the two
+// buttons repaint when the ACCEPT/REJECT choice changes. Big filled buttons
+// repainted at 4 Hz would flicker. Reset by clear() and reinit().
+static bool    g_hdgResultDrawn     = false;
+static int8_t  g_hdgResultLastChoice = -1;
+static uint8_t g_hdgResultLastQuality = 0;
+static float   g_hdgResultLastErr     = 0.0f;
+
 // ---------------------------------------------------------------------------
 // Nav mode layout constants
 // ---------------------------------------------------------------------------
@@ -251,6 +259,7 @@ void clear() {
     g_cloudLinkWaitingStaticDrawn = false;
     g_cloudLinkWaitingLastCode[0] = '\0';
     g_hdgCalPromptStaticDrawn = false;
+    g_hdgResultDrawn = false;
     tft.fillScreen(COLOR_BLACK);
     delay(50);
     bootLineY = 0;
@@ -268,6 +277,7 @@ void reinit() {
     g_cloudLinkWaitingStaticDrawn = false;
     g_cloudLinkWaitingLastCode[0] = '\0';
     g_hdgCalPromptStaticDrawn = false;
+    g_hdgResultDrawn = false;
     Serial.println("[DISP] reinit complete");
 }
 
@@ -1848,9 +1858,83 @@ void showLogUpload(uint8_t done, uint8_t total, uint32_t secondsWaiting) {
     tft.print(buf);
 }
 
+// Heading cal result: one number, one grade, two buttons that fill the lower
+// half. maxErrDeg is the server's leave-one-out worst case -- the error to
+// expect at a heading the fit didn't see, which is what the band grades; < 0 means the server didn't send it, shown as "--" rather than falling
+// back to the RMS. The recommendation text is deliberately not shown: it
+// quotes the same number again, which is how this screen came to show two
+// different "max errors".
+static void drawHdgResultButton(int16_t x, const char* label, const char* hint, bool selected) {
+    static constexpr int16_t BTN_Y = 124, BTN_W = 154, BTN_H = 112;
+    const uint16_t fill = selected ? COLOR_YELLOW : COLOR_DIM_GRAY;
+    const uint16_t ink  = selected ? COLOR_BLACK  : COLOR_GRAY;
+    tft.fillRoundRect(x, BTN_Y, BTN_W, BTN_H, 8, fill);
+    if (!selected) tft.drawRoundRect(x, BTN_Y, BTN_W, BTN_H, 8, COLOR_GRAY);
+
+    tft.setTextColor(ink, fill);
+    tft.setTextSize(3);
+    const int16_t labelW = (int16_t)strlen(label) * 18;
+    tft.setCursor(x + (BTN_W - labelW) / 2, BTN_Y + 34);
+    tft.print(label);
+
+    tft.setTextSize(1);
+    const int16_t hintW = (int16_t)strlen(hint) * 6;
+    tft.setCursor(x + (BTN_W - hintW) / 2, BTN_Y + 80);
+    tft.print(hint);
+}
+
+static void showHdgCalResult(uint8_t quality, float maxErrDeg, uint8_t choice) {
+    // A tern.local retry-upload can deliver a new result while this is up.
+    if (!g_hdgResultDrawn || quality != g_hdgResultLastQuality ||
+        maxErrDeg != g_hdgResultLastErr) {
+        g_hdgResultLastQuality = quality;
+        g_hdgResultLastErr     = maxErrDeg;
+        invalidateNavCache();
+        tft.fillScreen(COLOR_BLACK);
+
+        uint16_t bandColor = COLOR_GREEN;
+        const char* bandLabel = "GOOD";
+        if (quality == 1)      { bandColor = COLOR_YELLOW; bandLabel = "OK"; }
+        else if (quality == 2) { bandColor = COLOR_RED;    bandLabel = "POOR"; }
+
+        char num[12];
+        if (maxErrDeg < 0.0f) snprintf(num, sizeof(num), "--" "\xF7");
+        else                  snprintf(num, sizeof(num), "%.1f" "\xF7", (double)maxErrDeg);
+
+        tft.setTextColor(bandColor, COLOR_BLACK);
+        tft.setTextSize(6);                       // 36 x 48 px per char
+        tft.setCursor(8, 24);
+        tft.print(num);
+
+        tft.setTextSize(4);                       // 24 x 32 px per char
+        tft.setCursor(SCREEN_WIDTH - 8 - (int16_t)strlen(bandLabel) * 24, 32);
+        tft.print(bandLabel);
+
+        tft.setTextSize(2);
+        tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+        tft.setCursor(8, 4);
+        tft.print("HEADING CAL");
+        tft.setCursor(8, 82);
+        tft.print("likely worst error");
+
+        g_hdgResultDrawn      = true;
+        g_hdgResultLastChoice = -1;               // force the buttons below
+    }
+
+    if ((int8_t)choice != g_hdgResultLastChoice) {
+        g_hdgResultLastChoice = (int8_t)choice;
+        drawHdgResultButton(4,   "ACCEPT", choice == 0 ? "BTN2 to confirm" : "BTN1 to select", choice == 0);
+        drawHdgResultButton(162, "REJECT", choice == 1 ? "BTN2 to confirm" : "BTN1 to select", choice == 1);
+    }
+}
+
 void showCloudCalResult(uint8_t quality, float rmsPct, const char* recommendation,
                          int16_t coverageGaps, uint8_t choice, uint8_t calType) {
     if (!tftReady) return;
+    if (calType == (uint8_t)CalType::HDG) {
+        showHdgCalResult(quality, rmsPct, choice);
+        return;
+    }
     invalidateNavCache();
     tft.fillScreen(COLOR_BLACK);
 
@@ -1864,16 +1948,9 @@ void showCloudCalResult(uint8_t quality, float rmsPct, const char* recommendatio
     if (quality == 1)      { bandColor = COLOR_YELLOW; bandLabel = "MARGINAL"; }
     else if (quality == 2) { bandColor = COLOR_RED;    bandLabel = "BAD"; }
 
-    // hdg reuses this same numeric field for degrees of max Fourier-fit
-    // residual, not percent of radius (heading-cal-cloud-plan.md) -- only the
-    // label changes here, not the wire format.
-    const bool isHdg = (calType == (uint8_t)CalType::HDG);
+    // Baseline/mounted only -- hdg returned to showHdgCalResult() above.
     char buf[28];
-    if (isHdg) {
-        snprintf(buf, sizeof(buf), "%s  %.1f" "\xF7" " max err", bandLabel, (double)rmsPct);
-    } else {
-        snprintf(buf, sizeof(buf), "%s  %.0f%% RMS", bandLabel, (double)rmsPct);
-    }
+    snprintf(buf, sizeof(buf), "%s  %.0f%% RMS", bandLabel, (double)rmsPct);
     tft.setTextColor(bandColor, COLOR_BLACK);
     tft.setCursor(4, 30);
     tft.print(buf);

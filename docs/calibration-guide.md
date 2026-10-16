@@ -400,9 +400,12 @@ command, press Enter):
    - **If the unit has WiFi connected:** the CSV uploads automatically, the server
      fits it (auto-selecting 1–4 harmonics) and checks for sector gaps (see
      [Filling Coverage Gaps](#filling-coverage-gaps) below), and the display shows
-     an accept/reject screen with the quality band and max error in **degrees**
-     (baseline/mounted show the equivalent number as a percent — same screen,
-     different unit label). Accept to install `hdg_fourier.json` immediately and
+     a result screen with one number, the **likely worst error** in degrees,
+     coloured and graded GOOD (< 5°) / OK (5–8°) / POOR (≥ 8°), above two big
+     ACCEPT / REJECT buttons. The number is a leave-one-out estimate: each
+     point's error against a curve fitted without it, so it is what to expect
+     at a heading the cal didn't see, not just how well the curve threads its
+     own 12 points. Accept to install `hdg_fourier.json` immediately and
      hot-reload; reject to discard and keep whatever heading correction was active
      before.
    - **If the unit has no WiFi:** the display shows an offline notice. `/hdg_samples.csv`

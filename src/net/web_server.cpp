@@ -334,11 +334,15 @@ async function uploadOne(name, kind) {
     const j = await r.json();
     if (!status) return;
     if (!j.ok) { status.textContent = 'Failed: ' + (j.error || 'unknown error'); return; }
-    const unit = name === '/hdg_samples.csv' ? '°' : '%';
+    const isHdg = name === '/hdg_samples.csv';
     const next = j.installable
       ? 'check the unit’s display to accept/reject.'
       : 'uploaded — merge it into a calibration on the Dive Map website.';
-    status.textContent = `Fit ${j.quality_band} (${j.rms_pct.toFixed(1)}${unit} err) — ${next}`;
+    // hdg's number is the max residual (-1 when the server is too old to send it).
+    const num = isHdg
+      ? (j.rms_pct < 0 ? 'max err --' : `${j.rms_pct.toFixed(1)}° max err`)
+      : `${j.rms_pct.toFixed(1)}% RMS`;
+    status.textContent = `Fit ${j.quality_band} (${num}) — ${next}`;
   } catch (e) {
     if (status) status.textContent = 'Failed: network error';
   }

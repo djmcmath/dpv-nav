@@ -671,6 +671,7 @@ CalibrationResult runCalibrationUpload(const char* mode, const char* csvPath, co
         result.calibrationId = String((const char*)doc["calibration_id"]);
         result.qualityBand   = String((const char*)doc["quality_band"]);
         result.rmsPct        = doc["rms_pct"] | 0.0f;
+        result.maxErrDeg     = doc["max_err_deg"] | -1.0f;  // null/absent -> -1
         result.recommendation = String((const char*)doc["recommendation"]);
         result.coverageGaps  = doc["coverage_gaps"] | -1;
         calJson.set(doc["cal_json"]);

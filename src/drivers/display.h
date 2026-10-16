@@ -182,10 +182,13 @@ void showCloudCalFailed(const char* message, bool rejected = false);
 
 // Fit succeeded — accept/reject the result.
 //   quality:      0=good, 1=warn, 2=bad (CalCloudQuality)
-//   rmsPct:       baseline/mounted: % of fitted radius. hdg: degrees of max
-//                 Fourier-fit residual, reusing the same wire field rather than
-//                 growing a parallel one -- see heading-cal-cloud-plan.md. The
-//                 unit shown is chosen from calType, not from the value itself.
+//   rmsPct:       baseline/mounted: % of fitted radius. hdg: leave-one-out
+//                 worst-case error in degrees (the number the band grades; -1 = the
+//                 server did not send it, shown as "--"), reusing the same wire
+//                 field rather than growing a parallel one.
+//                 hdg gets its own layout: one big number + GOOD/OK/POOR, and
+//                 ACCEPT/REJECT as two half-screen buttons; no recommendation
+//                 text (it quoted the number a second time).
 //   coverageGaps: baseline only, empty coverage-grid cells; -1 = not applicable
 //                 (mounted/hdg fit, or a pre-9-axis-firmware baseline CSV) and
 //                 shows nothing extra. See baseline-cal-coverage-feedback-plan.md.

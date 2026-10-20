@@ -77,6 +77,16 @@ struct NavPacket {
 
     float   depth_m;       // depth below surface, meters (0 if sensor absent, see FLAG2_DEPTH_PRESENT)
     float   water_temp_c;  // water temperature, degrees C (0 if sensor absent)
+
+    // 12-point heading cal level gate (util/level_gate.h). Sent only while a
+    // heading cal is collecting; level_state == INACTIVE (0) otherwise. The
+    // pitch/roll here are the gate's own (accel-only, 250 ms mean), not
+    // pitch_deg/roll_deg above (Mahony), so the horizon the diver levels
+    // against is exactly what the gate judges.
+    uint8_t level_state;      // LevelGateState
+    uint8_t level_hold_pct;   // 0-100 through HDG_CAL_LEVEL_SETTLE_MS
+    float   level_pitch_deg;
+    float   level_roll_deg;
 };
 
 // NavPacket.boot_flags bit definitions
@@ -260,6 +270,15 @@ enum class CalDwellState : uint8_t {
 // bar that will not empty on a scooter sitting on a stool is a sensor
 // calibration fault, and which sensor is the whole diagnosis: the unit is
 // sealed, so there is no serial port to ask.
+// 12-point heading cal level gate (util/level_gate.h), NavPacket::level_state.
+enum class LevelGateState : uint8_t {
+    INACTIVE  = 0,  // no heading cal running; the level_* fields are not sent
+    NOT_LEVEL = 1,  // pitch or roll outside HDG_CAL_LEVEL_TOL_DEG
+    MOVING    = 2,  // level, but not still
+    SETTLING  = 3,  // level and still, waiting out HDG_CAL_LEVEL_SETTLE_MS
+    READY     = 4,  // BTN2 will mark
+};
+
 enum class CalMotionTerm : uint8_t {
     GYRO         = 0,  // turning: gyro magnitude
     ACCEL_MAG    = 1,  // pushed: accel magnitude away from 1 g

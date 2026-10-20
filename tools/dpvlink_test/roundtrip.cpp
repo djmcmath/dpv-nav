@@ -541,6 +541,31 @@ int main() {
               "an ordinary failure does not read as a rejection");
     }
 
+    // --- Heading cal level gate fields --------------------------------------
+    // On the wire only while a heading cal runs; absent decodes as INACTIVE,
+    // so a display that missed the end of a cal cannot keep gating BTN2.
+    {
+        NavPacket tx{};
+        tx.level_state     = (uint8_t)LevelGateState::SETTLING;
+        tx.level_hold_pct  = 42;
+        tx.level_pitch_deg = -1.25f;
+        tx.level_roll_deg  = 2.5f;
+        size_t n = navPacketToBytes(tx, buf, sizeof(buf));
+        NavPacket rx{};
+        check(n > 0 && bytesToNavPacket(buf, n, rx), "level-gate packet round-trips");
+        check(rx.level_state == (uint8_t)LevelGateState::SETTLING, "level_state survived");
+        check(rx.level_hold_pct == 42, "level_hold_pct survived");
+        check(rx.level_pitch_deg == -1.25f && rx.level_roll_deg == 2.5f, "level pitch/roll survived");
+
+        NavPacket idle{};
+        n = navPacketToBytes(idle, buf, sizeof(buf));
+        check(strstr(buf, "\"lg\"") == nullptr, "no level fields outside a heading cal");
+        NavPacket stale{};
+        stale.level_state = (uint8_t)LevelGateState::READY;   // poison
+        bytesToNavPacket(buf, n, stale);
+        check(stale.level_state == (uint8_t)LevelGateState::INACTIVE, "absent level_state decodes INACTIVE");
+    }
+
     if (failures == 0) printf("  all dpvlink round-trip checks passed\n");
     return failures ? 1 : 0;
 }

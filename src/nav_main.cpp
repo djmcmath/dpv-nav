@@ -36,6 +36,7 @@
 #include "util/boot_log.h"
 #include "util/speed_cal.h"
 #include "util/hdg_cal.h"
+#include "util/level_gate.h"
 #include "util/waypoints.h"
 #include "util/motor_cal.h"
 #include "util/mag_temp.h"
@@ -120,7 +121,19 @@ static float gHdgSamplesIndicated[HDG_SAMPLE_MAX];
 // compensation was on, so a heading cal's thermal state is on record too.
 static float gHdgSamplesMagTempC[HDG_SAMPLE_MAX];
 static bool  gHdgSamplesTcomp[HDG_SAMPLE_MAX];
+// Attitude at each capture, from the level gate: accel-only pitch/roll, the
+// stillness motion figure (CAL_MOTION_AT_LIMIT = on the limit) and the gate
+// state. Recorded whether or not HDG_CAL_LEVEL_GATE enforced it, so a run can
+// show whether attitude moved the heading error.
+static float   gHdgSamplesPitch[HDG_SAMPLE_MAX];
+static float   gHdgSamplesRoll[HDG_SAMPLE_MAX];
+static uint8_t gHdgSamplesMotion[HDG_SAMPLE_MAX];
+static uint8_t gHdgSamplesLevel[HDG_SAMPLE_MAX];
 static int   gHdgSampleCount = 0;
+// True from START_HDG_FOURIER_CAL to FINALIZE_HDG_CAL: the level gate runs and
+// its state goes out in every NavPacket.
+static bool  gHdgCalActive = false;
+static level_gate::Gate gLevelGate;
 static float gCurrentHeadingRawDeg = 0.0f;  // updated each loop; read by CAPTURE handler
 
 // ---- Nav state -------------------------------------------------------------
@@ -792,6 +805,10 @@ void loop() {
     imu::readAccel_g_raw_cal(accelRaw, accel);
     imu::readGyro_rad_s_raw_cal(gyroRaw, gyro);
     imu::readMag_raw_cal(magRaw, mag);  // magRaw = uncalibrated µT, mag = calibrated µT
+    if (gHdgCalActive) {
+        const float gyroDps = sqrtf(gyro.x * gyro.x + gyro.y * gyro.y + gyro.z * gyro.z) * 57.2957795f;
+        gLevelGate.tick(millis(), accel.x, accel.y, accel.z, gyroDps);
+    }
     // Logical-frame raw counts (axis map applied) for bin cal CSV export.
     // The calibration JSON must be in the same frame that readMag() reads in,
     // which is post-axis-map (logical frame).  readMagRaw_SensorFrame() is WRONG
@@ -1914,6 +1931,12 @@ static void sendNavPacket(float heading, float headingRaw, float pitch, float ro
     NavPacket pkt{};
     pkt.heading_deg      = heading;
     pkt.heading_raw_deg  = headingRaw;
+    if (gHdgCalActive) {
+        pkt.level_state     = (uint8_t)gLevelGate.state();
+        pkt.level_hold_pct  = gLevelGate.holdPct();
+        pkt.level_pitch_deg = gLevelGate.pitchDeg();
+        pkt.level_roll_deg  = gLevelGate.rollDeg();
+    }
     pkt.pitch_deg        = pitch;
     pkt.roll_deg         = roll;
     pkt.speed_ms         = speed;
@@ -2496,6 +2519,8 @@ static void handleDisplayCmd() {
                         break;
                     case DisplayCmd::START_HDG_FOURIER_CAL:
                         gHdgSampleCount = 0;
+                        gLevelGate.reset();
+                        gHdgCalActive = true;
                         Serial.println("[HDG_CAL] Collection started — buffer reset");
                         break;
                     case DisplayCmd::CAPTURE_HDG_POINT: {
@@ -2509,8 +2534,15 @@ static void handleDisplayCmd() {
                             gHdgSamplesMagTempC[gHdgSampleCount] = magTempC;
                             gHdgSamplesTcomp[gHdgSampleCount] =
                                 haveTemp && imu::magTempCompensationActive();
-                            Serial.printf("[HDG_CAL] Point %d: target=%.0f indicated=%.1f\n",
-                                          gHdgSampleCount + 1, target, gCurrentHeadingRawDeg);
+                            gHdgSamplesPitch[gHdgSampleCount]  = gLevelGate.pitchDeg();
+                            gHdgSamplesRoll[gHdgSampleCount]   = gLevelGate.rollDeg();
+                            gHdgSamplesMotion[gHdgSampleCount] = gLevelGate.motion();
+                            gHdgSamplesLevel[gHdgSampleCount]  = (uint8_t)gLevelGate.state();
+                            Serial.printf("[HDG_CAL] Point %d: target=%.0f indicated=%.1f "
+                                          "pitch=%.1f roll=%.1f level_state=%u\n",
+                                          gHdgSampleCount + 1, target, gCurrentHeadingRawDeg,
+                                          (double)gLevelGate.pitchDeg(), (double)gLevelGate.rollDeg(),
+                                          (unsigned)gLevelGate.state());
                             gHdgSampleCount++;
                         } else {
                             Serial.println("[HDG_CAL] WARNING: sample buffer full, point discarded");
@@ -2518,20 +2550,29 @@ static void handleDisplayCmd() {
                         break;
                     }
                     case DisplayCmd::FINALIZE_HDG_CAL: {
+                        gHdgCalActive = false;
                         File f = LittleFS.open(hdg_cal::SAMPLES_FILE_PATH, FILE_WRITE);
                         bool saved = false;
                         if (f) {
                             // callib/hdg.py finds "actual" and "indicated" by
                             // name, so the trailing columns are invisible to it.
-                            f.println("actual,indicated,mag_temp_c,tcomp");
+                            // pitch/roll: the level gate's accel-only attitude at
+                            // the mark. motion: CAL_MOTION_AT_LIMIT (50) = on the
+                            // stillness limit. level_state: LevelGateState, 4 =
+                            // READY; anything else was marked with the gate off
+                            // (HDG_CAL_LEVEL_GATE = false).
+                            f.println("actual,indicated,mag_temp_c,tcomp,pitch,roll,motion,level_state");
                             for (int i = 0; i < gHdgSampleCount; i++) {
                                 char temp[12];
                                 if (isnan(gHdgSamplesMagTempC[i])) snprintf(temp, sizeof(temp), "nan");
                                 else snprintf(temp, sizeof(temp), "%.2f", (double)gHdgSamplesMagTempC[i]);
-                                f.printf("%.1f,%.1f,%s,%d\n",
+                                f.printf("%.1f,%.1f,%s,%d,%.2f,%.2f,%u,%u\n",
                                          gHdgSamplesTarget[i],
                                          gHdgSamplesIndicated[i],
-                                         temp, gHdgSamplesTcomp[i] ? 1 : 0);
+                                         temp, gHdgSamplesTcomp[i] ? 1 : 0,
+                                         (double)gHdgSamplesPitch[i], (double)gHdgSamplesRoll[i],
+                                         (unsigned)gHdgSamplesMotion[i],
+                                         (unsigned)gHdgSamplesLevel[i]);
                             }
                             f.close();
                             saved = true;

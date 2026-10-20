@@ -6,6 +6,7 @@
 #include <dpvlink.h>
 
 #include "../config.h"
+#include "stillness.h"
 
 // Dwell capture for mounted magnetometer calibration.
 //
@@ -152,17 +153,17 @@ public:
                 float headingDeg, bool magIsNew);
 
     CalDwellState state() const { return state_; }
-    float   pitchDeg() const { return pitchDeg_; }
-    float   rollDeg()  const { return rollDeg_; }
+    float   pitchDeg() const { return win_.pitchDeg(); }
+    float   rollDeg()  const { return win_.rollDeg(); }
     // Cell to highlight: nearestRow() x the heading sector. Always valid.
     int     highlightCell() const { return highlightCell_; }
     // Samples taken so far in the dwell in progress; 0 when there is none.
     int     captured() const { return captured_; }
     // 1-based number of the dwell in progress or, on COMMIT, just finished.
     int     dwellNumber() const { return dwellsDone_ + (captured_ > 0 ? 1 : 0); }
-    uint8_t motion() const { return motionHeld_; }
+    uint8_t motion() const { return win_.motion(); }
     // Which stillness test motion() is reporting.
-    CalMotionTerm motionTerm() const { return motionTerm_; }
+    CalMotionTerm motionTerm() const { return win_.motionTerm(); }
     uint8_t dwellPct() const { return dwellPct_; }
 
     const uint8_t* cells() const { return cells_; }
@@ -171,9 +172,7 @@ public:
 private:
     void abortDwell();
 
-    float   ring_[MAG_CAL_DWELL_WINDOW_TICKS][3];
-    int     ringHead_;
-    int     ringFill_;
+    stillness::Window win_;   // attitude + stillness, shared with level_gate
 
     uint8_t cells_[kCells];
     int     dwellsDone_;
@@ -183,11 +182,7 @@ private:
     int      captured_;
 
     CalDwellState state_;
-    float    pitchDeg_, rollDeg_;
     int      highlightCell_;
-    uint8_t  motionHeld_;
-    CalMotionTerm motionTerm_;
-    uint32_t motionHeldMs_;
     uint8_t  dwellPct_;
 };
 

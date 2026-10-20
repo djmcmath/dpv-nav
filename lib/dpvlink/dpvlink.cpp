@@ -88,6 +88,13 @@ size_t navPacketToBytes(const NavPacket& pkt, char* buf, size_t bufLen) {
         doc["dp"] = pkt.depth_m;
         doc["wt"] = pkt.water_temp_c;
     }
+    // Heading cal level gate -- only while a heading cal is collecting
+    if (pkt.level_state != (uint8_t)LevelGateState::INACTIVE) {
+        doc["lg"]  = pkt.level_state;
+        doc["lh"]  = pkt.level_hold_pct;
+        doc["lgp"] = pkt.level_pitch_deg;
+        doc["lgr"] = pkt.level_roll_deg;
+    }
 
     size_t n = serializeJson(doc, buf, bufLen - 1);
     if (n == 0 || n >= bufLen - 1) return 0;
@@ -135,6 +142,10 @@ bool bytesToNavPacket(const char* buf, size_t len, NavPacket& out) {
     out.log_sync_total       = doc["lt"]  | (uint8_t)0;
     out.depth_m              = doc["dp"]  | 0.0f;
     out.water_temp_c         = doc["wt"]  | 0.0f;
+    out.level_state          = doc["lg"]  | (uint8_t)0;
+    out.level_hold_pct       = doc["lh"]  | (uint8_t)0;
+    out.level_pitch_deg      = doc["lgp"] | 0.0f;
+    out.level_roll_deg       = doc["lgr"] | 0.0f;
     return true;
 }
 

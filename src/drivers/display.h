@@ -154,8 +154,13 @@ void showSpeedCalResult(uint16_t dist_ft, uint16_t elapsed_s,
 //   avgErrDeg    — running average of (indicated - target) over points captured
 //                  so far this session; ignored unless errCount > 0
 //   errCount     — number of points captured so far this session (0 = none yet)
+//   levelState   — LevelGateState from NavPacket; INACTIVE = nav sent no gate
+//                  data (older nav build) and the panel shows nothing
+//   holdPct      — 0-100 through HDG_CAL_LEVEL_SETTLE_MS
+//   pitchDeg/rollDeg — the gate's accel-only attitude (drives the horizon)
 void showHdgFourierCalPrompt(int step, int total, float targetDeg, float indicatedDeg,
-                              float avgErrDeg, int errCount);
+                              float avgErrDeg, int errCount, uint8_t levelState,
+                              uint8_t holdPct, float pitchDeg, float rollDeg);
 
 // Brief acknowledgment shown immediately on BTN2, before the step advances --
 // held on screen for a fixed beat by the caller. errDeg is this point's own

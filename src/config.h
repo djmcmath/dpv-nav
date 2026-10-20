@@ -205,6 +205,33 @@ constexpr int MAG_CAL_DWELL_TILT_MAX_GAP_SECTORS = 3;
 constexpr uint32_t MAG_CAL_DWELL_MOTION_HOLD_MS = 300;
 
 // ---------------------------------------------------------------------------
+// 12-point heading cal: level gate (util/level_gate.h)
+//
+// The Fourier correction is a function of heading only, so it can't tell an
+// attitude change from a heading error: a point marked tilted is fitted as
+// heading error. BTN2 marks a point only once the unit is level within
+// HDG_CAL_LEVEL_TOL_DEG on both axes (accel-only pitch/roll) and has been
+// still (the MAG_CAL_DWELL_* terms above) for HDG_CAL_LEVEL_SETTLE_MS.
+// ---------------------------------------------------------------------------
+
+// Pitch and roll window, each axis. First guess (2026-10-20): by a rough
+// estimate 5 deg of tilt costs ~1.5 deg of heading on an imperfect mount cal,
+// so 3 keeps it near 1. Widen it if a scooter on an ordinary floor can't make
+// it.
+constexpr float HDG_CAL_LEVEL_TOL_DEG = 3.0f;
+
+// Level and still for this long before BTN2 will mark. Longer than mounted's
+// 400 ms on purpose: after a 30 deg turn the AHRS heading is still converging
+// on the magnetometer for a second or two (Mahony kp = 1), and the mark
+// records that heading.
+constexpr uint32_t HDG_CAL_LEVEL_SETTLE_MS = 1500;
+
+// false = the gate still shows NOT LEVEL / HOLD STILL, and the CSV still
+// records pitch/roll per point, but BTN2 marks regardless. For a deliberate
+// off-level test run: does attitude move the heading error?
+constexpr bool HDG_CAL_LEVEL_GATE = true;
+
+// ---------------------------------------------------------------------------
 // Baseline cal (2026-07-25) — no live grid; see
 // divemap/docs/architecture/baseline-cal-coverage-feedback-plan.md and the
 // SPIKE comment block in imu.cpp for the three earlier on-device attempts

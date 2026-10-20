@@ -391,8 +391,22 @@ command, press Enter):
 
 1. Open menu (BTN1) → **CAL > Hdg cal**. The menu closes and the heading cal screen appears.
 2. The screen shows **Step 1/12: Target 000°** and the live AHRS heading in large text.
-3. Align the DPV to 0° (North). Watch the heading readout stabilise.
-4. Press **BTN2** to capture that heading. The screen advances to **Step 2/12: Target 030°**.
+   Below them: a horizon, a status line, a hold bar and the unit's pitch/roll.
+3. Align the DPV to 0° (North), **level** (the way it rides) and still. The status
+   line reads **NOT LEVEL** (red) until pitch and roll are both within
+   `HDG_CAL_LEVEL_TOL_DEG` (3°) — the horizon's brackets turn green inside it —
+   then **HOLD STILL** (yellow) while the hold bar fills (`HDG_CAL_LEVEL_SETTLE_MS`,
+   1.5 s, which also lets the heading settle after the turn), then
+   **BTN2: MARK** (green). Tilting or moving restarts the hold.
+4. Press **BTN2** to capture that heading. It does nothing until the status reads
+   BTN2: MARK. The screen advances to **Step 2/12: Target 030°**.
+
+   *Why level matters:* the correction is a function of heading only, so it can't
+   tell an attitude change from a heading error. A point marked tilted is fitted
+   as heading error at that heading. Each point records the attitude it was marked
+   at (see the CSV format below), and a test build with `HDG_CAL_LEVEL_GATE = false`
+   (config.h) marks regardless, showing **GATE OFF** in the header, for deliberately
+   off-level runs.
 5. Repeat for all 12 steps (every 30°: 0°, 30°, 60°, … 330°). Each BTN2 press captures the current indicated heading and records `(target, indicated)` on the nav device.
 6. After Step 12, the nav device saves `/hdg_samples.csv` and immediately hands off to
    the same cloud upload/accept-reject flow Baseline and Mounted use (there is no
@@ -430,17 +444,21 @@ the residual printout and hand-add points there before fitting.
 
 ### CSV format
 
-`/hdg_samples.csv` has two columns:
+`/hdg_samples.csv` (the server reads `actual` and `indicated` by name and ignores the rest):
 
 ```csv
-actual,indicated
-0.0,4.7
-30.0,24.3
-60.0,52.1
+actual,indicated,mag_temp_c,tcomp,pitch,roll,motion,level_state
+0.0,4.7,21.40,1,0.41,-1.20,12,4
+30.0,24.3,21.42,1,-0.33,0.85,9,4
 ...
 ```
 
-`actual` is the target heading the user aligned to; `indicated` is what the AHRS reported.
+`actual` is the target heading the user aligned to; `indicated` is what the AHRS
+reported (pre-Fourier, pre-motor magnetic heading). `mag_temp_c`/`tcomp`: die
+temperature and whether thermal compensation was on. `pitch`/`roll`: the level
+gate's accel-only attitude at the mark, degrees. `motion`: the stillness figure,
+50 = on the limit. `level_state`: 4 = READY; anything else means the point was
+marked with the gate off.
 
 ### How it works at runtime
 

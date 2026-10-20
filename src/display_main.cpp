@@ -72,6 +72,7 @@ static constexpr uint32_t UPDATE_HINT_SHOW_MS = 4000;
 
 // ---- Timing ----------------------------------------------------------------
 static constexpr uint32_t DISPLAY_INTERVAL_MS = 250;  // 4 Hz refresh
+static constexpr uint32_t HDG_CAL_RENDER_INTERVAL_MS = 100;  // 10 Hz, see loop()
 static constexpr uint32_t NAV_TIMEOUT_MS      = 5000; // show "NO LINK" after 5 s
 // While a dive-log upload pass is running (FLAG2_UPLOADING), nav is blocked
 // inside HTTPS calls and sends nothing. > one CLOUD_HTTP_TIMEOUT_MS (config.h)
@@ -711,8 +712,13 @@ void loop() {
             wasLinkDead = false;
             display::clear();
         }
-        // Live data — render at 4 Hz
-        if (now - lastDisplayMs >= DISPLAY_INTERVAL_MS) {
+        // Live data — render at 4 Hz, or at the 10 Hz NavPacket rate while a
+        // heading cal collects: the diver levels against that screen's
+        // horizon, and it redraws only what changed.
+        const uint32_t renderIntervalMs =
+            (gHdgFourierCalPhase == HdgFourierCalPhase::COLLECTING) ? HDG_CAL_RENDER_INTERVAL_MS
+                                                                    : DISPLAY_INTERVAL_MS;
+        if (now - lastDisplayMs >= renderIntervalMs) {
             lastDisplayMs = now;
 
             // Baseline: BTN2 was pressed, waiting for nav to confirm completion.
@@ -856,7 +862,11 @@ void loop() {
                                                      kHdgCalTargets[gHdgFourierCalStep],
                                                      navValid ? lastNav.heading_raw_deg : 0.0f,
                                                      gHdgCalErrCount > 0 ? gHdgCalErrSum / gHdgCalErrCount : 0.0f,
-                                                     gHdgCalErrCount);
+                                                     gHdgCalErrCount,
+                                                     navValid ? lastNav.level_state : (uint8_t)0,
+                                                     lastNav.level_hold_pct,
+                                                     lastNav.level_pitch_deg,
+                                                     lastNav.level_roll_deg);
                 }
                 return;
             }
@@ -1394,6 +1404,16 @@ static bool handleModalButtons() {
         // same gap gBaselineFinishPending closes for baseline cal.
         if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
             btn2.fired = true;
+            // Level gate (util/level_gate.h): mark only a level, still, settled
+            // unit. The prompt already says why not (NOT LEVEL / HOLD STILL),
+            // so a refused press just does nothing. INACTIVE = a nav build too
+            // old to run the gate, which must not lock the cal up.
+            const uint8_t gate = navValid ? lastNav.level_state : (uint8_t)LevelGateState::INACTIVE;
+            if (HDG_CAL_LEVEL_GATE && gate != (uint8_t)LevelGateState::READY &&
+                gate != (uint8_t)LevelGateState::INACTIVE) {
+                Serial.printf("[HDG_CAL] BTN2 refused: level gate state %u\n", (unsigned)gate);
+                return true;
+            }
             float target    = kHdgCalTargets[gHdgFourierCalStep];
             float indicated = navValid ? lastNav.heading_raw_deg : 0.0f;
             size_t n = displayCaptureHdgPointToBytes(target, txBuf, sizeof(txBuf));

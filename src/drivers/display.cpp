@@ -5,6 +5,7 @@
 #include "../version.h"
 #include <dpvlink.h>
 #include "../util/mounted_dwell.h"
+#include "../util/level_gate.h"
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
 #include <SPI.h>
@@ -1541,8 +1542,12 @@ void showSpeedCalResult(uint16_t dist_ft, uint16_t elapsed_s,
 //   y= 80  separator                   cyan
 //   y= 88  "HDG"  "XXX°" indicated     gray size 3 / white size 6 (live)
 //   y=140  separator                   cyan
-//   y=150  "Mark with BTN2"            gray,   size 2  (static)
-//   y=176  "Avg err ±X°" / "Avg err --" yellow, size 2  (live, on capture)
+//   y=142  horizon, 96x96, left        level gate's attitude, 6x exaggerated (live)
+//   y=146  gate status, right          size 3: NOT LEVEL red / HOLD STILL yellow /
+//                                      BTN2: MARK green (live)
+//   y=176  hold bar, right             fills through HDG_CAL_LEVEL_SETTLE_MS (live)
+//   y=196  "P+1.2 R-0.4"               gray, size 2 (live)
+//   y=218  "Avg err ±X°" / "Avg err --" yellow, size 2 (live, on capture)
 //
 // Each row's label sits LEFT of its number, not above it, so the label can be
 // large and nothing the live number redraws can reach it.
@@ -1557,6 +1562,23 @@ static int s_hdgCalLastStep     = -1;
 static int s_hdgCalLastIndInt   = INT32_MIN;
 static bool s_hdgCalLastAvgValid = false;
 static int s_hdgCalLastAvgInt   = INT32_MIN;
+
+// Level gate panel. The horizon is drawn by drawHorizon() further down (the
+// mounted cal's renderer), into its 96 px canvas.
+static void drawHorizon(int16_t x0, int16_t y0, float pitchErrDeg, float rollDeg,
+                        float tolDeg, float gain, bool inWindow);
+static constexpr int   HDGCAL_AI_X    = 4;
+static constexpr int   HDGCAL_AI_Y    = 142;
+// px per degree. +-3 deg must read from the far end of the scooter: at the
+// mounted screen's 2x it would be a 12 px band.
+static constexpr float HDGCAL_AI_GAIN = 6.0f;
+static constexpr int   HDGCAL_PANEL_X = 108;
+static constexpr int   HDGCAL_BAR_W   = 204;
+static constexpr int   HDGCAL_BAR_H   = 12;
+static int     s_hdgCalLastHorizSig = INT32_MIN;
+static uint8_t s_hdgCalLastGate     = 0xFF;
+static int     s_hdgCalLastHoldPx   = -1;
+static int     s_hdgCalLastAttSig   = INT32_MIN;
 
 static constexpr int HDGCAL_ROW_TGT_Y = 28;
 static constexpr int HDGCAL_ROW_HDG_Y = 88;
@@ -1583,7 +1605,8 @@ static void drawHdgCalBigNumber(int y, float deg) {
 }
 
 void showHdgFourierCalPrompt(int step, int total, float targetDeg, float indicatedDeg,
-                              float avgErrDeg, int errCount) {
+                              float avgErrDeg, int errCount, uint8_t levelState,
+                              uint8_t holdPct, float pitchDeg, float rollDeg) {
     if (!tftReady) return;
 
     bool stepChanged = (step != s_hdgCalLastStep);
@@ -1610,14 +1633,74 @@ void showHdgFourierCalPrompt(int step, int total, float targetDeg, float indicat
 
         tft.drawFastHLine(0, 140, SCREEN_WIDTH, COLOR_CYAN);
 
-        tft.setTextSize(2);
-        tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
-        tft.setCursor(4, 150);
-        tft.print("Mark with BTN2");
+        if (!HDG_CAL_LEVEL_GATE) {
+            // Test build: the gate is shown but not enforced. Say so, so a
+            // run marked off-level is never mistaken for a normal one.
+            tft.setTextSize(1);
+            tft.setTextColor(COLOR_RED, COLOR_BLACK);
+            tft.setCursor(262, 6);
+            tft.print("GATE OFF");
+        }
+        tft.drawRect(HDGCAL_PANEL_X, 176, HDGCAL_BAR_W, HDGCAL_BAR_H, COLOR_GRAY);
 
         g_hdgCalPromptStaticDrawn = true;
         s_hdgCalLastIndInt    = INT32_MIN;  // force the live rows below to redraw
         s_hdgCalLastAvgValid  = false;
+        s_hdgCalLastHorizSig  = INT32_MIN;
+        s_hdgCalLastGate      = 0xFF;
+        s_hdgCalLastHoldPx    = -1;
+        s_hdgCalLastAttSig    = INT32_MIN;
+    }
+
+    // --- Level gate ---------------------------------------------------------
+    // INACTIVE means a nav build too old to run the gate: nothing to show, and
+    // the display does not gate BTN2 either (display_main.cpp).
+    const bool gateLive = levelState != (uint8_t)LevelGateState::INACTIVE;
+    if (gateLive) {
+        const int horizSig = ((int)lroundf(pitchDeg * 4.0f) & 0x3FF) |
+                             (((int)lroundf(rollDeg * 4.0f) & 0x3FF) << 10);
+        if (horizSig != s_hdgCalLastHorizSig) {
+            s_hdgCalLastHorizSig = horizSig;
+            drawHorizon(HDGCAL_AI_X, HDGCAL_AI_Y, pitchDeg, rollDeg, HDG_CAL_LEVEL_TOL_DEG,
+                        HDGCAL_AI_GAIN, level_gate::isLevel(pitchDeg, rollDeg));
+        }
+        const int attSig = ((int)lroundf(pitchDeg * 10.0f) & 0xFFFF) |
+                           (((int)lroundf(rollDeg * 10.0f) & 0xFFFF) << 16);
+        if (attSig != s_hdgCalLastAttSig) {
+            s_hdgCalLastAttSig = attSig;
+            char abuf[24];
+            snprintf(abuf, sizeof(abuf), "P%+.1f R%+.1f  ", (double)pitchDeg, (double)rollDeg);
+            tft.setTextSize(2);
+            tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+            tft.setCursor(HDGCAL_PANEL_X, 196);
+            tft.print(abuf);
+        }
+    }
+
+    if (levelState != s_hdgCalLastGate) {
+        s_hdgCalLastGate = levelState;
+        const char* msg = "BTN2: MARK";
+        uint16_t color = COLOR_GREEN;
+        switch ((LevelGateState)levelState) {
+            case LevelGateState::NOT_LEVEL: msg = "NOT LEVEL";  color = COLOR_RED;    break;
+            case LevelGateState::MOVING:
+            case LevelGateState::SETTLING:  msg = "HOLD STILL"; color = COLOR_YELLOW; break;
+            case LevelGateState::READY:     break;
+            default:                        color = COLOR_GRAY;  break;   // no gate data
+        }
+        tft.fillRect(HDGCAL_PANEL_X, 146, SCREEN_WIDTH - HDGCAL_PANEL_X, 24, COLOR_BLACK);
+        tft.setTextSize(3);
+        tft.setTextColor(color, COLOR_BLACK);
+        tft.setCursor(HDGCAL_PANEL_X, 146);
+        tft.print(msg);
+    }
+
+    const int holdPx = gateLive ? (int)holdPct * (HDGCAL_BAR_W - 2) / 100 : 0;
+    if (holdPx != s_hdgCalLastHoldPx) {
+        s_hdgCalLastHoldPx = holdPx;
+        tft.fillRect(HDGCAL_PANEL_X + 1, 177, holdPx, HDGCAL_BAR_H - 2, COLOR_GREEN);
+        tft.fillRect(HDGCAL_PANEL_X + 1 + holdPx, 177, HDGCAL_BAR_W - 2 - holdPx,
+                     HDGCAL_BAR_H - 2, COLOR_BLACK);
     }
 
     // Live HDG number -- redrawn only when the displayed (rounded) value
@@ -1634,10 +1717,10 @@ void showHdgFourierCalPrompt(int step, int total, float targetDeg, float indicat
     if (avgValid != s_hdgCalLastAvgValid || (avgValid && avgInt != s_hdgCalLastAvgInt)) {
         s_hdgCalLastAvgValid = avgValid;
         s_hdgCalLastAvgInt   = avgInt;
-        tft.fillRect(0, 176, SCREEN_WIDTH, 16, COLOR_BLACK);
+        tft.fillRect(HDGCAL_PANEL_X, 218, SCREEN_WIDTH - HDGCAL_PANEL_X, 16, COLOR_BLACK);
         tft.setTextSize(2);
         tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
-        tft.setCursor(4, 176);
+        tft.setCursor(HDGCAL_PANEL_X, 218);
         char ebuf[24];
         if (avgValid) {
             snprintf(ebuf, sizeof(ebuf), "Avg err %+d" "\xF7", avgInt);
@@ -2604,6 +2687,8 @@ static constexpr uint16_t MC_COLOR_SKY    = 0x2AD4;
 static constexpr uint16_t MC_COLOR_GROUND = 0x7A83;
 
 static GFXcanvas16* g_mcHorizon = nullptr;
+static_assert(HDGCAL_AI_X + MC_AI_S < HDGCAL_PANEL_X, "heading cal horizon overlaps its panel");
+static_assert(HDGCAL_AI_Y + MC_AI_S <= SCREEN_HEIGHT, "heading cal horizon runs off the screen");
 
 // Horizon tilts with roll and slides with pitch, as an aircraft's does: nose
 // up shows more sky, right side down drops the horizon's right end (the sign
@@ -2618,14 +2703,18 @@ static GFXcanvas16* g_mcHorizon = nullptr;
 static constexpr float MC_AI_GAIN   = 2.0f;   // px per degree of pitch; also multiplies roll
 static constexpr int   MC_AI_LINE_W = 5;      // horizon thickness, px
 
-static void drawMountedHorizon(float pitchDeg, float rollDeg, int row, bool inWindow) {
+// Shared by the mounted cal and the 12-point heading cal's level gate:
+// pitchErrDeg is pitch minus the target pitch, gain is px per degree (and the
+// roll multiplier), and the brackets mark +-tolDeg, green when inWindow.
+static void drawHorizon(int16_t x0, int16_t y0, float pitchErrDeg, float rollDeg,
+                        float tolDeg, float gain, bool inWindow) {
     if (!g_mcHorizon) g_mcHorizon = new GFXcanvas16(MC_AI_S, MC_AI_S);
     if (!g_mcHorizon || !g_mcHorizon->getBuffer()) return;  // no heap: skip, never crash
     GFXcanvas16& c = *g_mcHorizon;
     const int mid = MC_AI_S / 2;
 
-    const float offset = (pitchDeg - mounted_dwell::rowTargetPitchDeg(row)) * MC_AI_GAIN;
-    float drawnRoll = rollDeg * MC_AI_GAIN;
+    const float offset = pitchErrDeg * gain;
+    float drawnRoll = rollDeg * gain;
     if (drawnRoll >  60.0f) drawnRoll =  60.0f;   // tan() runs away; past here the
     if (drawnRoll < -60.0f) drawnRoll = -60.0f;   // message is "nowhere near" anyway
     const float slope = tanf(drawnRoll * 0.0174532925f);
@@ -2644,9 +2733,7 @@ static void drawMountedHorizon(float pitchDeg, float rollDeg, int row, bool inWi
     }
 
     const uint16_t mark = inWindow ? COLOR_GREEN : COLOR_YELLOW;
-    const float tolDeg = (row == mounted_dwell::kRowLevel) ? MAG_CAL_DWELL_LEVEL_TOL_DEG
-                                                           : MAG_CAL_DWELL_TILT_PITCH_TOL_DEG;
-    const int tol = (int)(tolDeg * MC_AI_GAIN);
+    const int tol = (int)(tolDeg * gain);
     for (int side = 0; side < 2; side++) {
         const int xOuter = side ? MC_AI_S - 4 : 3;
         const int xInner = side ? MC_AI_S - 16 : 15;
@@ -2663,7 +2750,14 @@ static void drawMountedHorizon(float pitchDeg, float rollDeg, int row, bool inWi
     c.fillCircle(mid, mid, 2, COLOR_BLACK);
     c.drawRect(0, 0, MC_AI_S, MC_AI_S, COLOR_GRAY);
 
-    tft.drawRGBBitmap(MC_AI_X, MC_AI_Y, c.getBuffer(), MC_AI_S, MC_AI_S);
+    tft.drawRGBBitmap(x0, y0, c.getBuffer(), MC_AI_S, MC_AI_S);
+}
+
+static void drawMountedHorizon(float pitchDeg, float rollDeg, int row, bool inWindow) {
+    const float tolDeg = (row == mounted_dwell::kRowLevel) ? MAG_CAL_DWELL_LEVEL_TOL_DEG
+                                                           : MAG_CAL_DWELL_TILT_PITCH_TOL_DEG;
+    drawHorizon(MC_AI_X, MC_AI_Y, pitchDeg - mounted_dwell::rowTargetPitchDeg(row), rollDeg,
+                tolDeg, MC_AI_GAIN, inWindow);
 }
 
 // One line saying what to do next. At text size 2 the panel holds 17 chars.

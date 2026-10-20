@@ -111,6 +111,20 @@ Silent loss. The diver gets no error, just bad data later.
 
 Nothing is lost, but something is unverified, unvalidated, or invisible when it goes stale.
 
+- [ ] **Nav-board status LED: built 2026-10-14, bench test owed**
+
+  `util/status_led.h` (legend in `docs/user-guide.md`), host-tested, builds — never flashed.
+  Same change narrowed the log's `'G'` tag to gate-accepted fixes and latched the GPS enable
+  pin (GPIO32) and the NeoPixel rail (GPIO2) low through deep sleep. Owed on hardware:
+  - the red → amber → green-blink → solid-green sequence outside, and in the decoded log no
+    `'G'` row before the gate's first acceptance;
+  - fault (GPS unplugged) and halt (display link unplugged at boot) patterns;
+  - **OFF current before and after**, GPS attached. The GPS latch assumes the breakout pulls
+    EN up when the pad floats; ~20 mA less in OFF confirms it, no change means it was harmless.
+    Check nothing is on STEMMA QT first — GPIO2 powers that port too;
+  - a wake from OFF still boots normally (GPIO0 is left high-Z, never held, for that reason);
+  - brightness through the real housing in daylight (`status_led::LEVEL`, `HEARTBEAT`).
+
 - [ ] **OTA bootloader rollback has never been tested**
 
   The full display + nav OTA path is built and bench-verified to 0.7.4, and a network drop

@@ -69,6 +69,12 @@ void log(const LogData& d);
 // (e.g., waypoint position corrections) that must not be silently dropped.
 void logImmediate(const LogData& d);
 
+// True if the open file holds a 'G' row whose sample was taken at or after
+// sinceMs (millis()). Means written and flushed: the first 'G' row after a gap
+// is flushed at once. False while no file is open. The nav board's status LED
+// goes solid green on this (util/status_led.h).
+bool gpsRowWrittenSince(uint32_t sinceMs);
+
 // Full path of the file currently open for writing, or "" when none is.
 // net/log_sync.cpp uses this to leave the in-progress log alone: uploading a
 // partial file would land one upload now and a second, byte-different one

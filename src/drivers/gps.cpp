@@ -3,6 +3,7 @@
 #include "../config.h"
 #include <Adafruit_GPS.h>
 #include <Arduino.h>
+#include <driver/rtc_io.h>
 
 static Adafruit_GPS adaGps(&Serial2);
 static bool initialized = false;
@@ -18,6 +19,11 @@ static bool rawNmeaDebug = false;
 static uint32_t lastFixMs   = 0;  // millis() when a position sentence last parsed with a fix
 static uint16_t newFixCount = 0;  // such sentences seen since the last enable (saturates)
 
+// Is the module talking at all? Any sentence that parses counts, fix or not --
+// status_led.h reads these to tell "no satellites" from "no GPS".
+static uint32_t enabledSinceMs = 0;  // millis() when the module was last powered up
+static uint32_t lastSentenceMs = 0;  // last parsed sentence since then, 0 = none yet
+
 // GPGSV sentence cache — one group of sentences per 1 Hz update cycle.
 // A group starts when sentence 1-of-N arrives; earlier cached lines are discarded.
 static constexpr int MAX_GSV_LINES = 4;  // covers up to 16 sats (4 per sentence)
@@ -27,9 +33,16 @@ static int  gsvLineCount = 0;
 namespace gps {
 
 bool init() {
+  // Release the deep-sleep latch sleepForPowerOff() left on the enable pin --
+  // until then it ignores digitalWrite and the module stays off.
+  rtc_gpio_hold_dis(static_cast<gpio_num_t>(GPS_ENABLE_PIN));
+  rtc_gpio_deinit(static_cast<gpio_num_t>(GPS_ENABLE_PIN));
+
   // Drive enable pin HIGH before opening serial so the module powers up cleanly.
   pinMode(GPS_ENABLE_PIN, OUTPUT);
   digitalWrite(GPS_ENABLE_PIN, HIGH);
+  enabledSinceMs = millis();
+  lastSentenceMs = 0;
 
   Serial2.begin(9600, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
 
@@ -66,6 +79,7 @@ bool init() {
       adaGps.read();
       if (adaGps.newNMEAreceived() && adaGps.parse(adaGps.lastNMEA())) {
         sawValidSentence = true;
+        lastSentenceMs   = millis();
       }
     }
     if (sawValidSentence) break;
@@ -95,6 +109,8 @@ void setEnabled(bool enable) {
     adaGps.fixquality_3d = 1;  // 1 = no fix
     adaGps.satellites    = 0;
     adaGps.HDOP          = 0.0f;
+    enabledSinceMs       = millis();
+    lastSentenceMs       = 0;
   }
   enabled = enable;
   digitalWrite(GPS_ENABLE_PIN, enable ? HIGH : LOW);
@@ -140,6 +156,7 @@ bool update() {
                                (strstr(sentence, "GGA") != nullptr);
       if (adaGps.parse(sentence)) {
         parsed = true;
+        lastSentenceMs = millis();
         if (posSentence && adaGps.fix) {
           lastFixMs = millis();
           if (newFixCount < GPS_REACQUIRE_MIN_FIXES) newFixCount++;
@@ -190,6 +207,20 @@ GpsFix getFix() {
   fix.antenna_status = adaGps.antenna;
 
   return fix;
+}
+
+uint32_t getEnabledSinceMs() { return enabledSinceMs; }
+uint32_t getLastSentenceMs() { return lastSentenceMs; }
+
+void sleepForPowerOff() {
+  // setEnabled(false) drove the pin low, but an ordinary pad goes high-Z in
+  // deep sleep, and the module is then at the mercy of whatever its EN input
+  // floats or is pulled to. Latch it low with the RTC pad, the same single-pin
+  // pattern as display::sleepForPowerOff(). init() releases it on the way up.
+  rtc_gpio_init(static_cast<gpio_num_t>(GPS_ENABLE_PIN));
+  rtc_gpio_set_direction(static_cast<gpio_num_t>(GPS_ENABLE_PIN), RTC_GPIO_MODE_OUTPUT_ONLY);
+  rtc_gpio_set_level(static_cast<gpio_num_t>(GPS_ENABLE_PIN), 0);
+  rtc_gpio_hold_en(static_cast<gpio_num_t>(GPS_ENABLE_PIN));
 }
 
 bool hasFix() {

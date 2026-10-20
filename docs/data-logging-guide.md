@@ -114,7 +114,7 @@ in [config.h](../src/config.h) is 14.7° E (southern Oregon). So:
 
 | Value | Meaning |
 |---|---|
-| `G` | GPS fix |
+| `G` | GPS fix **that the confidence gate accepted** — nav's position is that fix (plus DR for rows between 1 Hz fixes, up to `GPS_FIX_STALE_MS`). Before 2026-10-14 any fresh fix was tagged `G`, including ones the gate rejected, so older logs can hold `G` rows whose lat/lon is really nav's estimate (often the NVS-restored position just after boot or surfacing). Since the same date the CSV's `gps_satellites`/`gps_hdop` are filled on any row with a fix, `E` included, so a rejected fix's HDOP is still recorded. |
 | `E` | dead-reckoning estimate |
 | `W` | waypoint snap — the diver snapped position to a known waypoint in real time |
 | `M` | diver mark. Written out of cadence by `logImmediate()`, with heading and speed left at zero. An annotation on the track, not a step of it. |

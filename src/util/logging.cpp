@@ -27,6 +27,10 @@ static uint32_t gLevelSetMs  = 0;    // millis() of the last cycleLevel()
 static File     gLogFile;
 static char     gLogPath[LOG_PATH_MAX] = "";
 
+// timestamp_ms of the last 'G' row written to the open file, 0 = none yet.
+// Backs gpsRowWrittenSince() -- the nav board's solid-green status LED.
+static uint32_t gLastGpsRowMs = 0;
+
 static constexpr size_t FREE_SPACE_THRESHOLD = 32768;  // 32 KB minimum free
 static constexpr const char* LOG_DIR = "/logs";
 
@@ -287,6 +291,7 @@ static bool openNextFile() {
     // A new file always starts at full rate; idle has to be earned again.
     gIdleGate.reset();
     gPacer.reset();
+    gLastGpsRowMs = 0;  // and has no GPS fix in it until one is written
     return true;
 }
 
@@ -451,7 +456,21 @@ static uint32_t localSeconds(const struct tm& t) {
 
 // Write one row in the open file's format. Shared by log() and logImmediate()
 // so the two can't drift apart on schema.
+static void writeRowUnflushed(const LogData& d);
+
+// The first 'G' row after a gap -- the first fix in a file, or the first after
+// surfacing -- is flushed at once rather than on the 30 s timer, so the status
+// LED's "fix logged" means on flash, not in a buffer a brownout would lose.
+// One flush per acquisition; rows inside a run of fixes take the timer.
 static void writeRow(const LogData& d) {
+    writeRowUnflushed(d);
+    if (d.pos_src != 'G') return;
+    const bool afterGap = gLastGpsRowMs == 0 || d.timestamp_ms - gLastGpsRowMs > GPS_FIX_STALE_MS;
+    gLastGpsRowMs = d.timestamp_ms;
+    if (afterGap) gLogFile.flush();
+}
+
+static void writeRowUnflushed(const LogData& d) {
     struct tm tm_info{};
     bool haveClock = localNow(tm_info);
 
@@ -476,7 +495,10 @@ static void writeRow(const LogData& d) {
                     d.lon,
                     d.pos_src);
 
-    if (d.pos_src == 'G') {
+    // Whenever there is a fix, not only on 'G' rows: a fix the confidence gate
+    // rejected is an 'E' row, and its HDOP is the record of why. The binary
+    // record always carries these; dive-map reads neither.
+    if (d.gps_satellites > 0) {
         gLogFile.printf(",%u,%.1f", d.gps_satellites, d.gps_hdop);
     } else {
         gLogFile.print(",,");
@@ -519,6 +541,10 @@ void log(const LogData& d) {
         lastFlushMs = now;
         gLogFile.flush();
     }
+}
+
+bool gpsRowWrittenSince(uint32_t sinceMs) {
+    return gLogFile && gLastGpsRowMs != 0 && (int32_t)(gLastGpsRowMs - sinceMs) >= 0;
 }
 
 void logImmediate(const LogData& d) {

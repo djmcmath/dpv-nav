@@ -41,6 +41,7 @@
 #include "util/motor_cal.h"
 #include "util/mag_temp.h"
 #include "util/ota_confirm.h"
+#include "util/status_led.h"
 #include "version.h"
 #include <dpvlink.h>
 
@@ -433,6 +434,10 @@ static char gDisplayFwVersion[16] = "";
 static bool gGpsEnabled  = DEFAULT_USE_GPS_POSITION;  // GPS usage (position + speed)
 static bool gWifiEnabled = true;   // WiFi radio enabled (surface mode default)
 static bool gDiveMode      = false;  // Dive mode active (persisted to NVS)
+// When the GPS last (re)started from nav's point of view: boot, surfacing, or
+// CONFIG > GPS back on. The status LED only goes solid green for a fix logged
+// after this, so after a dive it reports the surfacing fix, not the pre-dive one.
+static uint32_t gGpsSessionStartMs = 0;
 static bool gSaltWater     = DEFAULT_SALT_WATER;  // water density for depth calc (persisted to NVS)
 
 // ---- Depth sensor state -----------------------------------------------------
@@ -528,6 +533,9 @@ void setup() {
     // reset) and latches the previous session's active log path before
     // logging::init()'s cleanup pass runs against it.
     boot_log::recordBoot();
+
+    // Before the self-test, so a halted boot can still show itself.
+    status_led::init();
 
     // Serial link to display device
     Serial1.begin(LINK_BAUD, SERIAL_8N1, LINK_RX_PIN, LINK_TX_PIN);
@@ -755,6 +763,7 @@ void setup() {
                       nvsState.log_level, nvsState.pos_x, nvsState.pos_y, gSaltWater);
     }
 
+    gGpsSessionStartMs = millis();
     lastLoopUs = micros();
     Serial.println("Nav device ready");
     serial_cmd::printHelp();
@@ -770,6 +779,7 @@ void loop() {
     // middle of it), and heading isn't computed -- the display is showing its
     // update screen, and the install refuses to start in dive mode anyway.
     if (ota::ownsDisplayLink()) {
+        status_led::show(status_led::OFF);  // don't freeze mid-blink for the transfer
         ota::update();
         return;
     }
@@ -787,6 +797,10 @@ void loop() {
             sendNavPacket(0, 0, 0, 0, 0, false, 0, 0, 0, 0, GpsFix{});
         }
         handleDisplayCmd();
+        status_led::Inputs led{};
+        led.nowMs  = millis();
+        led.halted = true;
+        status_led::update(led);
         // An ERROR-state unit may be exactly the one that needs new firmware.
         ota::update();
         delay(1);
@@ -1062,6 +1076,13 @@ void loop() {
         speed = flow::getSpeed_ms();
     }
 
+    // Is nav's position currently GPS? True for GPS_FIX_STALE_MS after the gate
+    // above accepted a fix (rows between 1 Hz fixes are that fix plus DR, as
+    // they always were). The log's 'G' tag and the status LED's green both use
+    // exactly this, so neither can call a fix good that the other wouldn't.
+    const bool gpsPosAccepted = nav::isUsingGps() && gLastGpsPosMs != 0 &&
+                                (millis() - gLastGpsPosMs) < GPS_FIX_STALE_MS;
+
     // --- Dead-reckoning position update ------------------------------------
     // Suppress DR integration when flow speed is below threshold (treats sensor
     // noise and near-stationary drift as zero rather than accumulating error).
@@ -1107,7 +1128,11 @@ void loop() {
             ld.pos_y_m      = pos.y_m;
             ld.lat           = pos.lat;
             ld.lon           = pos.lon;
-            ld.pos_src       = (nav::isUsingGps() && gpsFresh) ? 'G' : 'E';
+            // 'G' only for a position the confidence gate accepted. It used to
+            // be any fresh fix, so a rejected one -- the poor first fix on
+            // surfacing the gate exists to refuse -- logged nav's DR estimate
+            // tagged as GPS, and the track processor anchors on every 'G' row.
+            ld.pos_src       = gpsPosAccepted ? 'G' : 'E';
             ld.gps_satellites = fix.has_fix ? fix.satellites : 0;
             ld.gps_hdop       = fix.has_fix ? fix.hdop       : 0.0f;
             ld.depth_m        = depth::isPresent() ? depth::getDepth_m() : 0.0f;
@@ -1126,6 +1151,25 @@ void loop() {
             imu::readMagTemp_c(ld.mag_temp_c);
             logging::log(ld);
         }
+    }
+
+    // --- Status LED -----------------------------------------------------------
+    {
+        status_led::Inputs led{};
+        led.nowMs             = nowMs;
+        led.diveMode          = gDiveMode;
+        led.gpsUsageOn        = gGpsEnabled;
+        led.healthy           = isfinite(headingDeg);
+        led.gpsInitOk         = (gBootFlags & BOOT_GPS_OK) != 0;
+        led.gpsEnabledSinceMs = gps::getEnabledSinceMs();
+        led.gpsLastSentenceMs = gps::getLastSentenceMs();
+        led.gpsFresh          = gpsFresh;
+        led.bars              = gpsBars;
+        led.minBars           = GPS_POS_MIN_ACCEPT_BARS;
+        led.requiredBars      = gpsRequiredBars;
+        led.accepted          = gpsPosAccepted;
+        led.logged            = logging::gpsRowWrittenSince(gGpsSessionStartMs);
+        status_led::update(led);
     }
 
     // --- Periodic NVS position save ------------------------------------------
@@ -2135,6 +2179,7 @@ static void setDiveMode(bool dive) {
         Serial.println("[NAV] OP_MODE -> DIVE (GPS+WiFi off)");
     } else {
         gps::setEnabled(true);
+        gGpsSessionStartMs = millis();
         wifi::init();
         web::init();
         gWifiEnabled = true;
@@ -2461,6 +2506,7 @@ static void handleDisplayCmd() {
                     case DisplayCmd::TOGGLE_GPS:
                         gGpsEnabled = !gGpsEnabled;
                         nav::setUseGps(gGpsEnabled);
+                        if (gGpsEnabled) gGpsSessionStartMs = millis();
                         Serial.print("CMD: TOGGLE_GPS -> ");
                         Serial.println(gGpsEnabled ? "ON" : "OFF");
                         nvs_nav::save(currentNavNvsState());
@@ -2788,6 +2834,8 @@ static void handleDisplayCmd() {
                         logging::shutdown();
                         // Power down GPS (fix is retained by module's backup battery).
                         gps::setEnabled(false);
+                        gps::sleepForPowerOff();  // hold the module's enable low while asleep
+                        status_led::sleepForPowerOff();
                         Serial.flush();
                         // Wake when the display device sends a byte over the serial link:
                         // the UART start bit pulls LINK_RX_PIN LOW, triggering ext0.

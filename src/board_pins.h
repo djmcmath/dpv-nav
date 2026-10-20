@@ -8,7 +8,7 @@
 // a UART on those pins on a V2 board isn't just mis-wired, it risks fighting
 // the PSRAM bus.
 #define NAV_FEATHER_V1     0
-#define DISPLAY_FEATHER_V1 0
+#define DISPLAY_FEATHER_V1 1
 #ifdef BUILD_NAV
 #define FEATHER_V1 NAV_FEATHER_V1
 #else  // BUILD_DISPLAY
@@ -33,6 +33,14 @@ constexpr int GPS_RX_PIN     = 7;
 constexpr int GPS_TX_PIN     = 8;
 #endif
 constexpr int GPS_ENABLE_PIN = 32;  // HIGH = GPS on, LOW = GPS off (fix retained by backup battery); unchanged V1/V2
+
+// --- Onboard NeoPixel (nav device only; every nav board is a Feather V2) ---
+// Data on GPIO0, power on GPIO2 (Adafruit's NEOPIXEL_I2C_POWER), which also
+// feeds the STEMMA QT port -- so the rail is only ever cut at power-off. Both
+// are strapping pins; driving them after boot is the board's intended use.
+// See util/status_led.h.
+constexpr int NAV_NEOPIXEL_PIN       = 0;
+constexpr int NAV_NEOPIXEL_POWER_PIN = 2;
 
 // --- Inter-device serial link (Serial1) ---
 // Nav device uses GPIO25/26 (A1/A0 -- unchanged between V1 and V2; GPS occupies the RX/TX header pins instead).

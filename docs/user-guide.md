@@ -19,9 +19,29 @@
     - **NVS state restored** — previous session's toggle states (GPS, WiFi, op mode, log level) and last estimated position are reloaded from ESP32 NVS flash
     - Display shows boot status screen with pass/fail for each subsystem
 
-3. **Quick heading sanity check**: Compare displayed heading against a phone compass or known bearing.
+3. **Wait for solid green on the nav-board LED** before descending (see below). That means a good GPS fix is in the log, which is what the track correction anchors on.
 
-4. **If recalibration needed**: Open menu (BTN1) → **CAL > Mounted** to re-collect magnetometer samples for the installed position, or **CAL > Hdg cal** to collect new heading correction data.
+4. **Quick heading sanity check**: Compare displayed heading against a phone compass or known bearing.
+
+5. **If recalibration needed**: Open menu (BTN1) → **CAL > Mounted** to re-collect magnetometer samples for the installed position, or **CAL > Hdg cal** to collect new heading correction data.
+
+### Nav-board status LED
+
+The NeoPixel on the nav board, visible through the clear housing. It uses the same colours as the GPS-housing indicator, but its solid green means more: **a good fix has been written to the log**, not just received.
+
+| LED | Meaning |
+|---|---|
+| Solid green | A gate-accepted GPS fix is in the current log file since the GPS last started. Ready to descend. |
+| Green blink | Nav is using the GPS position, but it isn't in a log yet — logging is OFF, or the first row hasn't been written. Turn on `Config > Log`. |
+| Amber, slow blink | A fix, but the confidence gate is still refusing it (typical for the first fixes after power-up or surfacing). Wait. |
+| Red, fast blink | A fix too poor to ever be accepted. |
+| Red, slow blink | Searching: no fix yet. |
+| Red/yellow flicker | No data from the GPS module at all — unplugged, or dead. |
+| Fast magenta | Nav failed its boot self-test and halted. Shown even if the display is dark — it may be the display link that failed. |
+| Brief faint green every 4 s | Heartbeat: dive mode (or GPS turned off) and heading is live. No flash at all means nav is blocked or its heading has gone bad. |
+| Dark | Powered off. Also briefly after surfacing: GPS stays off for the 30 s surface dwell, then the sequence starts again from red. |
+
+After a dive, solid green again means the *surfacing* fix is logged — it resets every time the GPS restarts and every time a new log file opens.
 
 ## Setting Home
 

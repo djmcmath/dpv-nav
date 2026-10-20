@@ -24,6 +24,7 @@ tools/mounted_dwell_test/dwell
 tools/logidle_test/logidle
 tools/logrecord_test/logrecord
 tools/statusled_test/statusled
+tools/level_gate_test/gate
 
 # Device-auth bearer token written by the cloud-link tooling -- never commit.
 tools/device_token.json

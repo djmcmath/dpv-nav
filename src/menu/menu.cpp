@@ -28,7 +28,7 @@ static bool gHdgCalPending          = false;
 static bool gPowerOffPending        = false;
 static bool gWaypointSelectPending  = false;
 static bool gWaypointArrivePending  = false;
-static bool gDatumWasPending        = false;
+static bool gMarkPending            = false;
 static bool gCloudLinkPending       = false;
 static bool gCurrentHoldPending     = false;
 
@@ -61,16 +61,6 @@ static uint32_t gWifiConnectingMs = 0;
 // too patient is a stale row, while being too eager flashes NO LINK for nothing.
 static constexpr uint32_t WIFI_CONNECT_WAIT_MS = 45000;
 
-// Dive mode refuses a manual WiFi-on: underwater the radio cannot reach anything,
-// and paying for the attempt means up to ~28 s of blocked nav loop (a scan plus
-// MAX_BOOT_ATTEMPTS x CONNECT_TIMEOUT_MS in wifi_manager.cpp) with heading frozen
-// and a hole in the dead reckoning. Refused locally on the display, so the command
-// never reaches nav and nothing blocks at all. The way to get WiFi back is
-// NAV > Op Mode -> surface, which turns it on as part of surfacing.
-static bool     gWifiBlocked   = false;
-static uint32_t gWifiBlockedMs = 0;
-static constexpr uint32_t WIFI_BLOCKED_SHOW_MS = 2500;
-
 static DisplaySettings gSettings = {
     .showETA     = false,
     .imperial    = false,
@@ -101,7 +91,6 @@ constexpr uint16_t CLR_YELLOW = 0xFFE0;
 constexpr uint16_t CLR_WHITE  = 0xFFFF;
 constexpr uint16_t CLR_BLACK  = 0x0000;
 constexpr uint16_t CLR_GRAY   = 0x7BEF;
-constexpr uint16_t CLR_RED    = 0xF800;  // refusal messages only
 constexpr uint16_t CLR_BLUE   = 0x001F;
 
 // ---------------------------------------------------------------------------
@@ -118,120 +107,88 @@ static void invalidateMenuCache() {
 // ---------------------------------------------------------------------------
 // Menu definition -- the only one. Change the menu here and reflash (or OTA).
 // ---------------------------------------------------------------------------
+static void addItem(SubMenu& sm, const char* label, Action action,
+                    int8_t submenuIdx = -1, bool surfaceOnly = false) {
+    MenuItem& it = sm.items[sm.count++];
+    strncpy(it.label, label, MENU_LABEL_LEN);
+    it.label[MENU_LABEL_LEN] = '\0';
+    it.action      = action;
+    it.submenuIdx  = submenuIdx;
+    it.surfaceOnly = surfaceOnly;
+}
+
 static void buildMenu() {
-    submenuCount = 6;
+    submenuCount = 4;
+    for (int i = 0; i < submenuCount; i++) submenus[i].count = 0;
 
     // Root menu (index 0)
     //
-    // Item order here is a safety property, not a preference. OFF used to sit
-    // at index 0, which made it both the item the menu opened on AND the item
-    // Display wrapped onto -- two separate ways to shut the unit down by
-    // pressing BTN2 one beat too early. It now sits second-to-last behind a
-    // confirm (see gPowerOffArmed), with the harmless "Close" after it so that
-    // overshooting OFF lands on a no-op instead of on the next real action.
+    // The things a diver reaches for at depth sit directly on the root, so each
+    // is one BTN2 away instead of behind a Nav submenu (Mark went from 5 presses
+    // to 4, and to 1 with the BTN2 shortcut in display_main). Land-only items
+    // are surfaceOnly: in dive mode they vanish rather than refuse, so the list
+    // a diver cycles through underwater is short and holds nothing dangerous.
+    //
+    // Item order is also a safety property. OFF used to sit at index 0, which
+    // made it both the item the menu opened on AND the item the last entry
+    // wrapped onto -- two separate ways to shut the unit down by pressing BTN2
+    // one beat too early. It now sits second-to-last behind a confirm (see
+    // gPowerOffArmed), with the harmless "Close" after it so that overshooting
+    // OFF lands on a no-op instead of on the next real action. In dive mode OFF
+    // is hidden outright: there is no reason to power off underwater.
     auto& root = submenus[0];
     strncpy(root.title, "MENU", MENU_LABEL_LEN);
-    root.count = 6;
-    strncpy(root.items[0].label, "Nav", MENU_LABEL_LEN);
-    root.items[0].action = Action::SUBMENU; root.items[0].submenuIdx = 1;
-    strncpy(root.items[1].label, "Cal", MENU_LABEL_LEN);
-    root.items[1].action = Action::SUBMENU; root.items[1].submenuIdx = 2;
-    strncpy(root.items[2].label, "Config", MENU_LABEL_LEN);
-    root.items[2].action = Action::SUBMENU; root.items[2].submenuIdx = 3;
-    strncpy(root.items[3].label, "Display", MENU_LABEL_LEN);
-    root.items[3].action = Action::SUBMENU; root.items[3].submenuIdx = 4;
-    strncpy(root.items[4].label, "OFF", MENU_LABEL_LEN);
-    root.items[4].action = Action::POWER_OFF; root.items[4].submenuIdx = -1;
-    strncpy(root.items[5].label, "Close", MENU_LABEL_LEN);
-    root.items[5].action = Action::BACK; root.items[5].submenuIdx = -1;
+    addItem(root, "Select WP", Action::NAV_SELECT_WAYPOINT);
+    addItem(root, "Arrive WP", Action::NAV_ARRIVE_WAYPOINT);
+    addItem(root, "Mark",      Action::NAV_MARK);
+    addItem(root, "Current",   Action::NAV_CURRENT);
+    addItem(root, "Log",       Action::INPUT_LOG_CYCLE);
+    addItem(root, "Display",   Action::SUBMENU, 1);
+    // Setup stays visible at depth for Op Mode alone (everything else in it is
+    // surfaceOnly): a board with no depth sensor, or one forced to DIVE on the
+    // bench, must always have a way back to SURF.
+    addItem(root, "Setup",     Action::SUBMENU, 2);
+    addItem(root, "Cal",       Action::SUBMENU, 3, /*surfaceOnly=*/true);
+    addItem(root, "OFF",       Action::POWER_OFF, -1, /*surfaceOnly=*/true);
+    addItem(root, "Close",     Action::BACK);
 
-    // NAV submenu (index 1)
-    auto& nav = submenus[1];
-    strncpy(nav.title, "Nav", MENU_LABEL_LEN);
-    nav.count = 7;  // 6 items + back
-    strncpy(nav.items[0].label, "Select WP", MENU_LABEL_LEN);
-    nav.items[0].action = Action::NAV_SELECT_WAYPOINT; nav.items[0].submenuIdx = -1;
-    strncpy(nav.items[1].label, "Arrive WP", MENU_LABEL_LEN);
-    nav.items[1].action = Action::NAV_ARRIVE_WAYPOINT; nav.items[1].submenuIdx = -1;
-    strncpy(nav.items[2].label, "Mark", MENU_LABEL_LEN);
-    nav.items[2].action = Action::NAV_MARK; nav.items[2].submenuIdx = -1;
-    strncpy(nav.items[3].label, "Current", MENU_LABEL_LEN);
-    nav.items[3].action = Action::NAV_CURRENT; nav.items[3].submenuIdx = -1;
-    strncpy(nav.items[4].label, "Op Mode", MENU_LABEL_LEN);
-    nav.items[4].action = Action::NAV_OP_MODE; nav.items[4].submenuIdx = -1;
-    strncpy(nav.items[5].label, "Datum", MENU_LABEL_LEN);
-    nav.items[5].action = Action::SUBMENU; nav.items[5].submenuIdx = 5;
-    strncpy(nav.items[6].label, "..", MENU_LABEL_LEN);
-    nav.items[6].action = Action::BACK; nav.items[6].submenuIdx = -1;
+    // DISPLAY submenu (index 1)
+    auto& dsp = submenus[1];
+    strncpy(dsp.title, "Display", MENU_LABEL_LEN);
+    addItem(dsp, "Spd/ETA", Action::DISP_SPD_ETA);
+    addItem(dsp, "Units",   Action::DISP_UNITS);
+    addItem(dsp, "Heading", Action::DISP_HDG_TYPE);
+    addItem(dsp, "..",      Action::BACK);
 
-    // DATUM submenu (index 5) -- the search datum, typically the bottom of the
-    // line. "To datum" is first because it is the one reached for in a hurry;
-    // "Set here" is last because it overwrites the way back, and must never be
-    // the item the submenu opens on. It also targets the datum, so the whole
-    // at-depth workflow is one menu trip: the diver works reciprocals in their
-    // head and reads range/bearing back to the line off the nav screen.
-    auto& dtm = submenus[5];
-    strncpy(dtm.title, "Datum", MENU_LABEL_LEN);
-    dtm.count = 4;  // 3 actions + ".."
-    strncpy(dtm.items[0].label, "To datum", MENU_LABEL_LEN);
-    dtm.items[0].action = Action::NAV_DATUM_GOTO; dtm.items[0].submenuIdx = -1;
-    strncpy(dtm.items[1].label, "Datum was", MENU_LABEL_LEN);
-    dtm.items[1].action = Action::NAV_DATUM_WAS; dtm.items[1].submenuIdx = -1;
-    strncpy(dtm.items[2].label, "Set here", MENU_LABEL_LEN);
-    dtm.items[2].action = Action::NAV_DATUM_SET; dtm.items[2].submenuIdx = -1;
-    strncpy(dtm.items[3].label, "..", MENU_LABEL_LEN);
-    dtm.items[3].action = Action::BACK; dtm.items[3].submenuIdx = -1;
+    // SETUP submenu (index 2). In dive mode only Op Mode shows. WiFi in
+    // particular must stay unreachable there: underwater the radio cannot reach
+    // anything, and a WiFi-on attempt blocks the nav loop for up to ~28 s (a
+    // scan plus MAX_BOOT_ATTEMPTS x CONNECT_TIMEOUT_MS in wifi_manager.cpp) with
+    // heading frozen and a hole in the dead reckoning. Surfacing (Op Mode, or
+    // the depth trigger) turns WiFi back on.
+    auto& set = submenus[2];
+    strncpy(set.title, "Setup", MENU_LABEL_LEN);
+    addItem(set, "GPS",       Action::INPUT_GPS,     -1, /*surfaceOnly=*/true);
+    addItem(set, "WiFi",      Action::INPUT_WIFI,    -1, /*surfaceOnly=*/true);
+    addItem(set, "Water",     Action::INPUT_WATER,   -1, /*surfaceOnly=*/true);
+    addItem(set, "Op Mode",   Action::NAV_OP_MODE);
+    addItem(set, "Link acct", Action::CLOUD_LINK,    -1, /*surfaceOnly=*/true);
+    addItem(set, "..",        Action::BACK);
 
-    // CAL submenu (index 2)
-    auto& cal = submenus[2];
+    // CAL submenu (index 3) -- land work, hidden in dive mode. Speed cal stays
+    // here (the stick-in-shallow-water rough cal) but is not reachable at depth
+    // for now; an underwater opt-in is a backlog item.
+    auto& cal = submenus[3];
     strncpy(cal.title, "Cal", MENU_LABEL_LEN);
-    cal.count = 6;  // 5 actions + ".."
-    strncpy(cal.items[0].label, "Baseline", MENU_LABEL_LEN);
-    cal.items[0].action = Action::CAL_BASELINE; cal.items[0].submenuIdx = -1;
+    addItem(cal, "Baseline",  Action::CAL_BASELINE);
     // Directly under Baseline: gap-fill is the second half of that job, and
     // the diver reaches for it right after the website tells them where the
-    // holes are. (Previously placed after Mounted despite this comment
-    // already saying otherwise -- fixed to match.)
-    strncpy(cal.items[1].label, "Fill gaps", MENU_LABEL_LEN);
-    cal.items[1].action = Action::CAL_GAPFILL; cal.items[1].submenuIdx = -1;
-    strncpy(cal.items[2].label, "Mounted", MENU_LABEL_LEN);
-    cal.items[2].action = Action::CAL_MOUNTED; cal.items[2].submenuIdx = -1;
-    strncpy(cal.items[3].label, "Hdg cal", MENU_LABEL_LEN);
-    cal.items[3].action = Action::CAL_HDG; cal.items[3].submenuIdx = -1;
-    strncpy(cal.items[4].label, "Speed cal", MENU_LABEL_LEN);
-    cal.items[4].action = Action::CAL_SPEED; cal.items[4].submenuIdx = -1;
-    strncpy(cal.items[5].label, "..", MENU_LABEL_LEN);
-    cal.items[5].action = Action::BACK; cal.items[5].submenuIdx = -1;
-
-    // CONFIG submenu (index 3)
-    auto& inp = submenus[3];
-    strncpy(inp.title, "Config", MENU_LABEL_LEN);
-    inp.count = 6;
-    strncpy(inp.items[0].label, "GPS", MENU_LABEL_LEN);
-    inp.items[0].action = Action::INPUT_GPS; inp.items[0].submenuIdx = -1;
-    strncpy(inp.items[1].label, "WiFi", MENU_LABEL_LEN);
-    inp.items[1].action = Action::INPUT_WIFI; inp.items[1].submenuIdx = -1;
-    strncpy(inp.items[2].label, "Log", MENU_LABEL_LEN);
-    inp.items[2].action = Action::INPUT_LOG_CYCLE; inp.items[2].submenuIdx = -1;
-    strncpy(inp.items[3].label, "Water", MENU_LABEL_LEN);
-    inp.items[3].action = Action::INPUT_WATER; inp.items[3].submenuIdx = -1;
-    strncpy(inp.items[4].label, "Link acct", MENU_LABEL_LEN);
-    inp.items[4].action = Action::CLOUD_LINK; inp.items[4].submenuIdx = -1;
-    strncpy(inp.items[5].label, "..", MENU_LABEL_LEN);
-    inp.items[5].action = Action::BACK; inp.items[5].submenuIdx = -1;
-
-    // DISPLAY submenu (index 4)
-    auto& dsp = submenus[4];
-    strncpy(dsp.title, "Display", MENU_LABEL_LEN);
-    dsp.count = 4;  // 3 items + ".."
-    strncpy(dsp.items[0].label, "Spd/ETA", MENU_LABEL_LEN);
-    dsp.items[0].action = Action::DISP_SPD_ETA; dsp.items[0].submenuIdx = -1;
-    strncpy(dsp.items[1].label, "Units", MENU_LABEL_LEN);
-    dsp.items[1].action = Action::DISP_UNITS; dsp.items[1].submenuIdx = -1;
-    strncpy(dsp.items[2].label, "Heading", MENU_LABEL_LEN);
-    dsp.items[2].action = Action::DISP_HDG_TYPE; dsp.items[2].submenuIdx = -1;
-    strncpy(dsp.items[3].label, "..", MENU_LABEL_LEN);
-    dsp.items[3].action = Action::BACK; dsp.items[3].submenuIdx = -1;
+    // holes are.
+    addItem(cal, "Fill gaps", Action::CAL_GAPFILL);
+    addItem(cal, "Mounted",   Action::CAL_MOUNTED);
+    addItem(cal, "Hdg cal",   Action::CAL_HDG);
+    addItem(cal, "Speed cal", Action::CAL_SPEED);
+    addItem(cal, "..",        Action::BACK);
 }
 
 // ---------------------------------------------------------------------------
@@ -256,6 +213,54 @@ static void removeStaleMenuFile() {
 // ---------------------------------------------------------------------------
 static SubMenu& currentMenu() {
     return submenus[menuStack[stackDepth - 1]];
+}
+
+// ---------------------------------------------------------------------------
+// Dive-mode visibility
+// ---------------------------------------------------------------------------
+static bool isHidden(const MenuItem& item) {
+    return item.surfaceOnly && gDiveMode;
+}
+
+// First visible item at or after `from` in sm, wrapping. Every submenu ends in
+// a never-hidden ".." / "Close", so this always finds one.
+static uint8_t visibleFrom(const SubMenu& sm, uint8_t from) {
+    for (uint8_t n = 0; n < sm.count; n++) {
+        uint8_t i = (from + n) % sm.count;
+        if (!isHidden(sm.items[i])) return i;
+    }
+    return 0;
+}
+
+// False if any submenu on the stack was entered through an item that is now
+// hidden -- e.g. the diver was in Cal when the depth trigger switched to dive.
+static bool stackVisible(const int8_t* stack, uint8_t depth) {
+    for (uint8_t lvl = 1; lvl < depth; lvl++) {
+        const SubMenu& parent = submenus[stack[lvl - 1]];
+        for (uint8_t i = 0; i < parent.count; i++) {
+            if (parent.items[i].submenuIdx == stack[lvl] && isHidden(parent.items[i])) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// Called when dive mode changes with the menu open: a hidden submenu drops the
+// diver back to the root, and a hidden item moves the selection to the next
+// visible one. Either way an armed OFF is disarmed.
+static void ensureVisible() {
+    if (!stackVisible(menuStack, stackDepth)) {
+        stackDepth   = 1;
+        menuStack[0] = 0;
+        selectedItem = 0;
+    }
+    uint8_t vis = visibleFrom(currentMenu(), selectedItem);
+    if (vis != selectedItem) {
+        selectedItem   = vis;
+        gPowerOffArmed = false;
+    }
+    invalidateMenuCache();
 }
 
 // ---------------------------------------------------------------------------
@@ -324,20 +329,8 @@ static void executeAction(Action act) {
             Serial.println("[MENU] NAV_ARRIVE_WAYPOINT: entering waypoint arrival UI");
             break;
         case Action::NAV_MARK:
-            if (gSendCmd) gSendCmd(DisplayCmd::MARK_POSITION);
-            Serial.println("[MENU] MARK_POSITION");
-            break;
-        case Action::NAV_DATUM_GOTO:
-            if (gSendCmd) gSendCmd(DisplayCmd::NAV_TO_DATUM);
-            Serial.println("[MENU] NAV_TO_DATUM");
-            break;
-        case Action::NAV_DATUM_WAS:
-            gDatumWasPending = true;
-            Serial.println("[MENU] NAV_DATUM_WAS: entering waypoint picker");
-            break;
-        case Action::NAV_DATUM_SET:
-            if (gSendCmd) gSendCmd(DisplayCmd::SET_DATUM);
-            Serial.println("[MENU] SET_DATUM");
+            gMarkPending = true;  // display_main sends it and shows the ack
+            Serial.println("[MENU] NAV_MARK");
             break;
         case Action::CAL_BASELINE:
             if (gSendCmd) gSendCmd(DisplayCmd::START_BASELINE_CAL);
@@ -382,12 +375,9 @@ static void executeAction(Action act) {
             Serial.println("[MENU] TOGGLE_GPS");
             break;
         case Action::INPUT_WIFI:
-            // Refuse a WiFi-on in dive mode (see gWifiBlocked). Turning it OFF
-            // stays allowed — that direction is instant and always safe.
+            // Hidden in dive mode (see the SETUP submenu in buildMenu); this is
+            // the backstop should a packet flip the mode between render and press.
             if (!gWifiEnabled && gDiveMode) {
-                gWifiBlocked   = true;
-                gWifiBlockedMs = millis();
-                invalidateMenuCache();
                 Serial.println("[MENU] TOGGLE_WIFI refused — dive mode");
                 break;
             }
@@ -484,10 +474,12 @@ void open() {
     // Resume where the diver was if the menu idle-timed-out recently. Past the
     // window, start clean -- dropping someone into CONFIG > Log twenty minutes
     // later is its own kind of confusing.
-    if (savedDepth > 0 && (millis() - savedAtMs) < MENU_RESUME_WINDOW_MS) {
+    // A resume point inside something dive mode has since hidden is dropped.
+    if (savedDepth > 0 && (millis() - savedAtMs) < MENU_RESUME_WINDOW_MS &&
+        stackVisible(savedStack, savedDepth)) {
         memcpy(menuStack, savedStack, sizeof(menuStack));
         stackDepth   = savedDepth;
-        selectedItem = savedItem;
+        selectedItem = visibleFrom(currentMenu(), savedItem);
         Serial.print("[MENU] Opened (resumed at ");
         Serial.print(currentMenu().title);
         Serial.println(")");
@@ -499,7 +491,6 @@ void open() {
     }
     savedDepth     = 0;
     gPowerOffArmed = false;
-    gWifiBlocked   = false;
     lastActivityMs = millis();
     invalidateMenuCache();
 }
@@ -508,26 +499,19 @@ void close() {
     stackDepth     = 0;
     savedDepth     = 0;   // an explicit close discards the resume point
     gPowerOffArmed = false;
-    gWifiBlocked   = false;
     Serial.println("[MENU] Closed");
 }
 
 void next() {
     if (!isOpen()) return;
     auto& sm = currentMenu();
-    selectedItem = (selectedItem + 1) % sm.count;
+    selectedItem = visibleFrom(sm, (selectedItem + 1) % sm.count);
     // Moving off OFF cancels a pending power-off. Also covers the case where
     // the diver armed it by accident and just keeps pressing BTN1.
     if (gPowerOffArmed) {
         gPowerOffArmed = false;
         invalidateMenuCache();
         Serial.println("[MENU] Power-off disarmed");
-    }
-    // Navigating away dismisses the refusal early — the diver has clearly read
-    // it, and leaving it up would hide the item they just moved to.
-    if (gWifiBlocked) {
-        gWifiBlocked = false;
-        invalidateMenuCache();
     }
     lastActivityMs = millis();
 }
@@ -544,7 +528,7 @@ bool select() {
         // Enter submenu
         menuStack[stackDepth] = item.submenuIdx;
         stackDepth++;
-        selectedItem = 0;
+        selectedItem = visibleFrom(currentMenu(), 0);
         invalidateMenuCache();
         Serial.print("[MENU] Enter: ");
         Serial.println(currentMenu().title);
@@ -612,14 +596,6 @@ void tick() {
         }
     }
 
-    // Refusal message is transient — put the real menu back after a couple of
-    // seconds. Deliberately does NOT hold the menu open the way connecting does:
-    // nothing is in progress, so the normal idle timeout should still apply.
-    if (gWifiBlocked && millis() - gWifiBlockedMs >= WIFI_BLOCKED_SHOW_MS) {
-        gWifiBlocked = false;
-        invalidateMenuCache();
-    }
-
     if (millis() - lastActivityMs >= MENU_TIMEOUT_MS) {
         Serial.println("[MENU] Timeout — closing");
         // Capture before close(), which clears the resume point on purpose.
@@ -655,30 +631,17 @@ void render() {
     display::drawHLine(0, MENU_SEP_Y, 320, CLR_CYAN);
 
     // Title (cached) — size 2, pad to 25 chars to clear previous content.
-    // A refusal borrows both rows: the title says what was refused, the item row
-    // says why. Neither cache keys on colour, but every override text here is
-    // distinct from any real title or label, so a stale colour cannot survive.
-    const char* title    = sm.title;
-    uint16_t    titleClr = CLR_CYAN;
-    if (gWifiBlocked) {
-        title    = "WiFi unavailable";
-        titleClr = CLR_RED;
-    }
     char titleBuf[27];
-    snprintf(titleBuf, sizeof(titleBuf), "%-25s", title);
+    snprintf(titleBuf, sizeof(titleBuf), "%-25s", sm.title);
     if (strcmp(titleBuf, prevTitle) != 0) {
-        display::drawText(1, TITLE_Y, titleBuf, titleClr, 2);
+        display::drawText(1, TITLE_Y, titleBuf, CLR_CYAN, 2);
         strncpy(prevTitle, titleBuf, sizeof(prevTitle));
     }
 
     // Current item — size 3 large text, one item at a time
     auto& item = sm.items[selectedItem];
     char labelBuf[22];
-    uint16_t itemClr = CLR_YELLOW;
-    if (gWifiBlocked) {
-        snprintf(labelBuf, sizeof(labelBuf), "DIVE MODE");
-        itemClr = CLR_RED;
-    } else if (gWifiConnecting) {
+    if (gWifiConnecting) {
         // 15 chars, inside the 16 the size-3 row holds. Takes the item's place
         // rather than adding a row: there is nowhere below it to put one, and
         // the item underneath is exactly the thing that is mid-change anyway.
@@ -692,7 +655,7 @@ void render() {
     snprintf(itemBuf, sizeof(itemBuf), "%-16s", labelBuf);
 
     if (strcmp(itemBuf, prevItem) != 0) {
-        display::drawText(1, ITEM_Y, itemBuf, itemClr, 3);
+        display::drawText(1, ITEM_Y, itemBuf, CLR_YELLOW, 3);
         strncpy(prevItem, itemBuf, sizeof(prevItem));
     }
 }
@@ -716,7 +679,11 @@ void updateNavState(uint8_t flags, uint8_t flags2) {
     gWifiEnabled   = wifiNow;
     gLogLevel      = (flags & FLAG_LOG_LEVEL_MASK) >> FLAG_LOG_LEVEL_SHIFT;
     gSaltWater     = (flags2 & FLAG2_SALT_WATER)    != 0;
-    gDiveMode      = (flags2 & FLAG2_DIVE_MODE)     != 0;
+    const bool diveNow = (flags2 & FLAG2_DIVE_MODE) != 0;
+    if (diveNow != gDiveMode) {
+        gDiveMode = diveNow;
+        if (isOpen()) ensureVisible();
+    }
 }
 
 bool isPendingSpeedCal() {
@@ -759,12 +726,16 @@ void clearWaypointArrivePending() {
     gWaypointArrivePending = false;
 }
 
-bool isPendingDatumWas() {
-    return gDatumWasPending;
+bool isPendingMark() {
+    return gMarkPending;
 }
 
-void clearDatumWasPending() {
-    gDatumWasPending = false;
+void clearMarkPending() {
+    gMarkPending = false;
+}
+
+bool isDiveMode() {
+    return gDiveMode;
 }
 
 bool isPendingCloudLink() {

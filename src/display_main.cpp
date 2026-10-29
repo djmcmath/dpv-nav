@@ -70,6 +70,16 @@ static uint32_t gUpdateHintUntilMs     = 0;      // notice on screen until then 
 static bool     gUpdateHintDrawn       = false;
 static constexpr uint32_t UPDATE_HINT_SHOW_MS = 4000;
 
+// ---- Mark ack ----------------------------------------------------------------
+// A Mark (menu item, or BTN2 with the menu closed in dive mode) gets a brief
+// banner in the menu area: a one-press action with no feedback leaves the diver
+// pressing again to be sure. Nav only writes the 'M' row while logging, so with
+// logging off the banner says that instead of pretending.
+static uint32_t gMarkAckUntilMs = 0;      // banner on screen until then (0 = not showing)
+static bool     gMarkAckDrawn   = false;
+static bool     gMarkAckLogging = false;  // log level was non-zero when marked
+static constexpr uint32_t MARK_ACK_SHOW_MS = 1500;
+
 // ---- Timing ----------------------------------------------------------------
 static constexpr uint32_t DISPLAY_INTERVAL_MS = 250;  // 4 Hz refresh
 static constexpr uint32_t HDG_CAL_RENDER_INTERVAL_MS = 100;  // 10 Hz, see loop()
@@ -257,7 +267,6 @@ enum class WaypointUiPhase : uint8_t {
     NONE,    // not in waypoint UI
     SELECT,  // user choosing which waypoint to navigate TO
     ARRIVE,  // user choosing which waypoint they have ARRIVED AT
-    DATUM_WAS, // user choosing which waypoint the search datum really WAS
 };
 static WaypointUiPhase gWaypointUiPhase = WaypointUiPhase::NONE;
 static uint8_t         gWaypointUiIdx  = 0;
@@ -311,11 +320,11 @@ static void enterDeepSleep() {
 static void processNavLine();
 static void processUsbCmd();
 static void sendCmd(DisplayCmd cmd);
+static void doMark();
 static void sendCloudCalRespond(DisplayCmd cmd, const char* calId);
 static void sendSpeedCalStart(uint16_t dist_ft);
 static void sendWaypointSelectCmd(uint8_t idx);
 static void sendWaypointArriveCmd(uint8_t idx);
-static void sendDatumWasCmd(uint8_t idx);
 static void renderWaypointUi();
 
 // One place decides which cal screen a CalProgressPacket gets. There are two
@@ -575,13 +584,9 @@ void loop() {
             Serial.println("[WP] entering Arrive Waypoint UI");
         }
 
-        if (menu::isPendingDatumWas()) {
-            menu::clearDatumWasPending();
-            gWaypointUiPhase = WaypointUiPhase::DATUM_WAS;
-            gWaypointUiIdx   = 0;
-            gWpPrevTitle[0]  = '\0';
-            gWpPrevName[0]   = '\0';
-            Serial.println("[WP] entering Datum Was UI");
+        if (menu::isPendingMark()) {
+            menu::clearMarkPending();
+            doMark();
         }
 
         if (menu::isPendingCloudLink()) {
@@ -973,6 +978,22 @@ void loop() {
                 display::showNavTop(applyHeadingMode(lastNav));
                 menu::render();
                 display::flush();
+            } else if (gMarkAckUntilMs != 0) {
+                // Mark ack: nav top row stays live, banner where the menu sits.
+                if ((int32_t)(now - gMarkAckUntilMs) < 0) {
+                    display::showNavTop(applyHeadingMode(lastNav));
+                    if (!gMarkAckDrawn) {
+                        display::drawHLine(0, 132, 320, 0x07FF);
+                        display::drawText(1, 162, gMarkAckLogging ? "MARKED" : "NOT LOGGING",
+                                          gMarkAckLogging ? 0x07E0 : 0xF800, 3);
+                        gMarkAckDrawn = true;
+                    }
+                    display::flush();
+                } else {
+                    gMarkAckUntilMs = 0;
+                    gMarkAckDrawn   = false;
+                    display::clear();
+                }
             } else {
 #if DISPLAY_MODE
                 // Bench build: raw sensor values instead of the nav screen.
@@ -1221,6 +1242,17 @@ static void processUsbCmd() {
 
 static char wpTxBuf[64];
 
+static void doMark() {
+    sendCmd(DisplayCmd::MARK_POSITION);
+    gMarkAckLogging    = (lastNav.flags & FLAG_LOG_LEVEL_MASK) != 0;
+    gMarkAckUntilMs    = millis() + MARK_ACK_SHOW_MS;
+    if (gMarkAckUntilMs == 0) gMarkAckUntilMs = 1;  // 0 means "not showing"
+    gMarkAckDrawn      = false;
+    gUpdateHintUntilMs = 0;  // a press dismisses the update notice
+    display::clear();
+    Serial.printf("[MARK] MARK_POSITION sent (%s)\n", gMarkAckLogging ? "logging" : "NOT logging");
+}
+
 static void sendCmd(DisplayCmd cmd) {
     size_t n = displayCmdToBytes(cmd, txBuf, sizeof(txBuf));
     if (n > 0) {
@@ -1251,16 +1283,11 @@ static void sendWaypointArriveCmd(uint8_t idx) {
     if (n > 0) Serial1.write(wpTxBuf, n);
 }
 
-static void sendDatumWasCmd(uint8_t idx) {
-    size_t n = displayDatumWasToBytes(idx, wpTxBuf, sizeof(wpTxBuf));
-    if (n > 0) Serial1.write(wpTxBuf, n);
-}
-
 // ---------------------------------------------------------------------------
 // Render waypoint selection / arrival UI (full-screen takeover).
 // Uses incremental update — only redraws when content changes.
 // Layout (320×240):
-//   y=10  title   "NAV TO:", "ARRIVED AT:" or "DATUM WAS:" (size 2, cyan)
+//   y=10  title   "NAV TO:" or "ARRIVED AT:" (size 2, cyan)
 //   y=60  wp name (size 3, yellow, padded to 10 chars)
 //   y=120 counter "n/N" (size 2, white)
 //   y=200 hint    (size 1, gray)
@@ -1272,8 +1299,7 @@ static void renderWaypointUi() {
     constexpr uint16_t CLR_GRAY   = 0x7BEF;
 
     const char* title = (gWaypointUiPhase == WaypointUiPhase::SELECT) ? "NAV TO:     "
-                      : (gWaypointUiPhase == WaypointUiPhase::ARRIVE) ? "ARRIVED AT: "
-                      :                                                 "DATUM WAS:  ";
+                                                                      : "ARRIVED AT: ";
 
     if (strcmp(title, gWpPrevTitle) != 0) {
         strncpy(gWpPrevTitle, title, sizeof(gWpPrevTitle) - 1);
@@ -1331,7 +1357,7 @@ static void updateButton(ButtonState& b) {
 // Map button events to menu actions or commands.
 //   Both buttons held 2s  → reinit display
 //   BTN1 short press      → open menu / cycle to next item
-//   BTN2 short press      → select menu item
+//   BTN2 short press      → select menu item; menu closed + dive mode → Mark
 // ---------------------------------------------------------------------------
 // Swallow any short-press release that is still pending. Every modal screen
 // below returns early, and most of them only ever consume the one button they
@@ -1628,13 +1654,9 @@ static bool handleModalButtons() {
                     sendWaypointSelectCmd(gWaypointUiIdx);
                     Serial.printf("[WP] SELECT waypoint idx=%u name=%s\n",
                                   gWaypointUiIdx, gWpCache[gWaypointUiIdx].name);
-                } else if (gWaypointUiPhase == WaypointUiPhase::ARRIVE) {
+                } else {
                     sendWaypointArriveCmd(gWaypointUiIdx);
                     Serial.printf("[WP] ARRIVE waypoint idx=%u name=%s\n",
-                                  gWaypointUiIdx, gWpCache[gWaypointUiIdx].name);
-                } else {
-                    sendDatumWasCmd(gWaypointUiIdx);
-                    Serial.printf("[WP] DATUM_WAS waypoint idx=%u name=%s\n",
                                   gWaypointUiIdx, gWpCache[gWaypointUiIdx].name);
                 }
             }
@@ -1662,11 +1684,15 @@ static void handleButtons() {
 
     // --- Normal menu handling ------------------------------------------------
     // BTN1: short press on release
+    bool btn1ReleasedNow = false;
     if (!btn1.pressed && !btn1.fired && btn1.pressStartMs > 0) {
         btn1.fired = true;
+        btn1ReleasedNow = true;
         if (menu::isOpen()) {
             menu::next();
         } else {
+            gMarkAckUntilMs = 0;  // the menu takes the banner's place
+            gMarkAckDrawn   = false;
             menu::open();
             display::clear();  // force full redraw with menu
         }
@@ -1677,8 +1703,14 @@ static void handleButtons() {
         btn2.fired = true;
         if (menuWasOpenOnEntry && menu::isOpen()) {
             menu::select();
+        } else if (!menuWasOpenOnEntry && menu::isDiveMode() &&
+                   !btn1.pressed && !btn1ReleasedNow) {
+            // Dive-mode shortcut: BTN2 alone with the menu closed is Mark. Not
+            // when BTN1 is part of the same gesture -- held, or released in this
+            // pass -- so the two-button wake/reinit can never drop a Mark.
+            doMark();
         }
-        // When the menu is closed — or was only just opened by BTN1 above —
+        // Otherwise (surface, or the menu was only just opened by BTN1 above)
         // BTN2 has no action.
     }
 }

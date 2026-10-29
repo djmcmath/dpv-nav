@@ -32,7 +32,7 @@ The NeoPixel on the nav board, visible through the clear housing. It uses the sa
 | LED | Meaning |
 |---|---|
 | Solid green | A gate-accepted GPS fix is in the current log file since the GPS last started. Ready to descend. |
-| Green blink | Nav is using the GPS position, but it isn't in a log yet — logging is OFF, or the first row hasn't been written. Turn on `Config > Log`. |
+| Green blink | Nav is using the GPS position, but it isn't in a log yet — logging is OFF, or the first row hasn't been written. Turn on **Log** in the menu. |
 | Amber, slow blink | A fix, but the confidence gate is still refusing it (typical for the first fixes after power-up or surfacing). Wait. |
 | Red, fast blink | A fix too poor to ever be accepted. |
 | Red, slow blink | Searching: no fix yet. |
@@ -47,7 +47,7 @@ After a dive, solid green again means the *surfacing* fix is logged — it reset
 
 HOME is always waypoint index 0. Its lat/lon is updated automatically whenever GPS signal quality reaches ≥ 3 bars. No manual action is needed — by the time you enter the water the HOME waypoint reflects the last good GPS fix.
 
-To navigate back to your starting point: open **NAV > Select WP**, cycle to **HOME**, and confirm. The display will switch to showing bearing and range back to the HOME position.
+To navigate back to your starting point: open **Select WP**, cycle to **HOME**, and confirm. The display will switch to showing bearing and range back to the HOME position.
 
 ## Setting Waypoints
 
@@ -69,54 +69,68 @@ Press **BTN1** to open the on-screen menu. The menu appears in the lower half of
 |--------|--------|
 | BTN1 short press | Open menu / cycle to next item |
 | BTN2 short press | Select item (enter submenu, execute action, or go back) |
+| BTN2 short press, menu closed, **dive mode** | **Mark** (see below) |
 | BTN1 + BTN2 held 2s | Reset display device |
-| No button for 45s | Menu auto-closes (reopening within 2 min resumes where you were) |
+| No button for 15 s | Menu auto-closes (reopening within 2 min resumes where you were) |
 
 ### Menu Structure
+
+Items marked *(surface)* are hidden in dive mode, so the list you cycle through
+underwater holds only what's useful there.
+
 ```
 MENU
-├── NAV
-│   ├── Select WP  — open waypoint selector: navigate TO a named waypoint
-│   ├── Arrive WP  — open waypoint selector: snap current position to a known waypoint
-│   ├── Mark       — mark current position in logs
-│   ├── Current    — measure the current: hold station pointing upstream (up to 60 s)
-│   └── Op Mode    — toggle dive/surface mode (shows DIVE or SURF)
-├── CAL
+├── Select WP      — open waypoint selector: navigate TO a named waypoint
+├── Arrive WP      — open waypoint selector: snap current position to a known waypoint
+├── Mark           — mark current position in the log
+├── Current        — measure the current: hold station pointing upstream (up to 60 s)
+├── Log            — cycle log level: OFF / LOW / MID / HI (off is immediate; others start 5 s later)
+├── DISPLAY
+│   ├── Spd/ETA    — toggle speed vs ETA readout
+│   ├── Units      — toggle meters vs feet (applies to distance, speed, and depth)
+│   └── Heading    — cycle TRUE / MAG / RAW heading
+├── SETUP
+│   ├── GPS        — (surface) toggle GPS position + speed on/off
+│   ├── WiFi       — (surface) toggle WiFi on/off
+│   ├── Water      — (surface) toggle salt/fresh water density for depth calc (see Depth Sensor below)
+│   ├── Op Mode    — toggle dive/surface mode (shows DIVE or SURF); the only SETUP item at depth
+│   └── Link acct  — (surface) begin device-auth cloud account link
+├── CAL            — (surface, whole submenu)
 │   ├── Baseline   — magnetometer calibration, device off DPV (full sphere coverage), cloud-fit on completion
 │   ├── Fill gaps  — patches thin/empty regions on an installed Baseline cal (requires synced target map)
 │   ├── Mounted    — bin-aware magnetometer calibration, device on DPV (corrects DPV mag signature), cloud-fit on completion
 │   ├── Hdg cal    — Fourier heading calibration: guided 12-point collection, then cloud-fit on completion
 │   └── Speed cal  — interactive flow-meter k-factor calibration (swim a known distance)
-├── CONFIG
-│   ├── GPS        — toggle GPS position + speed on/off (shows current state)
-│   ├── WiFi       — toggle WiFi on/off
-│   ├── Log        — cycle log level: off / low / high (off is immediate; low/high start 5 s later)
-│   ├── Water      — toggle salt/fresh water density for depth calc (see Depth Sensor below)
-│   └── Link acct  — begin device-auth cloud account link
-├── DISPLAY
-│   ├── Spd/ETA    — toggle speed vs ETA readout
-│   ├── Units      — toggle meters vs feet (applies to distance, speed, and depth)
-│   └── Heading    — toggle magnetic vs true heading
-├── OFF            — enter deep sleep (two presses to confirm; wake: hold both buttons ~1s)
+├── OFF            — (surface) enter deep sleep (two presses to confirm; wake: hold both buttons ~1s)
 └── Close          — leave the menu, change nothing
 ```
 
-Toggle items show their current state (e.g., "Units: m", "Op Mode: SURF") and stay open after toggling. Non-toggle items (Baseline, Fill gaps, Mounted, Hdg cal, Mark, Current) execute and close the menu. Select WP and Arrive WP open the waypoint selector UI.
+In dive mode the menu is: Select WP, Arrive WP, Mark, Current, Log, DISPLAY, SETUP
+(Op Mode only), Close. If dive mode switches on while you are inside CAL or on a
+hidden item, the menu moves you back to the root or on to the next visible item.
+
+Toggle items show their current state (e.g., "Units: m", "Op Mode: SURF", "Log: OFF") and stay open after toggling. Non-toggle items (Baseline, Fill gaps, Mounted, Hdg cal, Mark, Current) execute and close the menu. Select WP and Arrive WP open the waypoint selector UI.
+
+**Mark is one press at depth.** In dive mode, with the menu closed, a single
+BTN2 press marks your position. Pressing both buttons together never marks. Every
+Mark (this shortcut or the menu item) flashes **MARKED** in the lower half of the
+screen for about 1.5 s. If logging is off it flashes a red **NOT LOGGING** instead,
+because a Mark is only recorded in the log file.
 
 **Logging starts on a delay and stops immediately.** The cycle is off → low →
-high → off, so getting to any level means passing through the others. The menu
-label updates as soon as you press, but a **low** or **high** selection waits 5
+mid → high → off, so getting to any level means passing through the others. The menu
+label updates as soon as you press, but a **low**, **mid** or **high** selection waits 5
 seconds of no further presses before a log file is actually opened — so passing
 through a level on the way to the one you want no longer leaves a stub one-row
 file behind. Landing on **off** takes effect at once: the open file is closed
 immediately, which is also what makes it available to the automatic upload. If
 you want high, wait for the label to sit still on `Log:HI` before backing out.
 
-**OFF needs two presses.** The first BTN2 on OFF arms it and the item repaints as `OFF:SURE?`; a second BTN2 shuts the unit down. Pressing BTN1 (or letting the menu time out) disarms it. OFF sits second-to-last on purpose, with the harmless **Close** after it, so overshooting the end of the list lands on a no-op rather than on the one action you cannot undo underwater.
+**OFF needs two presses.** The first BTN2 on OFF arms it and the item repaints as `OFF:SURE?`; a second BTN2 shuts the unit down. Pressing BTN1 (or letting the menu time out) disarms it. OFF sits second-to-last on purpose, with the harmless **Close** after it, so overshooting the end of the list lands on a no-op rather than on the one action you cannot undo. In dive mode OFF is hidden: there is no reason to power off underwater.
 
-### Waypoint Selector UI (NAV > Select WP and Arrive WP)
+### Waypoint Selector UI (Select WP and Arrive WP)
 
-Selecting **NAV > Select WP** or **NAV > Arrive WP** opens a full-screen waypoint picker:
+Selecting **Select WP** or **Arrive WP** opens a full-screen waypoint picker:
 
 ```
 NAV TO:           (or "ARRIVED AT:")
@@ -208,7 +222,7 @@ all 12 points — a small web form fills just the gap:
    the device. Skipping it means the website shows an accepted calibration that
    the unit still isn't using.
 
-### Measuring the Current (NAV > Current)
+### Measuring the Current (Current)
 
 Sixty seconds of holding still, and it is worth more to a dive report than almost anything
 else you can do underwater.
@@ -225,7 +239,7 @@ impeller — and that reading is the current itself.
 
 **Workflow:**
 
-1. Select **NAV > Current**. The menu closes and a 5-second countdown appears.
+1. Select **Current**. The menu closes and a 5-second countdown appears.
 2. Get **pointed upstream** and stop swimming. Hold position over a fixed point on the
    bottom — a rock, a piece of wreck, anything that isn't moving.
 3. The countdown ends and a 60-second hold begins. The screen shows a large countdown of
@@ -342,9 +356,9 @@ a "CLOUD CAL" wait screen, then an accept/reject result (quality band + RMS). Se
 [calibration-guide.md](calibration-guide.md#magnetometer-calibration) for the full
 cloud round trip and the offline fallback if there's no WiFi.
 
-**Op Mode (Dive/Surface):** The device boots in the **last saved mode** (surface mode on first boot). Before entering the water, toggle to **dive mode** via NAV > Op Mode — this disables GPS processing and turns off the WiFi radio, and the selection is saved to NVS immediately. On surfacing, toggle back to surface mode to re-enable both.
+**Op Mode (Dive/Surface):** The device boots in the **last saved mode** (surface mode on first boot). Before entering the water, toggle to **dive mode** via SETUP > Op Mode — this disables GPS processing and turns off the WiFi radio, and the selection is saved to NVS immediately. On surfacing, toggle back to surface mode to re-enable both.
 
-**Automatic depth trigger:** if a depth sensor is installed (see **Depth Sensor** below), Op Mode also switches itself — no button press needed. Crossing ~1 ft (0.3 m) depth engages dive mode immediately (radios off fast). Returning to the surface reverts to surface mode automatically, but only after staying shallower than ~0.5 ft for 30 seconds straight, so wave chop at the surface doesn't flap GPS/WiFi on and off. The manual menu toggle still works, but on a board with a depth sensor the automatic trigger can override it on the next check (e.g. forcing DIVE on the bench with no water reverts to SURFACE after ~30 s).
+**Automatic depth trigger:** if a depth sensor is installed (see **Depth Sensor** below), Op Mode also switches itself — no button press needed. Crossing ~4 ft (1.3 m) depth engages dive mode immediately (radios off fast). Returning to the surface reverts to surface mode automatically, but only after staying shallower than ~2 ft (0.6 m) for 30 seconds straight, so wave chop at the surface doesn't flap GPS/WiFi on and off. The manual menu toggle still works, but on a board with a depth sensor the automatic trigger can override it on the next check (e.g. forcing DIVE on the bench with no water reverts to SURFACE after ~30 s).
 
 ## Depth Sensor
 
@@ -352,7 +366,7 @@ An optional BlueRobotics Bar30 (MS5837-30BA) connects to the nav board's J3 head
 
 - **Detection:** probed at boot; the nav device boot status screen shows a `Depth .. ok` or `.. FAIL` row like the other subsystems.
 - **Zeroing:** the surface pressure is captured automatically a moment after boot — power the unit on in air, not already submerged.
-- **Water density:** CONFIG > Water toggles salt (default) vs fresh water, which affects the pressure→depth conversion.
+- **Water density:** SETUP > Water toggles salt (default) vs fresh water, which affects the pressure→depth conversion.
 - **Display:** when present, depth is shown in small text on the bottom row of the nav screen, in the units selected by DISPLAY > Units.
 - **Logging:** depth (m) and water temperature (°C) are recorded in every log level's CSV output.
 - **Dive trigger:** see **Automatic depth trigger** above.
@@ -413,16 +427,17 @@ Requires `ENABLE_DEBUG_PACKET 1` on the nav device to send sensor data:
 
 ## Dive Navigation Workflow
 
-1. At the surface: use **NAV > Select WP** to select your destination waypoint. Switch to dive mode (**NAV > Op Mode → DIVE**) to disable GPS and WiFi.
+1. At the surface: use **Select WP** to select your destination waypoint. Start **Log**. With a depth sensor, dive mode switches on by itself as you descend; without one, switch it manually (**SETUP > Op Mode → DIVE**) to disable GPS and WiFi.
 2. Descend with DPV, unit active.
 3. Device runs dead-reckoning integration at ~100 Hz:
     - Flow sensor updates speed (or GPS speed, if fix is fresh and passes SOG deadband + COG coherence filter)
     - AHRS updates heading from gyro/accel/mag fusion; Fourier heading correction applied if `hdg_fourier.json` loaded; motor-on heading offset applied if `motor_cal.json` loaded
     - Nav model integrates position: `x += speed × sin(heading) × dt`, `y += speed × cos(heading) × dt`
 4. Display updates at 10 Hz, showing bearing, range, heading, and speed.
-5. **At an intermediate known location** (e.g. a mooring ball or prior waypoint): use **NAV > Arrive WP** to snap the dead-reckoning position to that waypoint's true lat/lon. This resets accumulated error for the next leg.
-6. To navigate home: use **NAV > Select WP** → HOME.
-7. On surfacing: switch back to surface mode (**NAV > Op Mode → SURF**) to re-enable GPS and WiFi.
+5. **At an intermediate known location** (e.g. a mooring ball or prior waypoint): use **Arrive WP** to snap the dead-reckoning position to that waypoint's true lat/lon. This resets accumulated error for the next leg.
+6. To navigate home: use **Select WP** → HOME.
+   To mark something you want to find later, press **BTN2** (menu closed).
+7. On surfacing: the depth sensor returns to surface mode after 30 s shallow; without one, switch manually (**SETUP > Op Mode → SURF**) to re-enable GPS and WiFi. Turn **Log** off so the dive uploads.
 
 ## Recommended Calibration Order (New Installation)
 
@@ -439,8 +454,9 @@ Gyro and accel calibrate automatically on first boot if their files are absent.
 |--------|--------|--------|
 | BTN1 short press | Open / cycle menu | Opens menu (if closed) or moves to next item (if open) |
 | BTN2 short press | Select menu item | Enters submenu, executes action, or goes back |
+| BTN2 short press (menu closed, dive mode) | Mark | Marks current position in the log; flashes MARKED (or NOT LOGGING) |
 | BTN1 + BTN2 held 2s | Reset | Resets the display device |
-| No button for 45s | Auto-close | Menu closes, returns to full nav display. Reopening within 2 minutes puts you back on the item you were on. |
+| No button for 15 s | Auto-close | Menu closes, returns to full nav display. Reopening within 2 minutes puts you back on the item you were on. |
 
 ## Configuration
 
@@ -461,7 +477,7 @@ Key settings in [src/config.h](../src/config.h):
 | `DISPLAY_MODE` | 0 | Display mode: 0 = Navigation, 1 = Debug |
 | `ENABLE_DEBUG_PACKET` | 0 | Nav device sends DebugPacket: 0 = off, 1 = on |
 | `NVS_POS_SAVE_INTERVAL_MS` | 30000 | How often estimated position is written to NVS (ms) |
-| `WATER_DENSITY_FRESH_KG_M3` / `WATER_DENSITY_SALT_KG_M3` | 997 / 1025 | Water density for depth calc — selected at runtime via DISPLAY > Water |
+| `WATER_DENSITY_FRESH_KG_M3` / `WATER_DENSITY_SALT_KG_M3` | 997 / 1025 | Water density for depth calc — selected at runtime via SETUP > Water |
 | `DEPTH_DIVE_TRIGGER_M` | 0.3 | Depth (m) that auto-triggers dive mode (GPS+WiFi off) |
 | `DEPTH_SURFACE_REVERT_M` / `DEPTH_SURFACE_REVERT_DWELL_S` | 0.15 / 30 | Depth + dwell time to auto-revert to surface mode |
 

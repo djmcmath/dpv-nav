@@ -254,16 +254,14 @@ Features and UX with a design already thought through.
   landmarks "nearest" means nearest-point-on-line — the firmware waypoint model is point-only
   today.
 
-- [ ] **Datum range isn't visible while navigating somewhere else**
+- [ ] **Speed cal can't be run underwater**
 
-  Nav > Datum (added 2026-09-30) keeps the search datum apart from the target, but the nav
-  screen shows only the target. Getting back to the line means Datum > *To datum*, which
-  replaces the target. Wanted: a small secondary range/bearing to the datum on the nav screen
-  whenever one is set. That needs two new `NavPacket` fields, so it's a wire change on both
-  boards. Less pressing now that *Set here* also targets the datum (the at-depth workflow is
-  one menu trip, reciprocals done in the diver's head), but still wanted once a wreck waypoint
-  becomes the target. *Set here* also has no confirm, and pressing it by accident overwrites the way back.
-  For now it's mitigated only by being the last item in the submenu.
+  Since 2026-10-29 the whole Cal submenu is hidden in dive mode, Speed cal included, to
+  keep the at-depth menu short. The on-unit speed cal is still the rough first pass (unit
+  on a stick, walked back and forth in shallow water a few times; close but not right); the
+  real cal is long straight legs between known GPS points, done post-dive. If an on-unit
+  underwater run is wanted again: an "advanced" / "allow cal underwater" switch set from
+  the web page, which un-hides Speed cal (only) in dive mode. Undecided which.
 
 - [ ] **Magnetic declination is a hard-coded constant**
 
@@ -275,14 +273,6 @@ Features and UX with a design already thought through.
   the device from the last good GPS fix, which works offline. The value would live in NVS and
   update at the surface. The WMM option needs no network, which suits a unit that is often
   offline.
-
-- [ ] **Search patterns on the datum (concept, not decided)**
-
-  Legs defined relative to the datum: out-and-back, sector search (every leg passes back
-  through the datum, which bounds DR drift and makes it the best fit for DR), and expanding
-  square (spacing ≈ visibility). The user isn't yet sure a guided pattern is worth putting a
-  diver through, and how a leg ends (manual vs. auto at a radius) is open. Don't build until
-  that's decided.
 
 ---
 

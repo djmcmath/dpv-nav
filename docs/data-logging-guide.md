@@ -6,7 +6,7 @@ The logging system writes dive logs to ESP32 LittleFS flash storage. LOW is the 
 
 ## Log Levels
 
-Cycled from the display with `CONFIG > Log`: OFF → LOW → MID → HIGH → OFF. A file's
+Cycled from the display with the root menu's `Log` item: OFF → LOW → MID → HIGH → OFF. A file's
 format is fixed when it opens (`getActiveLevel()`), not when the diver next changes
 the selection.
 
@@ -122,7 +122,7 @@ in [config.h](../src/config.h) is 14.7° E (southern Oregon). So:
 | `E` | dead-reckoning estimate |
 | `W` | waypoint snap — the diver snapped position to a known waypoint in real time |
 | `M` | diver mark. Written out of cadence by `logImmediate()`, with heading and speed left at zero. An annotation on the track, not a step of it. |
-| `C` | **current hold.** A station-keeping measurement (`Nav > Current`) of up to 60 s; the diver can finish it early. |
+| `C` | **current hold.** A station-keeping measurement (menu `Current`) of up to 60 s; the diver can finish it early. |
 | `L` | a landmark or position fix added *after* the dive. Never written by firmware — the website splices it in before correction. |
 
 A `'C'` row **reuses two existing columns to carry something else**, which is the one thing

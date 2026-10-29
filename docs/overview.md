@@ -27,7 +27,7 @@ v1 features (implemented):
 - Two display modes: Navigation (status bar + 2×2 grid) and Debug (raw sensor data), switchable at runtime via menu
 - Separate DebugPacket protocol for sensor data inspection (opt-in via `ENABLE_DEBUG_PACKET`)
 - Configurable units: metric or imperial, switchable at runtime via menu
-- Operational mode toggle: surface (GPS + WiFi active) vs dive (GPS + WiFi disabled), switchable at runtime via NAV > Op Mode
+- Operational mode toggle: surface (GPS + WiFi active) vs dive (GPS + WiFi disabled), switchable at runtime via Setup > Op Mode, and automatically by the depth sensor
 - Menu system, compiled into the display firmware: NAV (select WP/arrive WP/mark/current/op mode), CAL (baseline/fill gaps/mounted/hdg cal/speed cal), CONFIG (GPS/WiFi/log/water/link account), DISPLAY (spd-ETA/units/heading)
 - Two-stage magnetometer calibration: baseline (off-scooter, axis-range-bar collection) + mounted (on-scooter, heading×elevation bin grid) cal, each cloud-fit automatically on completion (offline Python fit as WiFi-less fallback); a device-side "Fill gaps" pass plus a website merge step patches thin regions in an installed baseline without redoing the full tumble
 - Fourier heading calibration: guided 12-point on-device collection at 30° intervals, cloud-fit (1–4 harmonics, offline `fourier_fit.py` as fallback); reduces residual error to ~2° max. Thin sectors (>45° gap) are flagged automatically and filled via a manual-entry web form, no device round trip

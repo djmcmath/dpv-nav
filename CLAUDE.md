@@ -294,7 +294,6 @@ Runtime toggle states and estimated position are persisted to ESP32 NVS (Non-Vol
 | Show ETA vs speed | `disp_state` | `show_eta` | On toggle |
 | Imperial units | `disp_state` | `imperial` | On toggle |
 | True heading | `disp_state` | `true_heading` | On toggle |
-| Search datum X / Y / set (`nvs_nav::saveDatum()` / `clearDatum()`) | `nav_state` | `dat_x`, `dat_y`, `dat_set` | Whenever the datum is set or moved (the `saveDatum()` callers in nav_main.cpp) |
 | Offer OTA test builds (`ota::setPrereleaseOptIn()`) | `ota` | `prerelease` | On the tern.local checkbox |
 
 **On boot:** NVS state is loaded at the end of `setup()` in [nav_main.cpp](src/nav_main.cpp) (after WiFi/web server init). If NVS is empty (first boot), factory defaults are used. The restored position is applied via `nav::setPosition()`. Dive mode re-disables GPS and WiFi if it was active.
@@ -383,29 +382,43 @@ The display device includes a hierarchical menu system ([src/menu/menu.h](src/me
 
 ### Button Mapping
 - **BTN1 short press**: Open menu (when closed) or cycle to next item (when open)
-- **BTN2 short press**: Select highlighted item (enter submenu, execute action, or go back)
+- **BTN2 short press**: Select highlighted item (enter submenu, execute action, or go back). **With the menu closed in dive mode, BTN2 alone is Mark** (not when BTN1 is held or released in the same pass, so the two-button wake/reinit gestures can't drop one). A Mark from either path shows a 1.5 s `MARKED` banner, or a red `NOT LOGGING` one when the log level is OFF (nav only writes the `M` row while logging).
 - **BTN1 + BTN2 held 2s**: Reset display device (sends `DisplayCmd::RESET`)
 - **15-second idle timeout**: Menu auto-closes; reopening within `MENU_RESUME_WINDOW_MS` (2 min) resumes at the same item rather than at the root, which is what keeps a short timeout from costing the diver their place
 
 ### Menu Structure
 ```
-MENU (root)
-├── Nav:     Select WP, Arrive WP, Mark, Current, Op Mode, Datum
-│            └── Datum: To datum, Datum was, Set here
-├── Cal:     Baseline, Fill gaps, Mounted, Hdg cal, Speed cal
-├── Config:  GPS, WiFi, Log, Water, Link acct
+MENU (root)                 [s] = surfaceOnly: hidden in dive mode
+├── Select WP
+├── Arrive WP
+├── Mark
+├── Current
+├── Log:     OFF/LOW/MID/HI (toggle, stays open)
 ├── Display: Spd/ETA, Units, Heading
-├── OFF      — power off nav device (two presses; see below)
-└── Close    — auto-generated, leaves the menu
+├── Setup:   GPS [s], WiFi [s], Water [s], Op Mode, Link acct [s]
+├── Cal [s]: Baseline, Fill gaps, Mounted, Hdg cal, Speed cal
+├── OFF [s]  — power off nav device (two presses; see below)
+└── Close    — leaves the menu
 ```
 
-Each submenu has an auto-generated ".." back item; the root gets "Close". Both
+The at-depth actions are flat on the root (flattened 2026-10-29, when the Nav >
+Datum submenu was removed unused) so each costs one fewer press. Visibility is
+per item (`MenuItem::surfaceOnly`, driven by `FLAG2_DIVE_MODE`): hidden items are
+skipped by `next()`, entering a submenu lands on its first visible item, and if
+dive mode flips with the menu open `ensureVisible()` bumps the diver to the root
+(if their submenu vanished) or to the next visible item. A resume point inside a
+now-hidden submenu is dropped. **Setup must stay visible at depth for Op Mode** —
+a board without a depth sensor, or one forced to DIVE on the bench, otherwise has
+no way back to SURF. Hiding WiFi replaced the old red "WiFi unavailable / DIVE
+MODE" refusal; `executeAction()` keeps a silent backstop.
+
+Each submenu ends in a ".." back item; the root ends in "Close". Both
 carry `Action::BACK` — do not go back to identifying them by label, the old
 `strcmp(label, "..")` test is precisely why the root could not have its own
 exit. Toggle items (GPS, Units, Op Mode, etc.) show current state inline
 and stay open after toggle.
 
-**`CONFIG > Log` starts logging on a delay and stops it immediately.** The cycle
+**`Log` starts logging on a delay and stops it immediately.** The cycle
 is OFF → LOW → MID → HIGH → OFF, so every level is reachable only by passing through
 another, and opening on the keypress left a stub file every time a diver went
 past a level en route to the one they wanted. Now a LOW/MID/HIGH selection only
@@ -420,7 +433,7 @@ schema — anything deciding what to *write* must use the latter.
 ### Menu Safety Invariants (do not regress these)
 
 Three defects here cost a real dive in August 2026: the diver could not find
-`Config > Log` underwater and shut the unit down by hand to stop logging, and
+`Config > Log` underwater (Log is now on the root) and shut the unit down by hand to stop logging, and
 separately powered it off while trying to select `Display`. The fixes are
 load-bearing, not cosmetic.
 
@@ -441,6 +454,10 @@ load-bearing, not cosmetic.
    `handleButtons()` then calls `consumePendingReleases()`. Modals only ever
    handle the one button they care about; the other one's release used to sit
    with `fired == false` and fire into the menu the instant the modal exited.
+5. **Nothing land-only is reachable in dive mode.** Cal, OFF and the surface
+   Setup toggles are `surfaceOnly`. Add new items with that flag set unless a
+   diver genuinely needs them underwater — the dive-mode list is meant to stay
+   short.
 
 **Speed cal** uses a multi-phase UI that takes over the display outside the menu system:
 1. Menu closes → display enters distance-selection mode (`SpeedCalPhase::DIST_SELECT` in display_main.cpp)
@@ -451,7 +468,7 @@ load-bearing, not cosmetic.
 
 **Op Mode (Dive/Surface):** Toggles operational mode. Surface mode (default at boot) keeps GPS and WiFi active. Dive mode disables both GPS processing and WiFi radio — suitable for underwater use where neither is available. Toggling back to surface re-initializes WiFi and GPS.
 
-**`Config > WiFi` actually switches the radio, and refuses to turn it on in dive mode.**
+**`Setup > WiFi` actually switches the radio, and can't be turned on in dive mode.**
 Until 2026-09-16 `DisplayCmd::TOGGLE_WIFI` only flipped `gWifiEnabled` — the menu and
 status bar reported a radio state that was not real, and the change took effect one
 reboot later via the NVS restore in `setup()`. Any bench measurement that toggled WiFi
@@ -465,11 +482,11 @@ from the menu before that date measured nothing; don't trust those logs. Now:
   `menu::isWifiConnecting()` joins the `linkAlive` overrides in display_main so the
   5 s `NAV_TIMEOUT_MS` "NO LINK" screen does not fire during a legitimate connect —
   same pattern as the cloud-cal overrides next to it.
-- **On is refused in dive mode**, shown as a 2.5 s red `WiFi unavailable / DIVE MODE`
-  in the menu rows. The radio cannot reach anything underwater, so the only thing an
-  attempt buys is a blocked nav loop. Guard lives on the display (the command never
-  reaches nav); nav_main re-checks it as a backstop. The way to get WiFi back is
-  `Nav > Op Mode` → surface. **Off is always allowed** — instant and always safe.
+- **In dive mode the WiFi item is hidden** (`surfaceOnly`; until 2026-10-29 it was
+  shown and refused with a red `WiFi unavailable / DIVE MODE`). The radio cannot reach
+  anything underwater, so the only thing an attempt buys is a blocked nav loop.
+  `executeAction()` and nav_main both keep a backstop check. The way to get WiFi back is
+  `Setup > Op Mode` → surface (or the depth trigger reverting).
 
 A blocking call reachable from a button press is a deliberate exception to
 "heading must never be blocked", not a pattern to copy. If you add another one, give it
@@ -488,9 +505,10 @@ The menu structure is defined in `buildMenu()` in [src/menu/menu.cpp](src/menu/m
 2. Add a corresponding `DisplayCmd` value in [lib/dpvlink/dpvlink.h](lib/dpvlink/dpvlink.h) (for nav-device actions)
 3. Wire the action in `executeAction()` in [src/menu/menu.cpp](src/menu/menu.cpp)
 4. Handle the command in `handleDisplayCmd()` in [src/nav_main.cpp](src/nav_main.cpp)
-5. Add the item to `buildMenu()` in [src/menu/menu.cpp](src/menu/menu.cpp), bumping that submenu's `count` (max `MAX_ITEMS` = 8 including the back item)
+5. Add the item to `buildMenu()` in [src/menu/menu.cpp](src/menu/menu.cpp) with `addItem()` (max `MAX_ITEMS` = 10 including the back item; the root is at 10), deciding `surfaceOnly`
 
-**Next free values:** `menu::Action` 29, `DisplayCmd` 47, `cal_mode` 10. `cal_mode` is the
+**Next free values:** `menu::Action` 29, `DisplayCmd` 47, `cal_mode` 10. Action 26-28 and
+DisplayCmd 44-46 are retired (the removed Datum feature) — don't reuse them. `cal_mode` is the
 one that bites — 0 quick mag cal, 1 full mag cal, 2/3/4 speed cal, 5 baseline, 6 mounted,
 7 gap-fill, 8/9 current hold. It is easy to read the code and conclude 7 is free; it is not.
 

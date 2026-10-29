@@ -737,11 +737,6 @@ void setup() {
         gSaltWater  = nvsState.salt_water;
         nav::setUseGps(gGpsEnabled);
         nav::setPosition(nvsState.pos_x, nvsState.pos_y);
-        float dx, dy;
-        if (nvs_nav::loadDatum(dx, dy)) {
-            nav::setDatumXY(dx, dy);
-            Serial.printf("[NVS] datum restored x=%.1f y=%.1f\n", dx, dy);
-        }
         depth::setSaltWater(gSaltWater);
         if (nvsState.log_level > 0) {
             logging::setLevel(static_cast<logging::LogLevel>(nvsState.log_level));
@@ -2122,7 +2117,7 @@ static void sendDebugPacket(const imu::Vec3f& accel, const imu::Vec3f& gyro,
 }
 #endif
 
-// An out-of-cadence 'M' row at pos: the diver's Mark, and the datum commands.
+// An out-of-cadence 'M' row at pos: the diver's Mark.
 static void logMarkRow(const nav::Position& pos) {
     if (!logging::isLogging()) return;
     GpsFix fix = gps::getFix();
@@ -2281,49 +2276,6 @@ static void handleDisplayCmd() {
                         Serial.print(" y=");
                         Serial.println(pos.y_m, 1);
                         logMarkRow(pos);
-                        break;
-                    }
-                    case DisplayCmd::SET_DATUM: {
-                        nav::setDatum();
-                        // Also make it the target: the display then reads range
-                        // and bearing back to the line from here on, with no
-                        // further button presses at depth.
-                        nav::targetDatum();
-                        sysState = SystemState::NAVIGATING;
-                        nav::Position d = nav::getDatum();
-                        nvs_nav::saveDatum(d.x_m, d.y_m);
-                        Serial.printf("CMD: SET_DATUM x=%.1f y=%.1f (now the target)\n", d.x_m, d.y_m);
-                        // Logged as a plain Mark: the post-dive fix for "which
-                        // wreck was this" is a landmark annotation on this row.
-                        logMarkRow(d);
-                        break;
-                    }
-                    case DisplayCmd::NAV_TO_DATUM:
-                        if (nav::targetDatum()) {
-                            sysState = SystemState::NAVIGATING;
-                            Serial.println("CMD: NAV_TO_DATUM");
-                        } else {
-                            Serial.println("CMD: NAV_TO_DATUM — no datum set");
-                        }
-                        break;
-                    case DisplayCmd::DATUM_WAS: {
-                        uint8_t idx = parseWaypointIndex(cmdBuf, cmdPos);
-                        const waypoints::Waypoint* wp = waypoints::get(idx);
-                        if (!wp) {
-                            Serial.printf("CMD: DATUM_WAS idx=%u — out of range (count=%d)\n",
-                                          idx, waypoints::count());
-                        } else if (!nav::retroArrive(wp->lat, wp->lon)) {
-                            Serial.printf("CMD: DATUM_WAS idx=%u — no datum set\n", idx);
-                        } else {
-                            nav::Position d = nav::getDatum();
-                            nvs_nav::saveDatum(d.x_m, d.y_m);
-                            Serial.printf("CMD: DATUM_WAS idx=%u name=%s — frame shifted\n",
-                                          idx, wp->name);
-                            // Deliberately an aux 'M' row, never a 'W' anchor:
-                            // this is a hypothesis the diver may revise, and
-                            // the solver would take a 'W' as ground truth.
-                            logMarkRow(nav::getPosition());
-                        }
                         break;
                     }
                     case DisplayCmd::START_FULL_CAL:
@@ -2781,11 +2733,6 @@ static void handleDisplayCmd() {
                         const waypoints::Waypoint* wp = waypoints::get(idx);
                         if (wp) {
                             nav::snapToLatLon(wp->lat, wp->lon);
-                            if (nav::hasDatum()) {
-                                // The snap moved the datum with the frame.
-                                nav::Position d = nav::getDatum();
-                                nvs_nav::saveDatum(d.x_m, d.y_m);
-                            }
                             Serial.printf("CMD: ARRIVE_WAYPOINT idx=%u name=%s — position snapped\n",
                                           idx, wp->name);
                             // Log the position correction as a waypoint-type entry

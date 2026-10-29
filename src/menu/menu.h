@@ -11,7 +11,7 @@ namespace menu {
 // Menu geometry
 // ---------------------------------------------------------------------------
 constexpr int MAX_SUBMENUS    = 8;    // max number of submenus (including root)
-constexpr int MAX_ITEMS       = 8;    // max items per submenu (including auto back item)
+constexpr int MAX_ITEMS       = 10;   // max items per submenu (including auto back item)
 constexpr int MAX_MENU_DEPTH  = 3;    // max nesting depth (root + 2 levels)
 constexpr int MENU_LABEL_LEN  = 12;   // max chars for item label
 
@@ -20,7 +20,9 @@ constexpr uint32_t MENU_TIMEOUT_MS = 15000;  // auto-close after 15 s idle
 // After an idle timeout, reopening the menu within this window resumes at the
 // item the diver was last on instead of dumping them back at the root. Hunting
 // seven items deep for Log with gloves on, twice, is what made a short timeout
-// expensive; the resume point is what makes 15 s affordable again.
+// expensive; the resume point is what makes 15 s affordable again. (Since the
+// root was flattened, Log is a root item; the resume point still matters for
+// the Display / Setup / Cal submenus.)
 constexpr uint32_t MENU_RESUME_WINDOW_MS = 120000;
 
 // ---------------------------------------------------------------------------
@@ -56,9 +58,8 @@ enum class Action : uint8_t {
     CAL_GAPFILL          = 23,  // guided gap-fill pass over the cells the server flagged
     BACK                 = 24,  // leave submenu, or close the menu at root
     NAV_CURRENT          = 25,  // 60 s station-keeping measurement of the current
-    NAV_DATUM_GOTO       = 26,  // make the search datum the navigation target
-    NAV_DATUM_WAS        = 27,  // open waypoint picker: "the datum was this waypoint"
-    NAV_DATUM_SET        = 28,  // record the current position as the search datum, and target it
+    // 26-28 retired (were NAV_DATUM_GOTO / NAV_DATUM_WAS / NAV_DATUM_SET -- the
+    // Nav > Datum submenu, removed unused 2026-10-29)
 };
 
 // ---------------------------------------------------------------------------
@@ -68,6 +69,7 @@ struct MenuItem {
     char     label[MENU_LABEL_LEN + 1];
     Action   action;
     int8_t   submenuIdx;   // index into submenus[] if action==SUBMENU, else -1
+    bool     surfaceOnly;  // hidden while in dive mode (skipped, never selectable)
 };
 
 struct SubMenu {
@@ -162,9 +164,14 @@ void clearWaypointSelectPending();
 bool isPendingWaypointArrive();
 void clearWaypointArrivePending();
 
-// True if the diver chose Nav > Datum > Datum was... (open the waypoint picker).
-bool isPendingDatumWas();
-void clearDatumWasPending();
+// Returns true if the user just selected "Mark" -- display_main sends
+// MARK_POSITION and shows the ack, the same path as the BTN2 shortcut.
+// Cleared by clearMarkPending().
+bool isPendingMark();
+void clearMarkPending();
+
+// Dive/surface mode as last reported by the nav device (NavPacket flags2).
+bool isDiveMode();
 
 // Returns true if the user just selected "Link acct" — display should send
 // DisplayCmd::LINK_ACCOUNT and enter the cloud account-link UI.

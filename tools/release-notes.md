@@ -1,1 +1,3 @@
 - Updates to heading check calibration display
+- Simplified menu, removed unnecessary items
+- MID/HIGH binary logs now upload to Dive Map like LOW CSV logs

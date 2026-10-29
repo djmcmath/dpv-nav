@@ -8,6 +8,7 @@
 #include "cloud_client.h"
 #include "wifi_manager.h"
 #include "../config.h"
+#include "../util/log_names.h"
 #include "../util/logging.h"
 
 namespace log_sync {
@@ -166,7 +167,7 @@ static void scanPending(std::vector<String>& out) {
         f.close();
         f = dir.openNextFile();
 
-        if (!name.endsWith(".csv")) continue;
+        if (!log_names::isLog(name.c_str())) continue;
         char path[logging::LOG_PATH_MAX];
         buildPath(path, sizeof(path), name.c_str());
         if (strcmp(path, openPath) == 0) continue;  // still being written

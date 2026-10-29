@@ -6,6 +6,7 @@
 #include "ota.h"
 #include "../util/waypoints.h"
 #include "../util/boot_log.h"
+#include "../util/log_names.h"
 #include "../nav_main.h"
 #include <ArduinoJson.h>
 #include <WebServer.h>
@@ -253,7 +254,7 @@ const CAL_RECOVERABLE_FILES = new Set([
 let cloudLinked = false;
 
 function classifyUpload(name) {
-  if (name.startsWith('/logs/') && name.endsWith('.csv')) return 'dive_log';
+  if (name.startsWith('/logs/') && (name.endsWith('.csv') || name.endsWith('.bin'))) return 'dive_log';
   if (CAL_RECOVERABLE_FILES.has(name)) return 'cal';
   return null;
 }
@@ -844,7 +845,7 @@ static void listDir(File dir, String& json, bool& first) {
             json += String(size);
             // Dive logs carry whether log_sync has already sent them, so the
             // page can say "Uploaded" instead of tempting a redundant click.
-            if (path.startsWith("/logs/") && path.endsWith(".csv")) {
+            if (path.startsWith("/logs/") && log_names::isLog(path.c_str())) {
                 json += ",\"uploaded\":";
                 json += log_sync::isUploaded(path.c_str(), size) ? "true" : "false";
             }
@@ -1156,11 +1157,8 @@ static void handleDiveLogUpload() {
         server.send(400, "text/plain", "Invalid file path");
         return;
     }
-    // Binary MID/HIGH logs are diagnostics for tools/decode_binlog.py; the
-    // server only reads CSV. The page never offers this for one (see
-    // classifyUpload), so this is the backstop.
-    if (!path.endsWith(".csv")) {
-        server.send(400, "text/plain", "Only CSV dive logs can be uploaded");
+    if (!log_names::isLog(path.c_str())) {
+        server.send(400, "text/plain", "Only dive logs (.csv or .bin) can be uploaded");
         return;
     }
     if (!LittleFS.exists(path)) {

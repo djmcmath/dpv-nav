@@ -26,12 +26,20 @@ static constexpr size_t NAME_BUF_LEN = 20;
 static constexpr const char* EXT_CSV = ".csv";
 static constexpr const char* EXT_BIN = ".bin";
 
-// True for a name ending in EXT_BIN -- a binary MID/HIGH log. These never
-// upload (net/log_sync.cpp, web_server.cpp): the server only reads CSV.
+// True for a name ending in EXT_BIN -- a binary MID/HIGH log.
 inline bool isBinary(const char* name) {
     if (!name) return false;
     size_t len = strlen(name);
     return len >= 4 && strcmp(name + len - 4, EXT_BIN) == 0;
+}
+
+// True for either log format. Both upload (net/log_sync.cpp, web_server.cpp):
+// dive-map's track processor decodes the binary records itself, which is how
+// a MID dive's magnetometer data reaches the server.
+inline bool isLog(const char* name) {
+    if (!name) return false;
+    size_t len = strlen(name);
+    return isBinary(name) || (len >= 4 && strcmp(name + len - 4, EXT_CSV) == 0);
 }
 
 // Split a basename into its date prefix and sequence number. False for

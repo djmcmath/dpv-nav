@@ -83,6 +83,13 @@ int main() {
     check(!log_names::isBinary("bin"), "too short to carry the extension");
     check(!log_names::isBinary(""), "empty name is not binary");
 
+    printf("uploadable logs\n");
+    check(log_names::isLog("20260908-001.csv"), ".csv is a log");
+    check(log_names::isLog("/logs/20260908-001.bin"), ".bin is a log");
+    check(!log_names::isLog("/logs/notes.txt"), "other extensions are not logs");
+    check(!log_names::isLog("csv"), "too short to carry the extension");
+    check(!log_names::isLog(nullptr), "null is not a log");
+
     printf("buffer sizing\n");
     check(strlen("20260908-999.csv") + 1 <= log_names::NAME_BUF_LEN, "NAME_BUF_LEN fits the grammar");
 

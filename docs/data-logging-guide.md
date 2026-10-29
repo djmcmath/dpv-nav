@@ -69,9 +69,13 @@ python tools/decode_binlog.py 20261011-003.bin     # writes 20261011-003.csv
 
 The CSV has the columns the old HIGH log had, so existing scripts
 (`tools/circle_audit.py`, `tools/mag_temp_fit.py`) read it unchanged. **Binary logs
-never upload** — neither automatically nor from the `tern.local` button — because
-the server reads CSV only. To put a MID dive on Dive Map, decode it and upload the
-CSV by hand. `.csv` and `.bin` share one sequence number per date.
+upload like CSV ones** (since 0.7.23), automatically and from the `tern.local`
+button. Dive Map's track processor decodes them itself, with a copy of
+`decode_binlog.py`, and keeps the magnetometer, accel, gyro and attitude columns in
+the assembled and corrected dive tracks. A record-layout change has to land in
+`log_record.h`, `tools/decode_binlog.py` *and* `dive-map/track-processor/tracklib/binlog.py`,
+and dive-map has to deploy before the firmware that writes it.
+`.csv` and `.bin` share one sequence number per date.
 
 **Nothing prunes while a log is open.** `cleanupOldLogs()` runs at boot only, and
 only until 32 KiB is free, so the space a long log needs has to be free before it

@@ -11,6 +11,13 @@
 > for the replacement — collect honestly, grade for real server-side, show gaps on the
 > web. Left in place below for the diagnostic history (why each on-device attempt
 > failed) — genuinely useful context, not a live plan.
+>
+> **Revisited (2026-11-05).** A replay of five real baseline uploads found the pass-2
+> handoff was probably fighting a bad bias as well as filter lag: the min/max bias was
+> 15–25 µT off until the last third of a full tumble. A sphere fit on the same samples is
+> within 1–3 µT after 50–75 samples. A live baseline grid built on that, binned the way
+> gap-fill bins, is planned in [baseline-live-grid-plan.md](./baseline-live-grid-plan.md).
+> See Status below.
 
 Companion to [calibration-guide.md](./calibration-guide.md) (the on-device procedure) and
 [cloud-calibration-plan.md](./cloud-calibration-plan.md) (the WiFi upload/fit round-trip).
@@ -84,7 +91,7 @@ heading from an uncalibrated magnetometer. That's a data problem, not a display 
 genuinely not known yet. Fix the data, and the original grid — which was never actually
 broken in shape, only in what it was fed — works again.
 
-## The two-pass design (current)
+## The two-pass design (retired 2026-07-25)
 
 **Pass 1 — ROUGH_SCAN.** No grid. The diver tumbles the unit with no spatial promises at
 all — just three things that can't lie because they don't claim any orientation
@@ -138,9 +145,10 @@ is baseline-only.
 
 ## Risks & open questions
 
-- ~~**Not yet verified on hardware.**~~ **Verified, repeatedly.** The two-pass flow has
-  been the normal baseline path on real hardware since 2026-08; the reference run of
-  2026-09-18 scored 1.2% baseline and a final under 1° on-unit / 1.6° on the website.
+- ~~**Not yet verified on hardware.**~~ **Tested on hardware 2026-07-25 and failed** (see
+  the note at the top). The 2026-09-18 reference run (1.2% baseline, under 1° on-unit /
+  1.6° on the website) used the flow that replaced it: a ROUGH_SCAN-only baseline, then
+  gap-fill. An earlier edit credited that run to this design.
 - **Rough bias is hard-iron only.** No soft-iron correction from ROUGH_SCAN — deliberate,
   to keep the bootstrap cheap and because hard-iron dominates uncorrected heading error.
   If COLLECT's heading still isn't good enough after this, a fuller on-device
@@ -169,8 +177,23 @@ is baseline-only.
 
 ## Status
 
-**Shipped and in routine use.** Implemented on both `nav` and `display` PlatformIO
-environments, flashed, and exercised as the standard baseline-cal path on real hardware.
-The Risks list above has been updated to mark which of its original open questions have
-since closed; the two constants (`MAG_CAL_ROUGH_SCAN_MIN_SAMPLES`,
-`MAG_CAL_ROUGH_SCAN_EXPECTED_RANGE`) and the axis-bar labeling remain genuinely open.
+**Retired for baseline.** Pass 1 is all that's left of this design. What ships:
+
+- **Baseline stays in ROUGH_SCAN for the whole session.** `magBinCalBegin(BASELINE)`
+  starts there and never hands off. `magBinCalAdvanceToCollect()` and
+  `ADVANCE_BASELINE_PASS` were removed. BTN2 now sends `FINISH_BASELINE_COLLECTION`
+  (`magBinCalFinishBaseline()`), and the CSV uploads for the real fit and coverage grade.
+  The screen (`showBaselineRoughScan()`) is the X/Y/Z bars, the sample count and the 2-D
+  fit readout. In practice the diver ignores it and just tumbles.
+- **The grid lives in gap-fill.** Once the baseline is graded, a gap-fill session takes
+  the server's target map. It bins each sample from that sample's own mag + accel
+  (`mag_orient::binIndexFor`), with no AHRS filter in the loop. That's the grid divers
+  actually steer by.
+- **Mounted still starts directly in COLLECT.**
+
+The 2026-11-05 replay (`dive-map/calibration-processor/tools/baseline_bootstrap_replay.py`)
+revisits a live baseline grid: an in-session sphere fit plus gap-fill's binning, so
+neither cause of the 2026-07-25 failure is present. See
+[baseline-live-grid-plan.md](./baseline-live-grid-plan.md). Until that ships, the two
+constants (`MAG_CAL_ROUGH_SCAN_MIN_SAMPLES`, `MAG_CAL_ROUGH_SCAN_EXPECTED_RANGE`) and
+the axis-bar labeling are still open (see `docs/backlog.md`).

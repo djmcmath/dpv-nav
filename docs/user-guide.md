@@ -29,7 +29,7 @@ Gyro and accel calibrations are started automatically on first boot if their fil
 
 Device **off** the DPV, rotated through every orientation. See [calibration-guide.md](calibration-guide.md#running-baseline-calibration) for the full procedure.
 
-Baseline shows axis-range bars and live fit stats, not a grid. (A live grid during a *first* baseline pass turned out not to be trustworthy; see [calibration-guide.md](calibration-guide.md#running-baseline-calibration).) Rotate through all orientations until the bars fill and the stats look stable, then press **BTN2** yourself to declare it done. It doesn't finish on its own.
+Baseline starts on a bars screen that says **Finding north...**. Tumble the unit every way, not just one spin. After about 5–10 seconds of tumbling, the unit has fitted enough of the field to know roughly which way is north, and the screen switches to the same coverage grid and roll widget **Fill gaps** uses. Every cell is a target: red is empty, yellow has some samples, green is done (all four rolls). Steer into the red and yellow cells. When you're done, press **BTN2** yourself; it doesn't finish on its own. The top and bottom rows are as hard to aim as they are in gap fill, so don't chase them to the last cell. If the grid never appears, keep going: you're on the old bars-only screen, and the upload and grading work exactly as before. See [calibration-guide.md](calibration-guide.md#running-baseline-calibration).
 
 General note: I've found that a best process here looks like:
 - Hold the unit in one hand, by the end, pointed straight down.  Raise it slowly through level to straight up.  Rotate ~15-20deg.  Lower the unit slowly.  Complete a full circle.

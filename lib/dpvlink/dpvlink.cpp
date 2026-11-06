@@ -467,7 +467,11 @@ size_t calProgressPacketToBytes(const CalProgressPacket& pkt, char* buf, size_t 
     // caller already treats an over-long packet as "skip this frame" (this
     // function returns 0), so the failure mode is a missed 2 Hz update, not
     // corruption.
-    if (pkt.phase == (uint8_t)CalPhase::GAP_FILL && pkt.has_targets) {
+    // The baseline grid (BASELINE_GRID) has no target map -- every cell is
+    // its target -- but carries the same roll breakdown and finished map.
+    const bool gapFillTargets = pkt.phase == (uint8_t)CalPhase::GAP_FILL && pkt.has_targets;
+    const bool baselineGrid   = pkt.phase == (uint8_t)CalPhase::BASELINE_GRID;
+    if (gapFillTargets) {
         char tg[31];
         for (int b = 0; b < 15; b++) {
             uint8_t packed = 0;
@@ -480,11 +484,14 @@ size_t calProgressPacketToBytes(const CalProgressPacket& pkt, char* buf, size_t 
         }
         tg[30] = '\0';
         doc["tg"] = tg;
+    }
+
+    if (gapFillTargets || baselineGrid) {
 
         // Roll breakdown for the currently-highlighted cell only (4 counts +
         // 4 statuses + 1 sector index) -- cheap because it's one cell, not
-        // the full 60-cell grid. Same guard as "tg" above: no target map, no
-        // point sending a breakdown for a cell nothing has flagged.
+        // the full 60-cell grid. In gap-fill, no target map means no point
+        // sending a breakdown for a cell nothing has flagged.
         JsonArray rc = doc["rc"].to<JsonArray>();
         JsonArray rt = doc["rt"].to<JsonArray>();
         for (int k = 0; k < 4; k++) {
@@ -600,7 +607,8 @@ bool bytesToCalProgressPacket(const char* buf, size_t len, CalProgressPacket& ou
     memset(out.current_bin_roll_counts, 0, sizeof(out.current_bin_roll_counts));
     memset(out.current_bin_roll_targeted, 0, sizeof(out.current_bin_roll_targeted));
     out.current_roll_sector = -1;
-    if (out.has_targets) {
+    // The baseline grid sends the breakdown with no target map (see encoder).
+    if (out.has_targets || out.phase == (uint8_t)CalPhase::BASELINE_GRID) {
         JsonArray rc = doc["rc"];
         JsonArray rt = doc["rt"];
         for (int k = 0; k < 4; k++) {

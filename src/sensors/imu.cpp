@@ -6,6 +6,7 @@
 #include <Arduino.h>
 #include "imu.h"
 #include "../util/mag_cal_orient.h"
+#include "../util/baseline_boot.h"
 #include "../util/mounted_dwell.h"
 #include <math.h>
 #include "../config.h"
@@ -608,8 +609,8 @@ static bool magFit2DSolve() {
 // Maximum total samples we ever store across all bins
 static constexpr int BIN_CAL_MAX_SAMPLES = 60 * MAG_CAL_BIN_GREEN_THRESHOLD * 2;  // 2160
 
-// Accel and gyro are stored as scaled int16, not float: 22 bytes a sample
-// against 32, which is 21 KB less of the heap this buffer has starved before
+// Accel and gyro are stored as scaled int16, not float: 24 bytes a sample
+// against 34, which is 21 KB less of the heap this buffer has starved before
 // (see magBinCalFreeSamples). The steps are 0.12 mg and 0.057 deg/s, both
 // well under the sensors' own noise, and the CSV is written back out in g and
 // rad/s exactly as before.
@@ -624,6 +625,13 @@ struct BinCalSample {
     int16_t temp_centi_c;   // mag die temperature, 0.01 degC; BIN_CAL_NO_TEMP if never read
     uint8_t tcomp;          // 1 if thermal compensation was applied to x/y/z
     uint8_t dwell;          // mounted: 1-based dwell this sample belongs to; 0 otherwise
+    // The cell and roll sector the device showed for this sample when it
+    // accepted it, -1 if it had none (mounted, or baseline before the
+    // bootstrap locked). Never rewritten by a re-bin: it records what the
+    // diver saw, so an uploaded session can be scored against the server's
+    // binning without any Serial access (docs/baseline-live-grid-plan.md).
+    int8_t  dev_bin;
+    int8_t  dev_roll;
 };
 
 static inline int16_t binCalScale(float v, float lsbPerUnit) {
@@ -651,7 +659,15 @@ static BinCalSample makeBinCalSample(const Vec3i16& rawMag, const Vec3f& accelCa
                      ? binCalScale(g_magTemp_c, 100.0f) : BIN_CAL_NO_TEMP;
     s.tcomp = (g_magTempCompOn && g_magTempSeen && scaleReady(g_mag_lsb_per_uT)) ? 1 : 0;
     s.dwell = dwell;
+    s.dev_bin  = -1;
+    s.dev_roll = -1;
     return s;
+}
+
+static inline void binCalSampleAccel(const BinCalSample& s, float out[3]) {
+    out[0] = s.ax / BIN_CAL_ACCEL_LSB_PER_G;
+    out[1] = s.ay / BIN_CAL_ACCEL_LSB_PER_G;
+    out[2] = s.az / BIN_CAL_ACCEL_LSB_PER_G;
 }
 
 static bool          g_binCalActive    = false;
@@ -750,7 +766,7 @@ static BinCalSample g_binLastSample[60] = {};
 static bool         g_binHasSample[60]  = {};
 
 // ---------------------------------------------------------------------------
-// Baseline cal: ROUGH_SCAN-only, no live grid (retired two-pass design).
+// Baseline cal: ROUGH_SCAN, then BASELINE_GRID once the bootstrap locks.
 //
 // Three prior spikes tried to make a *live* grid trustworthy pre-calibration:
 // (1) binning on the raw magnetometer vector against a Fibonacci lattice
@@ -762,20 +778,21 @@ static bool         g_binHasSample[60]  = {};
 // existing Mahony/AHRS pipeline, then COLLECT resumes the original grid) —
 // see docs/baseline-cal-two-pass.md for the full diagnostic history. On
 // hardware, (3) still failed: no correlation between physical orientation
-// and the highlighted box, consistent with AHRS filter lag/hysteresis under
-// fast rotation, not a mapping bug.
+// and the highlighted box. Filter lag was blamed; a 2026-11-05 replay found
+// its min/max bias was also 15-25 uT off for most of a tumble.
 //
-// Current design (divemap/docs/architecture/baseline-cal-coverage-feedback-plan.md):
-// stop trying to predict/display completion live. Baseline stays in
-// ROUGH_SCAN for its entire session — honest per-axis range bars, sample
-// count, live fit stats, no spatial promise. The diver ends the session
-// themselves (magBinCalFinishBaseline) once it feels sufficient; the 9-axis
-// CSV (mag + accel + gyro) uploads for real grading and coverage-gap
-// feedback on the server, where a trustworthy heading can be computed
-// *after* a real fit exists instead of needing one to already exist.
+// From 2026-07-25 baseline was ROUGH_SCAN for the whole session: per-axis
+// bars, no spatial promise, real grading on the server. Since 2026-11-06
+// (docs/baseline-live-grid-plan.md) a sphere fit over the stored samples
+// (util/baseline_boot.h) replaces both failed ingredients: once it locks,
+// baseline moves to BASELINE_GRID and bins each sample the way gap-fill
+// does -- per sample, from mag + accel, no filter -- against the in-session
+// bias. Upload and server grading are unchanged.
 // ---------------------------------------------------------------------------
 
-enum class BinCalSubPhase : uint8_t { ROUGH_SCAN, COLLECT, GAP_FILL };
+// BASELINE_GRID: baseline after the in-session bootstrap has locked (see
+// util/baseline_boot.h). Same collection, now with gap-fill's grid.
+enum class BinCalSubPhase : uint8_t { ROUGH_SCAN, COLLECT, GAP_FILL, BASELINE_GRID };
 static BinCalSubPhase g_binCalSubPhase = BinCalSubPhase::COLLECT;
 
 // Running min/max per axis — tracked during baseline ROUGH_SCAN, purely to
@@ -785,6 +802,27 @@ static BinCalSubPhase g_binCalSubPhase = BinCalSubPhase::COLLECT;
 static int16_t g_roughMin[3];
 static int16_t g_roughMax[3];
 static int     g_roughScanSampleCount = 0;
+
+// Baseline only: the in-session bootstrap (util/baseline_boot.h). It reads
+// the stored samples back through this adapter -- the stored, quantised accel,
+// so a re-bin and the live classification of the same sample cannot differ,
+// and the uploaded CSV replays to exactly what the unit showed.
+class BinCalSampleSource : public baseline_boot::SampleSource {
+public:
+    int count() const override { return g_binSampleCount; }
+    void get(int i, int16_t mag[3], float accel[3]) const override {
+        const BinCalSample& s = g_binSamples[i];
+        mag[0] = s.x;  mag[1] = s.y;  mag[2] = s.z;
+        binCalSampleAccel(s, accel);
+    }
+};
+static BinCalSampleSource      g_binSampleSource;
+static baseline_boot::Session  g_boot;
+
+// Baseline only: the last stored sample, for exact-duplicate rejection (the
+// mag ODR is slower than the loop, so consecutive reads repeat).
+static BinCalSample g_baselineLast{};
+static bool         g_hasBaselineLast = false;
 
 // Baseline only: set by magBinCalFinishBaseline() when the diver declares the
 // session done, or auto-set by magBinCalTick() when the sample buffer fills
@@ -854,6 +892,8 @@ bool magBinCalBegin(BinCalMode mode, const uint8_t* targets60,
     g_roughScanSampleCount = 0;
     g_baselineUserDone = false;
     g_baselineMaxSamplesReached = false;
+    g_boot.reset();
+    g_hasBaselineLast = false;
 
     g_binSamples = (BinCalSample*)malloc(BIN_CAL_MAX_SAMPLES * sizeof(BinCalSample));
     if (!g_binSamples) {
@@ -887,6 +927,101 @@ bool magBinCalBegin(BinCalMode mode, const uint8_t* targets60,
     return true;
 }
 
+// Copies the bootstrap's per-(cell, roll) counts into the arrays the progress
+// packet, binRollSatisfied() and the roll widget already read, so the baseline
+// grid is coloured by exactly the predicate gap-fill uses.
+static void syncBaselineCounts() {
+    for (int b = 0; b < MAG_CAL_BASELINE_BINS; b++) {
+        int sum = 0;
+        for (int k = 0; k < MAG_CAL_ROLL_SECTORS; k++) {
+            const uint16_t c = g_boot.count(b, k);
+            g_binRollCounts[b][k] = (uint8_t)(c > 255 ? 255 : c);
+            sum += c;
+        }
+        g_binCounts[b] = (uint8_t)(sum > 255 ? 255 : sum);
+    }
+}
+
+// Baseline, both sub-phases. Before the bootstrap locks this is the old
+// ROUGH_SCAN: every non-duplicate sample stored, bars from min/max. Once it
+// locks (util/baseline_boot.h) each sample is binned the way gap-fill bins,
+// against the in-session bias, and a (cell, roll) at its ceiling stops
+// accepting. The refit cadence, lock and re-bins all live in the Session.
+static bool baselineTick(const Vec3i16& rawMagSensor, const Vec3f& accelCal, const Vec3f& gyroCal) {
+    if (rawMagSensor.x < g_roughMin[0]) g_roughMin[0] = rawMagSensor.x;
+    if (rawMagSensor.y < g_roughMin[1]) g_roughMin[1] = rawMagSensor.y;
+    if (rawMagSensor.z < g_roughMin[2]) g_roughMin[2] = rawMagSensor.z;
+    if (rawMagSensor.x > g_roughMax[0]) g_roughMax[0] = rawMagSensor.x;
+    if (rawMagSensor.y > g_roughMax[1]) g_roughMax[1] = rawMagSensor.y;
+    if (rawMagSensor.z > g_roughMax[2]) g_roughMax[2] = rawMagSensor.z;
+
+    // Classify from the sample as it will be stored (quantised accel), so the
+    // live cell and any later re-bin of this sample agree exactly.
+    BinCalSample s = makeBinCalSample(rawMagSensor, accelCal, gyroCal, 0);
+    const int16_t mag[3] = { s.x, s.y, s.z };
+    float acc[3];
+    binCalSampleAccel(s, acc);
+    mag_orient::SampleOrient o;
+    const bool binned = g_boot.classify(mag, acc, o);
+    if (binned) {
+        // Tracked every tick, accepted or not: the highlight and the roll
+        // widget follow the unit, not just the samples kept.
+        g_lastPitchDeg    = o.pitchDeg;
+        g_lastHdgDeg      = o.headingDeg;
+        g_lastRollDeg     = o.rollDeg;
+        g_lastComputedBin = o.bin;
+        g_lastRollSector  = o.rollSector;
+    } else {
+        g_lastComputedBin = -1;
+        g_lastRollSector  = -1;
+    }
+
+    if (g_hasBaselineLast && g_baselineLast.x == s.x && g_baselineLast.y == s.y &&
+        g_baselineLast.z == s.z) {
+        return false;
+    }
+    if (g_binSampleCount >= BIN_CAL_MAX_SAMPLES) {
+        // Buffer's full and the diver hasn't pressed BTN2 -- auto-finish
+        // rather than silently discarding samples forever. Without this,
+        // the sample count just stops climbing with no indication why.
+        if (!g_baselineUserDone) {
+            g_baselineUserDone          = true;
+            g_baselineMaxSamplesReached = true;
+            Serial.println("[BIN_CAL] Sample buffer full -- auto-finishing baseline collection");
+        }
+        return false;
+    }
+    if (binned && !g_boot.accepts(o)) return false;
+
+    s.dev_bin  = binned ? (int8_t)o.bin : (int8_t)-1;
+    s.dev_roll = binned ? (int8_t)o.rollSector : (int8_t)-1;
+    g_binSamples[g_binSampleCount++] = s;
+    g_baselineLast    = s;
+    g_hasBaselineLast = true;
+    g_roughScanSampleCount++;
+    magFit2DAdd(rawMagSensor);
+
+    const float lsbPerUt = scaleReady(g_mag_lsb_per_uT) ? g_mag_lsb_per_uT : 68.42f;
+    const uint32_t t0 = micros();
+    const baseline_boot::Event ev = g_boot.onStored(g_binSampleSource, binned ? &o : nullptr, lsbPerUt);
+    const uint32_t dt = micros() - t0;
+    if (g_binSampleCount % MAG_CAL_BOOT_REFIT_EVERY == 0) {
+        const baseline_boot::SphereFit& f = g_boot.lastFit();
+        Serial.printf("[BIN_CAL] Refit at %d: bias (%.0f, %.0f, %.0f) r %.1f uT spread %.3f, %lu us\n",
+                      g_binSampleCount, (double)f.bias[0], (double)f.bias[1], (double)f.bias[2],
+                      (double)(f.radius / lsbPerUt), (double)f.spread, (unsigned long)dt);
+    }
+    if (ev == baseline_boot::Event::LOCKED) {
+        g_binCalSubPhase = BinCalSubPhase::BASELINE_GRID;
+        Serial.printf("[BIN_CAL] Bootstrap LOCKED at %d samples; grid on\n", g_boot.lockN());
+    } else if (ev == baseline_boot::Event::REBIN) {
+        Serial.printf("[BIN_CAL] Bootstrap moved past %.1f uT: re-binned all %d samples (re-bin #%d)\n",
+                      (double)MAG_CAL_BOOT_REBIN_UT, g_binSampleCount, g_boot.rebins());
+    }
+    if (binned || ev != baseline_boot::Event::NONE) syncBaselineCounts();
+    return true;
+}
+
 bool magBinCalTick(float pitch_deg, float heading_deg, const Vec3i16& rawMagSensor,
                     const Vec3f& accelCal, const Vec3f& gyroCal) {
     if (!g_binCalActive || !g_binSamples) return false;
@@ -894,44 +1029,9 @@ bool magBinCalTick(float pitch_deg, float heading_deg, const Vec3i16& rawMagSens
     g_lastPitchDeg = pitch_deg;
     g_lastHdgDeg   = heading_deg;
 
-    if (g_binCalSubPhase == BinCalSubPhase::ROUGH_SCAN) {
-        g_lastComputedBin = -1;  // no grid in this phase
-
-        if (rawMagSensor.x < g_roughMin[0]) g_roughMin[0] = rawMagSensor.x;
-        if (rawMagSensor.y < g_roughMin[1]) g_roughMin[1] = rawMagSensor.y;
-        if (rawMagSensor.z < g_roughMin[2]) g_roughMin[2] = rawMagSensor.z;
-        if (rawMagSensor.x > g_roughMax[0]) g_roughMax[0] = rawMagSensor.x;
-        if (rawMagSensor.y > g_roughMax[1]) g_roughMax[1] = rawMagSensor.y;
-        if (rawMagSensor.z > g_roughMax[2]) g_roughMax[2] = rawMagSensor.z;
-
-        // Exact-duplicate rejection against the single most recent sample —
-        // there's no per-bin history in this phase, just one running "last".
-        static BinCalSample s_lastRough{};
-        static bool         s_hasLastRough = false;
-        if (s_hasLastRough && s_lastRough.x == rawMagSensor.x &&
-            s_lastRough.y == rawMagSensor.y && s_lastRough.z == rawMagSensor.z) {
-            return false;
-        }
-        if (g_binSampleCount >= BIN_CAL_MAX_SAMPLES) {
-            // Buffer's full and the diver hasn't pressed BTN2 -- auto-finish
-            // rather than silently discarding samples forever. Without this,
-            // the sample count just stops climbing with no indication why.
-            if (!g_baselineUserDone) {
-                g_baselineUserDone         = true;
-                g_baselineMaxSamplesReached = true;
-                Serial.println("[BIN_CAL] Sample buffer full -- auto-finishing baseline collection");
-            }
-            return false;
-        }
-
-        BinCalSample s = makeBinCalSample(rawMagSensor, accelCal, gyroCal, 0);
-        g_binSamples[g_binSampleCount++] = s;
-        s_lastRough    = s;
-        s_hasLastRough = true;
-        g_roughScanSampleCount++;
-
-        magFit2DAdd(rawMagSensor);
-        return true;
+    if (g_binCalSubPhase == BinCalSubPhase::ROUGH_SCAN ||
+        g_binCalSubPhase == BinCalSubPhase::BASELINE_GRID) {
+        return baselineTick(rawMagSensor, accelCal, gyroCal);
     }
 
     if (g_binCalSubPhase == BinCalSubPhase::GAP_FILL) {
@@ -969,13 +1069,13 @@ bool magBinCalTick(float pitch_deg, float heading_deg, const Vec3i16& rawMagSens
         const float myCal = bc.softIron[1][0]*xc + bc.softIron[1][1]*yc + bc.softIron[1][2]*zc;
         const float mzCal = bc.softIron[2][0]*xc + bc.softIron[2][1]*yc + bc.softIron[2][2]*zc;
 
-        float algPitch = 0.0f, algHdg = 0.0f;
-        mag_orient::reconstructOrientation(mxCal, myCal, mzCal,
-                                           accelCal.x, accelCal.y, accelCal.z,
-                                           algPitch, algHdg);
-        const int gbin = mag_orient::binIndex(algPitch, algHdg);
-        const float algRoll = mag_orient::reconstructRoll(accelCal.x, accelCal.y, accelCal.z);
-        const int rollSector = mag_orient::rollSector(algRoll);
+        // One orientation chain for every live grid: the baseline grid bins
+        // through this same helper (util/baseline_boot.cpp).
+        const mag_orient::SampleOrient so = mag_orient::orientSample(
+            mxCal, myCal, mzCal, accelCal.x, accelCal.y, accelCal.z);
+        const float algPitch = so.pitchDeg, algHdg = so.headingDeg, algRoll = so.rollDeg;
+        const int gbin = so.bin;
+        const int rollSector = so.rollSector;
 
         // Show the diver the orientation the *grid* is using, not the AHRS's.
         // If these disagree the grid is still right, and a readout that
@@ -1020,6 +1120,8 @@ bool magBinCalTick(float pitch_deg, float heading_deg, const Vec3i16& rawMagSens
         if (g_binSampleCount >= BIN_CAL_MAX_SAMPLES) return false;
 
         BinCalSample s = makeBinCalSample(rawMagSensor, accelCal, gyroCal, 0);
+        s.dev_bin  = (int8_t)gbin;
+        s.dev_roll = (int8_t)rollSector;
         g_binSamples[g_binSampleCount++] = s;
         g_binLastSample[gbin] = s;
         g_binHasSample[gbin]  = true;
@@ -1075,16 +1177,19 @@ bool magBinCalTick(float pitch_deg, float heading_deg, const Vec3i16& rawMagSens
 
 bool magBinCalIsActive() { return g_binCalActive; }
 
+bool magBinCalBaselineGridLive() {
+    return g_binCalActive && g_binCalSubPhase == BinCalSubPhase::BASELINE_GRID;
+}
+
 bool magBinCalFinishBaseline() {
     if (!g_binCalActive || binCalIsMounted()) return false;
 
-    // Gap-fill counts differently and has a lower floor: it patches a handful
-    // of cells, so a legitimately complete session is small. Its samples land
-    // in g_binSampleCount (binned), not g_roughScanSampleCount (which only
-    // ROUGH_SCAN increments) -- reading the wrong counter here would make
-    // "done" permanently unavailable in gap-fill.
+    // Gap-fill has a lower floor: it patches a handful of cells, so a
+    // legitimately complete session is small. Both count every stored sample
+    // (g_binSampleCount); baseline's ROUGH_SCAN-only counter would also do
+    // before the live grid existed, but not after it locks.
     const bool isGapFill = (g_binCalMode == BinCalMode::GAP_FILL);
-    const int  have = isGapFill ? g_binSampleCount : g_roughScanSampleCount;
+    const int  have = g_binSampleCount;
     const int  need = isGapFill ? MAG_CAL_GAPFILL_MIN_SAMPLES
                                 : MAG_CAL_ROUGH_SCAN_MIN_SAMPLES;
     if (have < need) {
@@ -1181,7 +1286,8 @@ static void fillLiveOrient(PktT& pkt) {
         pkt.capture_state = (uint8_t)CalDwellState::OUT_OF_WINDOW;
     }
 
-    if (g_binCalSubPhase == BinCalSubPhase::GAP_FILL && pkt.current_bin >= 0) {
+    if ((g_binCalSubPhase == BinCalSubPhase::GAP_FILL ||
+         g_binCalSubPhase == BinCalSubPhase::BASELINE_GRID) && pkt.current_bin >= 0) {
         const int bin = pkt.current_bin;
         for (int k = 0; k < MAG_CAL_ROLL_SECTORS; k++) {
             const uint8_t cnt = g_binRollCounts[bin][k];
@@ -1202,9 +1308,10 @@ void magBinCalGetOrient(CalOrientPacket& pkt) {
 
 void magBinCalGetProgress(CalProgressPacket& pkt) {
     pkt.cal_type   = binCalIsMounted() ? (uint8_t)CalType::MOUNTED : (uint8_t)CalType::BASELINE;
-    pkt.phase      = (g_binCalSubPhase == BinCalSubPhase::ROUGH_SCAN) ? (uint8_t)CalPhase::ROUGH_SCAN
-                   : (g_binCalSubPhase == BinCalSubPhase::GAP_FILL)   ? (uint8_t)CalPhase::GAP_FILL
-                                                                      : (uint8_t)CalPhase::COLLECT;
+    pkt.phase      = (g_binCalSubPhase == BinCalSubPhase::ROUGH_SCAN)    ? (uint8_t)CalPhase::ROUGH_SCAN
+                   : (g_binCalSubPhase == BinCalSubPhase::GAP_FILL)      ? (uint8_t)CalPhase::GAP_FILL
+                   : (g_binCalSubPhase == BinCalSubPhase::BASELINE_GRID) ? (uint8_t)CalPhase::BASELINE_GRID
+                                                                         : (uint8_t)CalPhase::COLLECT;
     pkt.bins_total = (uint8_t)g_binCalBinCount;
     pkt.complete   = magBinCalIsComplete();
     pkt.sample_count = (uint16_t)g_binSampleCount;
@@ -1214,12 +1321,18 @@ void magBinCalGetProgress(CalProgressPacket& pkt) {
     // that's what the X/Y readout has to count -- against MAG_CAL_BIN_GREEN_
     // THRESHOLD, a session that finished every target would still read 0/60.
     const bool gapFill = (g_binCalSubPhase == BinCalSubPhase::GAP_FILL);
+    // The baseline grid treats every cell as a target and judges it with the
+    // same binRollSatisfied() gap-fill does (no server roll targets are loaded
+    // in baseline, so that is this session's counts alone).
+    const bool baselineGrid = (g_binCalSubPhase == BinCalSubPhase::BASELINE_GRID);
     uint8_t green = 0;
     for (int i = 0; i < g_binCalBinCount; i++) {
         uint8_t cnt = g_binCounts[i];
         pkt.bin_counts[i] = cnt;
         if (gapFill) {
             if (binIsTargeted(i) && binRollSatisfied(i)) green++;
+        } else if (baselineGrid) {
+            if (binRollSatisfied(i)) green++;
         } else if (cnt >= MAG_CAL_BIN_GREEN_THRESHOLD) {
             green++;
         }
@@ -1248,6 +1361,13 @@ void magBinCalGetProgress(CalProgressPacket& pkt) {
         pkt.has_cell_satisfied = g_binHasTargets;
         for (int i = 0; i < 60; i++) {
             pkt.cell_satisfied[i] = (i < g_binCalBinCount) && binIsTargeted(i) && binRollSatisfied(i);
+        }
+    } else if (baselineGrid) {
+        pkt.has_targets = false;
+        memset(pkt.targets, 0, sizeof(pkt.targets));
+        pkt.has_cell_satisfied = true;
+        for (int i = 0; i < 60; i++) {
+            pkt.cell_satisfied[i] = (i < g_binCalBinCount) && binRollSatisfied(i);
         }
     } else {
         pkt.has_targets = false;
@@ -1287,26 +1407,28 @@ void magBinCalDumpCSV(void* filePtr) {
     // The three trailing columns were added 2026-10-11. Both server loaders
     // (callib/fit.py, callib/coverage.py) read the leading nine by position
     // and ignore the rest, so the order of the first nine is fixed.
-    f.println("mx,my,mz,ax,ay,az,gx,gy,gz,mag_temp_c,tcomp,dwell");
+    // dev_bin/dev_roll (2026-11-06): the cell the device showed for the
+    // sample, -1 if none. Same trailing-column rule.
+    f.println("mx,my,mz,ax,ay,az,gx,gy,gz,mag_temp_c,tcomp,dwell,dev_bin,dev_roll");
     for (int i = 0; i < g_binSampleCount; i++) {
         const BinCalSample& s = g_binSamples[i];
         char temp[12];
         if (s.temp_centi_c == BIN_CAL_NO_TEMP) snprintf(temp, sizeof(temp), "nan");
         else snprintf(temp, sizeof(temp), "%.2f", (double)s.temp_centi_c / 100.0);
-        f.printf("%d,%d,%d,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%s,%u,%u\n",
+        f.printf("%d,%d,%d,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%s,%u,%u,%d,%d\n",
                  s.x, s.y, s.z,
                  (double)(s.ax / BIN_CAL_ACCEL_LSB_PER_G), (double)(s.ay / BIN_CAL_ACCEL_LSB_PER_G),
                  (double)(s.az / BIN_CAL_ACCEL_LSB_PER_G),
                  (double)(s.gx / BIN_CAL_GYRO_LSB_PER_RAD_S), (double)(s.gy / BIN_CAL_GYRO_LSB_PER_RAD_S),
                  (double)(s.gz / BIN_CAL_GYRO_LSB_PER_RAD_S),
-                 temp, (unsigned)s.tcomp, (unsigned)s.dwell);
+                 temp, (unsigned)s.tcomp, (unsigned)s.dwell, (int)s.dev_bin, (int)s.dev_roll);
     }
     Serial.printf("[BIN_CAL] Wrote %d samples to CSV\n", g_binSampleCount);
 }
 
 // Frees only the sample buffer. Split out of magBinCalEnd() because the cloud
 // upload sits between the CSV dump and the end of the cal, and holding the
-// buffer (69,120 bytes when this was found, 47,520 now) across it starves the
+// buffer (69,120 bytes when this was found, 51,840 now) across it starves the
 // WiFi driver -- see the call site in nav_main.cpp.
 void magBinCalFreeSamples() {
     if (g_binSamples) {
@@ -1335,6 +1457,8 @@ void magBinCalEnd() {
     g_roughScanSampleCount = 0;
     g_baselineUserDone = false;
     g_baselineMaxSamplesReached = false;
+    g_boot.reset();
+    g_hasBaselineLast = false;
     g_lastComputedBin = -1;
     g_lastPitchDeg    = 0.0f;
     g_lastHdgDeg      = 0.0f;

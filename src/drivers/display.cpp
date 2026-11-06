@@ -2295,9 +2295,9 @@ void showCloudLinkDone() {
 }
 
 // ---------------------------------------------------------------------------
-// Bin-coverage calibration grid — gap-fill. Baseline no longer reaches this
-// screen at all (see showBaselineRoughScan() below, its only screen for its
-// entire session), and mounted has its own, showMountedCal().
+// Bin-coverage calibration grid — gap-fill, and baseline once its in-session
+// bootstrap has locked (CalPhase::BASELINE_GRID; before that baseline shows
+// showBaselineRoughScan()). Mounted has its own, showMountedCal().
 // Layout (320×240):
 //   y=0..19   — title row
 //   y=20..35  — heading labels (N NE E SE S SW W NW N NE E SE)
@@ -2311,6 +2311,12 @@ void showCalGrid(const CalProgressPacket& pkt, const char* title) {
     // flagged, and the fastest way to break that is two grid renderers with
     // subtly different geometry. One function, one cell layout, one ordering.
     const bool isGapFill = (pkt.phase == (uint8_t)CalPhase::GAP_FILL);
+    // The baseline live grid: every cell is a target, judged by the same
+    // roll-aware "finished" verdict as gap-fill. Both are live grids, sharing
+    // the orientation readout and the roll widget.
+    const bool isBaselineGrid = (pkt.phase == (uint8_t)CalPhase::BASELINE_GRID);
+    const bool isLiveGrid = isGapFill || isBaselineGrid;
+    g_roughScanStaticDrawn = false;  // the bars screen is gone; redraw it if it returns
     const int HDG_COLS   = 12;
     const int ELEV_ROWS  = 5;
     const int GRID_X     = 28;
@@ -2339,10 +2345,10 @@ void showCalGrid(const CalProgressPacket& pkt, const char* title) {
         // labeling all of them previously produced duplicate, incorrect names).
         // The white current-bin highlight provides orientation between cardinals.
         //
-        // These labels are only as good as the live heading estimate behind
-        // them. For baseline, that's COLLECT's rough post-ROUGH_SCAN bias —
-        // better than raw-uncalibrated, but still approximate; see
-        // docs/baseline-cal-two-pass.md.
+        // These labels are magnetic and only as good as the bias behind them:
+        // the installed baseline for gap-fill, the in-session sphere fit for
+        // the baseline grid (within a few degrees of the real fit; see
+        // docs/baseline-live-grid-plan.md).
         const char* hdgLabels[12] = { "N","","","E","","","S","","","W","","" };
         tft.setTextSize(1);
         tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
@@ -2400,6 +2406,12 @@ void showCalGrid(const CalProgressPacket& pkt, const char* title) {
                                                          : (cnt >= doneAt);
                 if (!targeted)              color = 0x1082;       // very dark gray
                 else if (done)              color = COLOR_GREEN;
+                else if (cnt > 0)           color = COLOR_YELLOW;
+                else                        color = COLOR_RED;
+            } else if (isBaselineGrid) {
+                const bool done = pkt.has_cell_satisfied ? pkt.cell_satisfied[binIdx]
+                                                         : (cnt >= MAG_CAL_BIN_GREEN_THRESHOLD);
+                if (done)                   color = COLOR_GREEN;
                 else if (cnt > 0)           color = COLOR_YELLOW;
                 else                        color = COLOR_RED;
             } else {
@@ -2510,6 +2522,8 @@ void showCalGrid(const CalProgressPacket& pkt, const char* title) {
                 }
             }
             snprintf(sbuf, sizeof(sbuf), "%d/%d cells", pkt.bins_green, targetTotal);
+        } else if (isBaselineGrid) {
+            snprintf(sbuf, sizeof(sbuf), "%d/%d cells", pkt.bins_green, pkt.bins_total);
         } else {
             // completion is row-weighted so may finish before all bins green
             snprintf(sbuf, sizeof(sbuf), "%d/%d bins", pkt.bins_green, pkt.bins_total);
@@ -2521,9 +2535,10 @@ void showCalGrid(const CalProgressPacket& pkt, const char* title) {
         // Line 2: fit quality when available, orientation otherwise.
         // Once fit_valid, the heading error estimate is more actionable than
         // the raw orientation readout (which the bin grid already shows visually).
-        if (isGapFill) {
-            // Orientation, always -- in gap-fill the diver is steering toward a
-            // specific cell, so where they're pointing beats a fit statistic.
+        if (isLiveGrid) {
+            // Orientation, always -- in a live grid the diver is steering
+            // toward a specific cell, so where they're pointing beats a fit
+            // statistic.
             // This pitch/heading pair comes from the same algebraic
             // reconstruction that chose the highlighted cell (see
             // util/mag_cal_orient.h), not from the AHRS, so the readout and the
@@ -2592,7 +2607,7 @@ void showCalGrid(const CalProgressPacket& pkt, const char* title) {
 
                 // Live-roll outline on the triangle matching the device's
                 // current attitude -- skipped when current_roll_sector is -1,
-                // which means "not in gap-fill, or the cell is unmappable".
+                // which means "not in a live grid, or the cell is unmappable".
                 //
                 // NOT, despite what this comment used to say, "pointing
                 // straight up/down": reconstructRoll()'s degenerate guard is
@@ -2991,6 +3006,9 @@ void showMountedCal(const CalProgressPacket& pkt) {
 // ---------------------------------------------------------------------------
 void showBaselineRoughScan(const CalProgressPacket& pkt) {
     const int BAR_X = 40, BAR_W = 260, BAR_H = 16;
+    // When the bootstrap locks, this screen hands over to showCalGrid mid-
+    // session; make sure the grid draws its static layout over these bars.
+    g_calGridStaticDrawn = false;
 
     if (!g_roughScanStaticDrawn) {
         tft.fillScreen(COLOR_BLACK);
@@ -3036,25 +3054,24 @@ void showBaselineRoughScan(const CalProgressPacket& pkt) {
     snprintf(sbuf, sizeof(sbuf), "Samples: %u", (unsigned)pkt.sample_count);
     tft.print(sbuf);
 
-    // --- Live fit quality (same reading as COLLECT's grid screen) ---
+    // --- Lock hint ---
+    // This screen is now only the few seconds before the in-session bootstrap
+    // locks and the grid replaces it (docs/baseline-live-grid-plan.md). The
+    // 2-D "Fit:" readout that used to sit here is gone: it settles 20-30 deg
+    // wrong on good data and would read like a grade for the grid. If the
+    // lock never comes (wrong MAG_CAL_EXPECTED_FIELD_UT for this site, or
+    // only spinning about one axis) this stays up, and the session still
+    // uploads for grading exactly as before.
     tft.fillRect(0, 148, 320, 20, COLOR_BLACK);
-    if (pkt.fit_valid) {
-        uint16_t fcol = (pkt.fit_hdg_err_deg < 3.0f) ? COLOR_GREEN
-                      : (pkt.fit_hdg_err_deg < 7.0f) ? COLOR_YELLOW
-                      : COLOR_RED;
-        char fbuf[20];
-        snprintf(fbuf, sizeof(fbuf), "Fit:\xF0%.1f\xF7", pkt.fit_hdg_err_deg);
+    if (!pkt.complete) {
         tft.setTextSize(2);
-        tft.setTextColor(fcol, COLOR_BLACK);
+        tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
         tft.setCursor(4, 150);
-        tft.print(fbuf);
-        if (pkt.fit_delta < 0.5f) {
-            tft.setTextColor(COLOR_GREEN, COLOR_BLACK);
-            tft.print(" OK");
-        } else if (pkt.fit_delta < 2.0f) {
-            tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
-            tft.print("  ~");
-        }
+        tft.print("Finding north...");
+        tft.setTextSize(1);
+        tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+        tft.setCursor(4, 170);
+        tft.print("tumble every way, not just one spin");
     }
 
     // --- Prompt ---

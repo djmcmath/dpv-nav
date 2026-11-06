@@ -265,4 +265,60 @@ anything else.**
 
 ## Status
 
-Planned 2026-11-05. Build on 2026-11-06, hardware test on 2026-11-07.
+**Built 2026-11-06 as `0.7.25-dev.1`** on `feature/baseline-live-grid`. All host
+tests pass, both boards build, and gap-fill's cross-checks are unchanged.
+**Hardware test owed (2026-11-07).** Once it passes, bump to `0.7.25`.
+
+### Where the build deviated from the sketch above
+
+- **A fourth lock gate: direction spread ≥ 0.004.** The host test's horizontal-spin
+  case locked. Rolling the tube about its long axis while pointed north puts the
+  samples on a ring 0.92× the field (the horizontal component is 0.39× at 67° dip),
+  which passes the radius gate and locks ~20 µT off. "Why the radius gate" above
+  understated this as a near-great-circle corner case; it's an ordinary motion. The
+  new gate is the smallest eigenvalue of the mean outer product of the samples' unit
+  directions from the fitted centre:
+  - Perfect rings score 0.000–0.002.
+  - The five real baselines score 0.010–0.094 where they locked.
+  - Synthetic spins with 5° or more of wobble already fit correctly (spread 0.002 for
+    some spin axes, so a few correct-but-flat fits are refused; that only means more
+    tumbling).
+  - The fit's standard error and gravity-direction spread had both failed this test
+    earlier (see above).
+- **Ceiling: 2×, as proposed.** The replay over the five runs:
+
+  | Ceiling | Samples dropped | Server RMS | Heading shift (median / max) |
+  |---|---|---|---|
+  | 1× | 20–30% | unchanged | — / up to 17° |
+  | 2× | 3–11% | unchanged | ≤0.04° / ≤1.6° |
+  | 3× | 0–3% | unchanged | — / ≤0.5° |
+- **Re-binning uses the stored, quantised accel, and so does live binning.** That
+  keeps a re-bin and the live cell of the same sample identical. It's also why the
+  uploaded CSV replays row for row.
+- **The re-bin fires in real data.** It ran once in two of the five runs (e58990ba,
+  76bf0382).
+- **Two link bugs found and fixed:**
+  - The packet decoder read the roll-widget fields only alongside a target map, which
+    the baseline grid never sends. Without the fix, the widget would have blanked at
+    2 Hz.
+  - The 10 Hz orientation packet went out only in mounted and gap-fill. It now also
+    goes out for baseline once locked (`imu::magBinCalBaselineGridLive()`).
+- **Gap-fill also records `dev_bin`/`dev_roll`** in its CSV. It costs nothing and
+  scores the same way.
+- **The rough-scan screen's 2-D "Fit:" line was replaced** by "Finding north…", as
+  planned.
+- **The worst-case BASELINE_GRID packet** (every count 255) is 433 bytes of the 512.
+
+### Running the agreement check after Saturday
+
+Pull the session's CSV and its accepted single-member baseline fit, as described in
+the replay tool's docstring. Then run:
+
+```
+python3 calibration-processor/tools/baseline_bootstrap_replay.py --quiet \
+    --run <upload>.csv <fit>.json saturday
+```
+
+The `RECORDED on the unit` line scores what the diver actually saw against the
+server's cells. It also says whether the model reproduces the unit row for row; any
+row where it doesn't means the firmware and the model have diverged.

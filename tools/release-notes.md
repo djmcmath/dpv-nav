@@ -1,3 +1,4 @@
 - Updates to heading check calibration display
 - Simplified menu, removed unnecessary items
 - MID/HIGH binary logs now upload to Dive Map like LOW CSV logs
+- Baseline cal shows a live coverage grid a few seconds into the tumble, so you can steer into the gaps

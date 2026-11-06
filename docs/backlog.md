@@ -189,7 +189,7 @@ Nothing is lost, but something is unverified, unvalidated, or invisible when it 
 
 Features and UX with a design already thought through.
 
-- [ ] **The baseline tumble gives no coverage indication: build a live grid**
+- [ ] **The baseline tumble gives no coverage indication: build a live grid** *(built, hardware test owed)*
 
   Today's baseline screen (X/Y/Z bars, sample count, 2-D fit readout) is ignored in
   practice. The diver tumbles blind, uploads, then fixes the gaps in gap-fill. After a full
@@ -211,8 +211,12 @@ Features and UX with a design already thought through.
   filter, no min/max, no gyro heading. Server side unchanged. Plan:
   [`docs/baseline-live-grid-plan.md`](./baseline-live-grid-plan.md).
 
-  *Open:* hardware test owed. The replay covers one site; the expected-field radius
-  (~3430 counts, the same on both units) needs a fallback at a new site.
+  *Status:* **built 2026-11-06 as 0.7.25-dev.1**, on `feature/baseline-live-grid`.
+  The host test caught a hole in the planned gate: a spin about a horizontal axis
+  locks ~20 uT off. A direction-spread gate closes it; see the plan's Status section.
+  **Hardware test owed.** The replay covers one site, and the expected field (50.1 uT)
+  needs a better source than a constant at a new site. When it's wrong the grid just
+  never appears.
 
 - [ ] **Polar gap-fill cells can't be aimed at all**
 

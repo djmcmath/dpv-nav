@@ -228,6 +228,10 @@ bool   magBinCalBegin(BinCalMode mode, const uint8_t* targets60 = nullptr,
 bool   magBinCalTick(float pitch_deg, float heading_deg, const Vec3i16& rawMagLogical,
                       const Vec3f& accelCal, const Vec3f& gyroCal);
 bool   magBinCalIsActive();
+// True while baseline's in-session bootstrap has locked and the grid is live
+// (CalPhase::BASELINE_GRID); nav_main uses it to start the 10 Hz orientation
+// packet the grid steers by. False before lock and in every other mode.
+bool   magBinCalBaselineGridLive();
 // Mounted: true when every row is complete. Baseline: true once the diver has called
 // magBinCalFinishBaseline() (no bin/grid concept applies to baseline anymore).
 // Gap-fill: true when every targeted cell has reached its cap, or the diver

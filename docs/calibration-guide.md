@@ -85,25 +85,28 @@ The preferred calibration workflow uses two stages, each producing a JSON file t
 Mounted (and Baseline's `Fill gaps` patch pass) collect raw samples using a
 **bin-aware** approach: the screen shows a heading × elevation grid, and cells turn
 green as they are filled, completing automatically once all required
-cells are green. Baseline's first-time pass instead uses axis-range bars with no grid
-and completes when the diver presses BTN2 — see the note under **Running Baseline
-Calibration** below for why. Either way, the sample CSV is saved to LittleFS once
-collection ends.
+cells are green. Baseline shows the same kind of grid once it has worked out
+roughly where north is, a few seconds in, but completes only when the diver presses
+BTN2 — see **Running Baseline Calibration** below. Either way, the sample CSV is
+saved to LittleFS once collection ends.
 
 ### Running Baseline Calibration
 
-> **Live bin-coverage grid retired for Baseline (2026-07-25).** Six attempts at a
-> trustworthy live grid during a first-ever baseline pass all fought the same
-> chicken-and-egg problem (heading needs a calibration that doesn't exist yet) — see
-> [baseline-cal-two-pass.md](./baseline-cal-two-pass.md) for the failed attempts. The
-> replacement (shipped) collects with simple axis-range bars and live fit stats
-> instead — no grid, no false confidence — then grades coverage for real on the
-> server and shows a coverage heatmap on the Dive Map website. See divemap's
-> [baseline-cal-coverage-feedback-plan.md](../../dive-map/docs/architecture/baseline-cal-coverage-feedback-plan.md).
+> **Baseline has a live grid again (0.7.25).** Six earlier attempts at a live grid
+> during a first-ever baseline pass all fought the same chicken-and-egg problem:
+> heading needs a calibration that doesn't exist yet. See
+> [baseline-cal-two-pass.md](./baseline-cal-two-pass.md). From 2026-07-25 to 0.7.25
+> baseline showed bars only. Now the unit fits a hard-iron sphere to the samples as
+> they arrive. Once that fit passes a lock gate, usually 50–75 samples in, it bins
+> every sample the way gap-fill does: per sample, from mag + accel, no filter. On
+> five real baselines that put 85–90% of samples in the exact cell the server's
+> real fit does, and nearly all the rest in the next cell over. The server still
+> grades the upload; the grid is for steering. See
+> [baseline-live-grid-plan.md](./baseline-live-grid-plan.md).
 
 1. **Remove device from DPV** and take it somewhere with low magnetic interference.
 2. Open menu (BTN1) → **CAL > Baseline**.
-3. The display shows axis-range bars and live fit stats (no grid — see note above). Rotate the device through all orientations — roll, pitch, yaw, and diagonals — until the bars look full and the fit stats look stable.
+3. The display starts on axis-range bars with **Finding north...**. Tumble the device through all orientations — roll, pitch, yaw, and diagonals. A spin about one axis alone never locks: it can't tell where the centre of the field is. Once the fit locks, the display switches to the gap-fill grid and roll widget, with every cell a target. Steer into red and yellow cells. If it never switches, the site's field strength may be outside the lock gate (`MAG_CAL_EXPECTED_FIELD_UT` in `config.h`, 50.1 µT, ±10%); the session still collects and uploads exactly as before.
 4. When you judge coverage good enough, press **BTN2**. The display shows a brief "finishing" screen while the nav device writes `/mag_baseline_samples.csv` to LittleFS.
 5. **If the unit has WiFi connected:** the nav device uploads the CSV, the server fits it and grades coverage, and the result is staged (not yet active). The display shows an accept/reject screen with the quality band and RMS. Accept to install it immediately (hot-reloads on the spot); reject to discard it and keep whatever was active before. The full coverage heatmap and any thin/empty regions are visible afterward on the Dive Map website under Calibration History.
 6. **If the unit has no WiFi:** the display shows an offline notice and no fit happens automatically. The CSV is still saved to LittleFS, so you can fall back to the manual path — download `/mag_baseline_samples.csv` (web interface or LittleFS tools) and run `python tools/mag_calibration.py mag_baseline_samples.csv`, then upload the generated `mag_base.json` to LittleFS yourself.
@@ -186,10 +189,10 @@ flagged as thin or empty on your installed baseline calibration — not a full r
 
 **Procedure:**
 1. Open menu (BTN1) → **CAL > Fill gaps**.
-2. Unlike the regular Baseline pass, this one *does* show a live coverage grid — a
-   good calibration already exists, so orientation can be computed algebraically
-   per-sample without needing the Mahony filter. Rotate toward the flagged cells;
-   the grid fills in as you go.
+2. The grid is the baseline grid's, binned through your installed baseline
+   calibration instead of an in-session fit, and with only the flagged cells as
+   targets. Orientation is computed algebraically per sample, without the Mahony
+   filter. Rotate toward the flagged cells; the grid fills in as you go.
 3. Collection auto-completes once every targeted cell is satisfied. BTN2 also
    finishes early, since a targeted cell can be physically unreachable depending on
    how the device is mounted.

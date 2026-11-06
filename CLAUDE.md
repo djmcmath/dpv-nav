@@ -75,6 +75,7 @@ tools/lognames_test/run.sh   # dive-log filename grammar and age ordering
 tools/logidle_test/run.sh    # log idle gate: when LOW/MID drop to a heartbeat
 tools/logrecord_test/run.sh  # binary MID/HIGH record vs. tools/decode_binlog.py
 tools/statusled_test/run.sh  # nav-board status LED: state priority, heartbeat, "fix logged"
+tools/baseline_boot_test/run.sh  # baseline live grid: lock/re-bin/ceiling vs. the Python model on real baselines
 tools/orient_equiv/          # per-sample orientation vs. the server's port
 ```
 
@@ -140,6 +141,7 @@ src/
 │   ├── speed_cal.cpp/h        # Speed cal k-factor history (LittleFS /speed_cal.json, rolling 6-run average)
 │   ├── motor_cal.cpp/h        # Motor-on heading offset (load /motor_cal.json, single fixed correction)
 │   ├── mounted_dwell.cpp/h    # Mounted cal dwell capture: when a cell may record. Pure C++, host-tested (tools/mounted_dwell_test/)
+│   ├── baseline_boot.cpp/h    # Baseline live grid's in-session bootstrap: sphere refit, lock gate, re-bins, ceiling. Pure C++, host-tested (tools/baseline_boot_test/)
 │   └── mag_cal_orient.cpp/h   # Algebraic per-sample orientation for gap-fill cal — VERBATIM PORT of the server's callib/coverage.py (read its header first: the axis convention is a 180° trap)
 └── types/
     └── types.h                # Core data types (Vec3i16, Vec3f, Calib3, MagCalib, etc.)
@@ -206,9 +208,9 @@ imu::AxisMap imuAxisMap{
 The system supports automatic calibration with persistence to LittleFS (flash storage):
 
 **Magnetometer (two-stage, menu-triggered, cloud-fit):**
-- **Baseline** (CAL > Baseline): Device off DPV, full sphere coverage. No live grid (retired 2026-07-25 after six failed attempts, see [docs/baseline-cal-two-pass.md](docs/baseline-cal-two-pass.md)) — shows axis-range bars + live fit stats instead; diver presses BTN2 when coverage looks good enough (`FINISH_BASELINE_COLLECTION`). Collects samples to `/mag_baseline_samples.csv`.
+- **Baseline** (CAL > Baseline): Device off DPV, full sphere coverage. Starts on axis-range bars (`ROUGH_SCAN`) while [baseline_boot.h](src/util/baseline_boot.h) refits a hard-iron sphere to the stored samples every 25. Once the fit passes the lock gate (N ≥ 50, radius within 10% of `MAG_CAL_EXPECTED_FIELD_UT`, direction spread ≥ 0.004, bias stable to 2 µT), it switches to `BASELINE_GRID`: gap-fill's grid and roll widget, every cell a target, each sample binned through `mag_orient::orientSample` against the in-session bias. The spread gate exists because a spin about a horizontal axis makes a ring that passes the radius gate and locks ~20 µT off. A post-lock bias move past 3 µT re-bins everything, and a (cell, roll) stops accepting at 2× gap-fill's finished threshold. The diver still presses BTN2 to finish (`FINISH_BASELINE_COLLECTION`). The live grid was retired 2026-07-25 after six failed attempts ([docs/baseline-cal-two-pass.md](docs/baseline-cal-two-pass.md)) and brought back in 0.7.25 ([docs/baseline-live-grid-plan.md](docs/baseline-live-grid-plan.md)). Every gate constant is mirrored by dive-map's `calibration-processor/tools/baseline_bootstrap_replay.py`, and `tools/baseline_boot_test/` checks the two agree sample for sample on five real baselines; change one, regenerate the other's reference files. Collects samples to `/mag_baseline_samples.csv`.
 - **Mounted** (CAL > Mounted): Device installed on DPV. A 3×12 grid filled **one dwell per cell**: a cell records only after the unit has sat still inside that row's attitude window ([mounted_dwell.h](src/util/mounted_dwell.h)), because the server's fit takes "down" from the accelerometer and cannot use a sample taken in motion. `showMountedCal()` shows an attitude indicator, a motion bar and a hold bar so the diver can see how close they are. Auto-completes at the whole level row plus six spread cells in each tilted row. Collects samples to `/mag_mounted_samples.csv`. The stillness and attitude limits (`MAG_CAL_DWELL_*` in [config.h](src/config.h)) are deliberately tighter than the server's in `callib/fit.py`; nothing forces the two to agree. See dive-map's [mounted-cal-dwell-plan.md](../dive-map/docs/architecture/mounted-cal-dwell-plan.md).
-- **Every cal CSV row carries `mag_temp_c` and `tcomp`** (was thermal compensation already applied to that row), and mounted rows a `dwell` number. They trail the nine columns the server reads by position — never reorder those nine.
+- **Every cal CSV row carries `mag_temp_c` and `tcomp`** (was thermal compensation already applied to that row), mounted rows a `dwell` number, and (since 0.7.25) `dev_bin`/`dev_roll`: the cell and roll sector the device showed when it accepted the sample, −1 if none, never rewritten by a re-bin. They trail the nine columns the server reads by position — never reorder those nine.
 - **Both stages upload and fit in the cloud automatically** if the unit has WiFi at completion (`cloud::runCalibrationUpload`, same round trip described under Fourier Heading Calibration below): result is staged, not written over the active file, and the display shows an accept/reject screen with quality band + RMS. Accept copies staged → active and hot-reloads immediately.
 - **No WiFi at completion:** display shows an offline notice; the CSV is still saved to LittleFS, so the old manual fallback still works — run `python tools/mag_calibration.py --mode baseline mag_baseline_samples.csv` (or `--mode mounted --base mag_base.json mag_mounted_samples.csv`), then upload the result to LittleFS root.
 - **Filename matters for the manual fallback only** (the cloud path always writes the right name): the firmware only ever reads `/mag_base.json` and `/mag_mount.json` from the root (see [src/util/storage.h](src/util/storage.h)). Do **not** pass `--output` with a different name (e.g. `mag_mounted.json`) unless you rename it to `/mag_mount.json` on upload — otherwise the device silently ignores it and keeps running the previous (stale) calibration. The script warns if the output name won't be read.
@@ -240,7 +242,7 @@ The system supports automatic calibration with persistence to LittleFS (flash st
 **Guided Gap-Fill (`CAL > Fill gaps`):**
 - A *second* baseline pass that patches only the orientation cells the server flagged as thin or empty on the installed baseline cal. Uploads as a `baseline` collection and is combined with the existing one from the website's merge picker.
 - Two hard preconditions, both refused with an on-screen message rather than degraded: a baseline cal must be installed, and a target map must have been synced. Sync happens via `tern.local`'s "Check for updates" button (not a device menu item — the on-device refusal text used to wrongly say `CAL > Check for updates`, fixed) — every click re-syncs the target map, cached at `/cal_targets.json`, in addition to whatever cal files it installs (`cal_sync.cpp`'s `refreshTargets()`, unconditional on both branches of `checkForUpdates()`). A sync failure (e.g. the accepted baseline predates coverage grading) now shows up in the result text on `tern.local` itself instead of only a Serial log line — this used to fail silently and was the actual cause of "Fill gaps" refusing with no obvious explanation.
-- **Unlike baseline cal, this one gets a live grid** — because a good cal already exists, so orientation is computed algebraically per sample by [mag_cal_orient.h](src/util/mag_cal_orient.h) with no Mahony filter in the path. That is what separates it from the six failed attempts at live orientation feedback documented in [docs/baseline-cal-two-pass.md](docs/baseline-cal-two-pass.md) and the SPIKE block in [imu.cpp](src/sensors/imu.cpp).
+- **Its live grid bins on the installed baseline cal** — orientation is computed algebraically per sample by [mag_cal_orient.h](src/util/mag_cal_orient.h) (`orientSample`) with no Mahony filter in the path. That is what separates it from the six failed attempts at live orientation feedback documented in [docs/baseline-cal-two-pass.md](docs/baseline-cal-two-pass.md). Baseline's own grid (0.7.25) uses the same path against an in-session fit instead.
 - Which cells are targets is decided **server-side and never recomputed on the device** — the thin/empty thresholds are still being tuned, and keeping the judgement on the server means retuning them costs a sync, not a reflash.
 - Per-cell acceptance caps (`MAG_CAL_GAPFILL_TARGET_CAP` / `_UNTARGETED_CAP` in [config.h](src/config.h)) keep gap-fill from creating the next over-weighted bin while closing an empty one.
 - Auto-completes when every target is satisfied; BTN2 still finishes early, since a targeted cell can be physically unreachable.
@@ -528,7 +530,7 @@ The display driver uses a 320×240 ST7789 TFT with direct hardware writes via th
 - `showDebug(DebugPacket)` — debug screen: raw sensor values (mag/accel/gyro XYZ, heading, pitch/roll)
 - `showHdgFourierCalPrompt(int step, int total, float targetDeg, float indicatedDeg)` — heading cal step prompt with live heading readout
 - `showHdgFourierCalDone(int nPoints)` — done screen with instructions to run offline fit and upload JSON
-- `showCalGrid(...)` — bin-coverage grid for gap-fill
+- `showCalGrid(...)` — bin-coverage grid for gap-fill and baseline's live grid (`BASELINE_GRID`)
 - `showMountedCal(...)` — mounted cal: grid, attitude indicator, motion and hold bars
 
 ## Critical Conventions
@@ -598,7 +600,7 @@ Calibration timing is configured at the call sites in [nav_main.cpp](src/nav_mai
 - **Boot mag cal (brand-new device)**: if none of mag_base.json/mag_mount.json/mag_cal.json exist, mag runs with an identity (no-op) calibration and `BOOT_MAG_CAL_OK` stays unset — no automatic sweep. The diver runs CAL > Baseline (+ Mounted) from the menu when ready. (`imu::calibrateMagnetometer()` still exists but is no longer called at boot.)
 - **Gyro cal (boot)**: `imu::calibrateGyroscope(gyroCal, 10000)` — 10 sec at rest
 - **Accel cal (boot)**: `imu::calibrateAccelerometer(accelCal, 2500)` — 2.5 sec per orientation (15 sec total)
-- **Baseline (rough-scan)**: axis-range-bar collection ends when the diver presses BTN2 (no fixed time, no bin grid)
+- **Baseline**: bars until the in-session bootstrap locks, then the grid; ends when the diver presses BTN2 (no fixed time). Lock gate and ceiling: `MAG_CAL_BOOT_*` and `MAG_CAL_EXPECTED_FIELD_UT` in [config.h](src/config.h)
 - **Mounted dwell cal**: runs until the level row and both tilted rows are complete (no fixed time); the per-dwell limits are `MAG_CAL_DWELL_*` in [config.h](src/config.h)
 
 To force recalibration, delete the JSON files from LittleFS and reboot. Preferred workflow: CAL > Baseline (off DPV) → cloud-fit + accept on-device (WiFi) or offline fit + upload `mag_base.json` (no WiFi); then CAL > Mounted (on DPV), same either/or.

@@ -172,7 +172,8 @@ int main() {
     }
 
     // 8. Roll fields are absent (and default sensibly) outside GAP_FILL /
-    //    when has_targets is false -- same bandwidth discipline as "tg".
+    //    BASELINE_GRID, and in gap-fill without a target map -- same
+    //    bandwidth discipline as "tg".
     {
         CalProgressPacket tx = basePkt((uint8_t)CalPhase::ROUGH_SCAN);
         tx.has_targets = true;
@@ -399,6 +400,52 @@ int main() {
         bool allClear = true;
         for (int i = 0; i < 60; i++) if (stale.cell_satisfied[i]) allClear = false;
         check(allClear, "absent dn clears the stale finished bits");
+    }
+
+    // --- BASELINE_GRID: the baseline live grid ------------------------------
+    // No target map (every cell is a target), but the same roll breakdown and
+    // finished map as gap-fill. The decoder used to read rc/rt/rs only with a
+    // target map, which would have blanked the roll widget at 2 Hz.
+    {
+        CalProgressPacket tx = basePkt((uint8_t)CalPhase::BASELINE_GRID);
+        tx.has_targets = false;
+        tx.has_cell_satisfied = true;
+        for (int i = 0; i < 60; i++) {
+            tx.bin_counts[i] = 255;               // worst case for size
+            tx.cell_satisfied[i] = (i % 5 == 1);
+        }
+        tx.current_bin_roll_counts[0] = 30;
+        tx.current_bin_roll_counts[1] = 10;
+        tx.current_bin_roll_counts[2] = 4;
+        tx.current_bin_roll_counts[3] = 0;
+        tx.current_bin_roll_targeted[0] = 0;
+        tx.current_bin_roll_targeted[1] = 0;
+        tx.current_bin_roll_targeted[2] = 1;
+        tx.current_bin_roll_targeted[3] = 2;
+        tx.current_roll_sector = 2;
+        tx.fit_valid = true;
+        tx.fit_hdg_err_deg = 12.345f;
+        tx.fit_delta = 1.234f;
+
+        size_t n = calProgressPacketToBytes(tx, buf, sizeof(buf));
+        check(n > 0, "worst-case BASELINE_GRID packet fits the 512-byte link buffer");
+        check(strstr(buf, "\"tg\"") == nullptr, "BASELINE_GRID never sends a target map");
+        check(strstr(buf, "\"dn\"") != nullptr, "BASELINE_GRID sends the finished map");
+
+        CalProgressPacket rx{};
+        check(bytesToCalProgressPacket(buf, n, rx), "BASELINE_GRID packet decodes");
+        check(rx.phase == (uint8_t)CalPhase::BASELINE_GRID, "phase survives");
+        check(!rx.has_targets, "no target map decoded");
+        bool rollOk = rx.current_roll_sector == 2;
+        for (int k = 0; k < 4; k++) {
+            if (rx.current_bin_roll_counts[k] != tx.current_bin_roll_counts[k] ||
+                rx.current_bin_roll_targeted[k] != tx.current_bin_roll_targeted[k]) rollOk = false;
+        }
+        check(rollOk, "roll breakdown round-trips without a target map");
+        bool dnOk = rx.has_cell_satisfied;
+        for (int i = 0; i < 60; i++) if (rx.cell_satisfied[i] != (i % 5 == 1)) dnOk = false;
+        check(dnOk, "finished map round-trips without a target map");
+        printf("  BASELINE_GRID worst-case packet: %zu bytes\n", n);
     }
 
     // --- CalOrientPacket: the 10 Hz attitude-only subset of the above -------

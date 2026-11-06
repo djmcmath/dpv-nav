@@ -168,6 +168,12 @@ enum class CalPhase : uint8_t {
     // src/util/mag_cal_orient.h for why this isn't the seventh failed attempt
     // at live orientation feedback.
     GAP_FILL   = 2,
+    // Baseline after its in-session bootstrap has locked: gap-fill's grid and
+    // roll widget, every cell a target, binned against a sphere fit of the
+    // samples collected so far (src/util/baseline_boot.h,
+    // docs/baseline-live-grid-plan.md). Carries rc/rt/rs/dn like gap-fill,
+    // never tg. Before lock baseline is still ROUGH_SCAN.
+    BASELINE_GRID = 3,
 };
 
 struct CalProgressPacket {

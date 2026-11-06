@@ -170,7 +170,7 @@ See [../docs/mag-temperature-compensation.md](../docs/mag-temperature-compensati
 
 None of these need hardware or PlatformIO -- they host-compile the
 dependency-free parts of the firmware and drive them against the server's own
-Python. Run all three after touching `src/util/mag_cal_orient.cpp`,
+Python. Run them after touching `src/util/mag_cal_orient.cpp`,
 `lib/dpvlink/dpvlink.cpp`, or `divemap/calibration-processor/callib/coverage.py`.
 The first and third need an interpreter with the calibration-processor's
 requirements installed (they import `callib.coverage`, which uses numpy).
@@ -184,6 +184,7 @@ requirements installed (they import `callib.coverage`, which uses numpy).
 | `logrecord_test/run.sh` | packs binary MID/HIGH records with the real `log_record.h`, then checks `decode_binlog.py` reads back exactly what went in -- run it after touching either. |
 | `lognames_test/run.sh` | dive-log filenames parse as `YYYYMMDD-NNN.csv` or `.bin` (one shared sequence, so a second `.bin` cannot take the first one's name), name order equals age order (including the `"001.csv" > "00000000-001.csv"` case a plain string compare gets backwards), and no wipe or mid-day delete lets a new log inherit a deleted log's name -- the property `net/log_sync.cpp` keys uploads on. |
 | `gapfill_chain_check.py` | a cell the *server* flags is the cell the *device* targets -- driven end to end through bin assignment, wire packing, and decode. |
+| `baseline_boot_test/run.sh` | The baseline live grid's bootstrap (`src/util/baseline_boot.h`), replayed over five real baseline uploads in `fixtures/`: lock point, re-bins, stored count, binning bias (to 0.1 uT) and every per-sample cell match dive-map's Python model (`calibration-processor/tools/baseline_bootstrap_replay.py --emit`); the cells shown agree with the server's own binning (85-90% exact, <=0.6% further than adjacent on good runs); a single-axis spin about a vertical or a horizontal axis never locks; a tumble does. Regenerate `fixtures/*.expected.csv` with `--emit` after changing the gate, the ceiling or the binning on either side. |
 
 What they do **not** prove: that the firmware compiles, or that the axis
 conventions match the physical hardware. **They structurally cannot** -- they

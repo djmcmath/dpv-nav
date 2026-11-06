@@ -333,7 +333,9 @@ static void renderWaypointUi();
 // end up staring at a blank grid wondering whether the cal worked.
 static void renderCalProgress(const CalProgressPacket& pkt) {
     if (pkt.phase == (uint8_t)CalPhase::ROUGH_SCAN) {
-        display::showBaselineRoughScan(pkt);   // baseline: no grid, honestly
+        display::showBaselineRoughScan(pkt);   // baseline before the bootstrap locks
+    } else if (pkt.phase == (uint8_t)CalPhase::BASELINE_GRID) {
+        display::showCalGrid(pkt, "BASELINE CAL");  // baseline after it locks
     } else if (pkt.phase == (uint8_t)CalPhase::GAP_FILL) {
         display::showCalGrid(pkt, "FILL GAPS");
     } else if (pkt.cal_type == (uint8_t)CalType::MOUNTED) {
@@ -740,7 +742,7 @@ void loop() {
             }
 
             // Bin cal complete: hold DONE screen for CAL_COMPLETE_HOLD_MS then return.
-            // Baseline never leaves ROUGH_SCAN (no grid to show); mounted uses the grid.
+            // Baseline shows bars until its bootstrap locks, then the grid.
             if (calCompleteHolding) {
                 renderCalProgress(lastCalProgress);
                 if (now - calCompleteShownMs >= CAL_COMPLETE_HOLD_MS) {
@@ -843,8 +845,8 @@ void loop() {
             }
 
             // Active bin cal progress — takes priority over all other rendering.
-            // Baseline (always ROUGH_SCAN) gets its own screen, no grid;
-            // mounted (COLLECT) and gap-fill (GAP_FILL) use the grid.
+            // Baseline: bars (ROUGH_SCAN), then the grid once its bootstrap
+            // locks (BASELINE_GRID). Mounted and gap-fill have their own.
             if (calProgressValid) {
                 renderCalProgress(lastCalProgress);
                 return;
@@ -1397,6 +1399,7 @@ static bool handleModalButtons() {
     // hatch, not the only exit.
     if (calProgressValid &&
         (lastCalProgress.phase == (uint8_t)CalPhase::ROUGH_SCAN ||
+         lastCalProgress.phase == (uint8_t)CalPhase::BASELINE_GRID ||
          lastCalProgress.phase == (uint8_t)CalPhase::GAP_FILL)) {
         if (gBaselineFinishPending) {
             // Already requested -- ignore repeat presses until nav confirms

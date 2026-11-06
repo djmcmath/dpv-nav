@@ -1375,11 +1375,13 @@ void loop() {
 
             // ...and the attitude-only subset at 10 Hz, so the highlighted
             // cell tracks the diver's hand instead of strobing (see
-            // CAL_ORIENT_INTERVAL_MS). Grid modes only: baseline (5) is
-            // ROUGH_SCAN and has no grid to steer, so it would be pure link
-            // traffic. The display ignores these until a CalProgressPacket has
-            // given it a grid to merge them into, so ordering doesn't matter.
-            if ((gCalMode == 6 || gCalMode == 7) &&
+            // CAL_ORIENT_INTERVAL_MS). Grid modes only: baseline (5) joins
+            // once its bootstrap locks -- before that it is ROUGH_SCAN with no
+            // grid to steer, so it would be pure link traffic. The display
+            // ignores these until a CalProgressPacket has given it a grid to
+            // merge them into, so ordering doesn't matter.
+            if ((gCalMode == 6 || gCalMode == 7 ||
+                 (gCalMode == 5 && imu::magBinCalBaselineGridLive())) &&
                 nowMs - gLastCalOrientMs >= CAL_ORIENT_INTERVAL_MS) {
                 gLastCalOrientMs = nowMs;
                 CalOrientPacket opkt{};

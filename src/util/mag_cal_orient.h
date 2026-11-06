@@ -28,11 +28,15 @@
 // Gap-fill does not have that problem, and does not use that machinery:
 //   * It runs ONLY with a good baseline cal already installed, so heading is
 //     already trustworthy. That is a hard precondition, enforced by the
-//     caller, not an assumption.
+//     caller, not an assumption. Baseline's own grid (0.7.25) meets the same
+//     precondition a different way: it bins only after an in-session sphere
+//     fit has passed a lock gate (util/baseline_boot.h), which on real
+//     baselines puts heading within a few degrees of the eventual real fit.
 //   * No Mahony, no filter, no state, no lag: orientation is computed
 //     algebraically from the current mag + accel reading alone.
 //   * It is a point-and-hold motion, not a tumble, so rotation rate is low
-//     regardless.
+//     regardless. (Baseline's grid is a tumble, but nothing here is filtered,
+//     so rate only matters through the mag/accel sampling skew.)
 //
 // -------------------------------------------------------------------------
 // THE AXIS CONVENTION -- READ THIS BEFORE CALLING

@@ -50,6 +50,15 @@ constexpr bool  DEFAULT_USE_GPS_POSITION = true;     // use GPS lat/lon as posit
 // Look up your local value at https://www.ngdc.noaa.gov/geomag/declination.shtml
 constexpr float DEFAULT_DECLINATION_DEG  = 14.7f;   // ~14.7°E for Seattle area / Lake Washington, as of August 2026.
 
+// Total magnetic field strength, uT. Site-specific, same story as declination:
+// the baseline live grid's lock gate checks its fitted radius against it
+// (MAG_CAL_BOOT_RADIUS_TOL). 50.1 is measured, not looked up: every 2026-09..10
+// accepted baseline fit at the home site, on both units, came out to
+// 3420-3444 counts at 68.42 LSB/uT. Elsewhere, the NOAA calculator's total
+// intensity (same page as declination) is close enough. Wrong by more than
+// the tolerance, the grid simply never appears and baseline shows its bars.
+constexpr float MAG_CAL_EXPECTED_FIELD_UT = 50.1f;
+
 // Display mode (compile-time): 0 = Navigation, 1 = Debug
 #ifndef DISPLAY_MODE
 #define DISPLAY_MODE 0
@@ -251,6 +260,57 @@ constexpr int MAG_CAL_ROUGH_SCAN_MIN_SAMPLES = 40;
 // Same constant and same purpose as the legacy single-stage NB_EXPECTED_RANGE
 // in imu.cpp — not re-deriving a new number, reusing the known-good one.
 constexpr float MAG_CAL_ROUGH_SCAN_EXPECTED_RANGE = 6800.0f;
+
+// ---------------------------------------------------------------------------
+// Baseline live grid (2026-11-06) -- docs/baseline-live-grid-plan.md.
+// ROUGH_SCAN refits a sphere to everything stored every REFIT_EVERY samples;
+// once the fit passes the lock gate below, baseline switches to
+// BASELINE_GRID and bins each sample the way gap-fill does, against that
+// in-session bias. Logic: src/util/baseline_boot.h. Every value here is
+// mirrored by dive-map's calibration-processor/tools/
+// baseline_bootstrap_replay.py, which tools/baseline_boot_test checks the
+// firmware against -- change both or the test fails.
+// ---------------------------------------------------------------------------
+
+// Refit cadence, in stored samples (~2.5 s at the 10 Hz mag rate).
+constexpr int MAG_CAL_BOOT_REFIT_EVERY = 25;
+
+// No lock before this many stored samples. The 2026-11-05 replay locked at
+// 50-75 on every real baseline it was given.
+constexpr int MAG_CAL_BOOT_MIN_SAMPLES = 50;
+
+// The fitted radius must be within this fraction of MAG_CAL_EXPECTED_FIELD_UT.
+// This is the gate that matters: a single-axis spin puts the samples on a
+// ring, and the sphere through a ring has the horizontal field's radius
+// (0.39x at this site's 67 deg dip), not the total field's.
+constexpr float MAG_CAL_BOOT_RADIUS_TOL = 0.10f;
+
+// ...and the samples' directions from the fitted centre must span all three
+// dimensions: the smallest eigenvalue of their mean outer product (1/3 = the
+// whole sphere, 0 = one plane) must reach this. The radius gate alone misses
+// a spin about a horizontal axis -- e.g. rolling the tube while pointed north
+// -- whose ring is 0.92x the field at this dip, passes, and locks ~20 uT off.
+// Perfect rings score 0.000-0.002; the five real baselines scored 0.010-0.094
+// where they locked; any wobble of 5 deg or more already fits correctly.
+constexpr float MAG_CAL_BOOT_MIN_SPREAD = 0.004f;
+
+// The bias must have moved less than this since the previous refit to lock.
+constexpr float MAG_CAL_BOOT_STABLE_UT = 2.0f;
+
+// After lock, a refit whose bias has moved this far from the one the grid was
+// binned with replaces it and re-bins every stored sample. This is the
+// backstop for a lock the radius gate let through: a ring close to a great
+// circle can pass it while ~20 uT off. A normal tumble wanders ~1.5 uT.
+constexpr float MAG_CAL_BOOT_REBIN_UT = 3.0f;
+
+// After lock, a (cell, roll sector) stops accepting at this multiple of the
+// "finished" threshold gap-fill uses (MAG_CAL_GAPFILL_TARGET_CAP upright,
+// _OTHER_ROLL elsewhere), so easy orientations can't fill the buffer before
+// the hard ones are reached. 2x was chosen on the five replay runs: it drops
+// 3-11% of samples, leaves the server's RMS unchanged, and moves no aimable
+// heading more than 1.6 deg (median <= 0.04). 1x dropped 20-30% and bent the
+// fit up to 17 deg in sparse orientations. 0 = accept everything.
+constexpr int MAG_CAL_BOOT_CEILING_MULT = 2;
 
 // ---------------------------------------------------------------------------
 // Guided gap-fill (2026-08-24) — a second baseline pass that patches only the

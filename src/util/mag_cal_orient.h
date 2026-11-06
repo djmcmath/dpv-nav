@@ -154,4 +154,18 @@ void pitchRollDeg(float ax, float ay, float az, float& pitchDegOut, float& rollD
 // at +-45 deg), matching dive-map's _roll_sector.
 int rollSector(float rollDeg);
 
+// Everything a live grid needs from one sample, in one call: the same chain
+// assign_bins() runs per row (reconstructOrientation -> binIndex, and
+// reconstructRoll -> rollSector). Gap-fill and the baseline grid both go
+// through this, so the cell one highlights cannot be computed differently from
+// the cell the other does. mx/my/mz calibrated, as for reconstructOrientation.
+struct SampleOrient {
+    float pitchDeg;
+    float headingDeg;
+    float rollDeg;
+    int   bin;          // [0, 60)
+    int   rollSector;   // [0, MAG_CAL_ROLL_SECTORS)
+};
+SampleOrient orientSample(float mx, float my, float mz, float ax, float ay, float az);
+
 }  // namespace mag_orient

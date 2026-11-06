@@ -60,3 +60,4 @@ report.txt
 # Working-tree scratch space for superseded/WIP KiCad files kept locally for
 # reference but never committed. See hardware/schematic/*/_archive/.
 _archive/
+tools/baseline_boot_test/boot

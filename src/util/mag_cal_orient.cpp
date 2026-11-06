@@ -123,4 +123,13 @@ int rollSector(float rollDeg) {
     return s;
 }
 
+SampleOrient orientSample(float mx, float my, float mz, float ax, float ay, float az) {
+    SampleOrient o;
+    reconstructOrientation(mx, my, mz, ax, ay, az, o.pitchDeg, o.headingDeg);
+    o.bin        = binIndex(o.pitchDeg, o.headingDeg);
+    o.rollDeg    = reconstructRoll(ax, ay, az);
+    o.rollSector = rollSector(o.rollDeg);
+    return o;
+}
+
 }  // namespace mag_orient

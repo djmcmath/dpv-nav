@@ -276,10 +276,36 @@ test 2026-11-07:
 - The 12-point heading cal found and corrected errors up to ~5° at the worst
   heading, and finished within 1–2° at every test point.
 
-**Not run:** the per-sample agreement check (step 4, the replay's `RECORDED on the
-unit` line on the uploaded CSV). It's still worth running once to confirm the unit
-and the model agree on real hardware. The degenerate-start check (step 5) wasn't
-done separately either.
+**Agreement check (step 4), run 2026-11-07** on the session's baseline upload
+(`c4737d2d`, 1.04% RMS, the best of any baseline here):
+
+- **Firmware and model agree on real hardware.** The replay reproduces the unit's
+  recorded cell on all 2160 of 2160 rows: lock at 75 samples, and re-bins at 125 and
+  225 (about 12 s and 22 s in, while the fit was settling).
+- **What the diver saw** was the server's exact cell for 88% of the 2085 binned
+  samples and the adjacent cell for the other 12%; none were further off. The diver
+  reported no sudden shifts. Polar cells were "consistently inconsistent", as
+  expected (heading gain of tan(pitch)).
+- **Gap-fill's recorded cells** match the server's on 99.8% of 828 samples, and roll
+  sectors on 99.9%. Gap-fill bins through the same installed fit the server uses, so
+  this was expected.
+- **The session filled the 2160-sample buffer and auto-finished.** With a grid to
+  chase, the buffer is now the likelier way a baseline ends.
+- **The ceiling's effect can't be measured from the upload.** Samples the unit
+  rejected aren't in the CSV, so the replay sees none dropped.
+
+**What the data does *not* show yet: better coverage per sample.** At equal sample
+counts, this session's gaps match the blind runs':
+
+| | Server thin/empty cells at N=1300 | at N=1700 | Empty (cell, roll) slots at N=1300 | at N=1700 |
+|---|---|---|---|---|
+| This session (live grid) | 156 | 117 | 78 | 41 |
+| Five blind runs | 150–163 | 116 | 25–78 | 9 (only one run reached 1700) |
+
+The drop to 86 thin/empty cells at the end came from collecting longer, not from
+spending samples better. It's one session, and coverage order varies with technique,
+so this isn't a verdict on steering. Re-check it over a few more sessions. The
+degenerate-start check (step 5) wasn't run separately.
 
 ### Where the build deviated from the sketch above
 

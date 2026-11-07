@@ -265,9 +265,21 @@ anything else.**
 
 ## Status
 
-**Built 2026-11-06 as `0.7.25-dev.1`** on `feature/baseline-live-grid`. All host
-tests pass, both boards build, and gap-fill's cross-checks are unchanged.
-**Hardware test owed (2026-11-07).** Once it passes, bump to `0.7.25`.
+**Shipped as 0.7.25.** Built 2026-11-06 and published as `0.7.25-dev.1`. Hardware
+test 2026-11-07:
+
+- The OTA installed cleanly.
+- Baseline opened on the bars and "Finding north…", then switched cleanly to the
+  grid. The diver's verdict: "much less guesswork on the first round," a
+  collection that felt "meaningfully useful."
+- Baseline then gap-fill produced a really good baseline, and mounted ran cleanly.
+- The 12-point heading cal found and corrected errors up to ~5° at the worst
+  heading, and finished within 1–2° at every test point.
+
+**Not run:** the per-sample agreement check (step 4, the replay's `RECORDED on the
+unit` line on the uploaded CSV). It's still worth running once to confirm the unit
+and the model agree on real hardware. The degenerate-start check (step 5) wasn't
+done separately either.
 
 ### Where the build deviated from the sketch above
 

@@ -194,6 +194,6 @@ is baseline-only.
 The 2026-11-05 replay (`dive-map/calibration-processor/tools/baseline_bootstrap_replay.py`)
 revisits a live baseline grid: an in-session sphere fit plus gap-fill's binning, so
 neither cause of the 2026-07-25 failure is present. See
-[baseline-live-grid-plan.md](./baseline-live-grid-plan.md), built as 0.7.25-dev.1 on
-2026-11-06 with its hardware test owed. ROUGH_SCAN survives as the few seconds
-before that grid's bootstrap locks.
+[baseline-live-grid-plan.md](./baseline-live-grid-plan.md), shipped in 0.7.25 and
+verified on hardware 2026-11-07. ROUGH_SCAN survives as the few seconds before that
+grid's bootstrap locks.

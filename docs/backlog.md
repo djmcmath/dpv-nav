@@ -158,17 +158,6 @@ Nothing is lost, but something is unverified, unvalidated, or invisible when it 
   COBS framing plus a CRC turns a silent wrong value into a detectable dropped packet, which
   the display can then show rather than trust.
 
-- [ ] **Two rough-scan constants are still untuned guesses**
-
-  `MAG_CAL_ROUGH_SCAN_MIN_SAMPLES = 40` and the axis-bar
-  `MAG_CAL_ROUGH_SCAN_EXPECTED_RANGE = 6800` were never tuned — the latter was borrowed
-  wholesale from the legacy single-stage cal's constant. The ROUGH_SCAN-only baseline has
-  been in routine use since 2026-08, so there is now real feel to tune against.
-
-  *Where:* `docs/baseline-cal-two-pass.md`, Risks. The row-weighted completion thresholds
-  were tuned the same way after real use. **Moot if the live baseline grid (Tier 3) ships:**
-  its sphere-fit lock replaces the 40-sample gate and the grid replaces the bars.
-
 - [ ] **The PCB files don't show the backlight jumper**
 
   The display unit has a hand-run jumper from the EyeSPI `Lite` pad (pad 2) to A5/GPIO4,
@@ -188,35 +177,6 @@ Nothing is lost, but something is unverified, unvalidated, or invisible when it 
 ## Tier 3 — Build it out
 
 Features and UX with a design already thought through.
-
-- [ ] **The baseline tumble gives no coverage indication: build a live grid** *(built, hardware test owed)*
-
-  Today's baseline screen (X/Y/Z bars, sample count, 2-D fit readout) is ignored in
-  practice. The diver tumbles blind, uploads, then fixes the gaps in gap-fill. After a full
-  baseline the server flags 115–159 of 240 cells as thin or empty, which is why gap-fill is
-  never optional.
-
-  *Evidence (2026-11-05):* five real baseline uploads, two devices, replayed through the
-  server's own `assign_bins`
-  (`dive-map/calibration-processor/tools/baseline_bootstrap_replay.py`). A 4-parameter
-  sphere fit with identity soft iron locks at **50–75 samples** (5–8 s at the 10 Hz mag
-  rate), 1–3.4 µT from the accepted fit. Binned live from that point, **85–90% of samples
-  land in the server's exact cell, ~10–15% in an adjacent one, and 0.1% further off**. At
-  the end of a run, the cells it flags as needing work overlap the server's ~90%. The
-  min/max bias ROUGH_SCAN tracks today is 15–25 µT off until the last third of a tumble.
-
-  *Design:* an in-session sphere fit → lock gate (N ≥ 50, radius within 5% of the expected
-  field, bias stable between refits) → retro-bin everything stored so far → gap-fill's
-  per-sample binning (`mag_orient::binIndexFor`) and grid widget with even caps. No Mahony
-  filter, no min/max, no gyro heading. Server side unchanged. Plan:
-  [`docs/baseline-live-grid-plan.md`](./baseline-live-grid-plan.md).
-
-  *Status:* **built 2026-11-06 as 0.7.25-dev.1**, on `feature/baseline-live-grid`.
-  The host test caught a hole in the planned gate: a spin about a horizontal axis
-  locks ~20 uT off. A direction-spread gate closes it; see the plan's Status section.
-  **Hardware test owed.** The replay covers one site, and the expected field (50.1 uT)
-  needs a better source than a constant at a new site. When it's wrong the grid just
-  never appears.
 
 - [ ] **Polar gap-fill cells can't be aimed at all**
 
@@ -318,15 +278,6 @@ Real, small, not urgent. Good candidates when something above is blocked on hard
   cleared by hand first. Wanted: when a log opens, free what its level could need, deleting
   already-uploaded logs first (`log_sync::isUploaded`), and warn on the display if it can't.
 
-- [ ] **Cal axis bars are labelled X/Y/Z, which a diver can't act on**
-
-  They're raw logical-frame axis names, not something you can do anything with ("tip the
-  connector-end up more") without knowing the board's axis map. Worth revisiting only if the
-  bars turn out to be genuinely useful signal rather than a rough sanity check the diver
-  ignores in favour of the live fit number. They aren't: in practice the baseline screen is
-  ignored. **Superseded by the live baseline grid (Tier 3)**, which keeps the bars only for
-  the few seconds before the fit locks.
-
 - [ ] **The logging integration example hardcodes roll and pitch to zero**
 
   `docs/logging-integration-example.cpp:122-123` carries two literal TODOs to extract them
@@ -376,10 +327,20 @@ the answer is here, not in fresh analysis.
   `gWifiEnabled` and wrote NVS. That's since fixed, so a menu WiFi toggle is now a valid load
   test.
 
+- **Baseline has a live grid** — *shipped 0.7.25, hardware-verified 2026-11-07.* An
+  in-session sphere fit locks a few seconds into the tumble and the grid takes over;
+  see `docs/baseline-live-grid-plan.md`. On the first real session the transition
+  was clean, and the collection was "meaningfully useful" rather than blind. Baseline,
+  then gap-fill, gave a really good baseline; mounted and the 12-point heading cal
+  followed normally, finishing within 1–2° at every test point. This retires two old
+  items: the rough-scan constants (`MAG_CAL_ROUGH_SCAN_MIN_SAMPLES`, `_EXPECTED_RANGE`)
+  and the X/Y/Z bar labels. The bars are now only the few seconds before lock, so
+  neither is worth tuning.
+
 - **The two-pass baseline cal was retired, not shipped.** Corrected 2026-11-05: this entry
   used to say the opposite. Baseline is a ROUGH_SCAN-only tumble (BTN2 sends
   `FINISH_BASELINE_COLLECTION`), and the live grid lives in gap-fill. That's the flow
   verified on hardware, including the 2026-09-18 reference run. Roll coverage *is* tracked,
   in gap-fill and server-side. A live baseline grid is reopened on new evidence; see the
-  Tier 3 item. That doesn't reopen the 2026-07-25 design: the Mahony-fed COLLECT grid and
+  live-grid entry above. That doesn't reopen the 2026-07-25 design: the Mahony-fed COLLECT grid and
   the min/max handoff stay retired.

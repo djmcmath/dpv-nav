@@ -286,7 +286,7 @@ const SCREENS = {
     grid5(t, ["RYRYGYRRYRYR", "GGYGGGGYGYGG", "GGGGGGGGGGGG", "GGGGYGGGGGGY", "YGYGGYRGGRGY"],
           [1, 9], 284, 41, [7, 12, 3, 9, 14, 5, 11, 8, 16, 2]);
     t.text(4, 162, "38/60 cells", 2, C.WHITE);
-    t.text(150, 162, "284° +41°", 2, C.YELLOW);
+    t.text(166, 162, "284° +41°", 2, C.YELLOW);
     rollWidget(t, 287, 157, 26, [C.GREEN, C.YELLOW, C.RED, C.GREEN], 1);
     frameEnd(t, [["Auto-finish at 2160", C.YELLOW]], QUIT, FINISH, f);
   } },
@@ -296,7 +296,7 @@ const SCREENS = {
     grid5(t, ["..G..Y...R..", ".G..G...G...", "....G...Y...", "..G...G..G..", ".R.Y..G....."],
           [2, 8], 255, -8, [11, 6, 4]);
     t.text(4, 162, "5 cells left", 2, C.WHITE);
-    t.text(160, 162, "255° -8°", 2, C.YELLOW);
+    t.text(166, 162, "255° -8°", 2, C.YELLOW);
     rollWidget(t, 287, 157, 26, [C.GREEN, C.RED, C.RED, C.YELLOW], 0);
     frameEnd(t, [["Fill red & yellow cells", C.YELLOW]], QUIT, FINISH, f);
   } },
@@ -391,6 +391,26 @@ const SCREENS = {
     frameEnd(t, [["Next: ", C.GRAY], ["sync at tern.local", C.WHITE]], BLANK, OK);
   } },
 
+  mountedFinishing: { stage: "2", draw(t) {
+    header(t, "2", "16/36");
+    grid3(t, ["GGRGRRGRGRRR", "GGGGRGGRGGGR", "RRGRRRGRRRRR"], [1, 4], true, 130, 1);
+    horizon(t, 4, 100, 80, 1, -2, 10, 2, true);
+    t.text(92, 102, "MOTION", 2, C.GRAY);
+    bar(t, 170, 101, 146, 18, 0, C.RED, "still", C.GREEN);
+    t.text(92, 126, "HOLD", 2, C.GRAY);
+    bar(t, 170, 125, 146, 18, 0, C.CYAN);
+    t.text(92, 152, "130° P+01 R-02", 2, C.WHITE);
+    frameEnd(t, [["Finishing...", C.GREEN]],
+             { label: "hold: QUIT", style: "dim" }, { label: "FINISH", style: "dim" });
+  } },
+
+  installedMount: { stage: "2", draw(t) {
+    header(t, "2", "SAVED");
+    t.text(8, 44, "Installed", 3, C.GREEN);
+    t.text(8, 84, "Mounted cal is on.", 2, C.WHITE);
+    frameEnd(t, [["Next: ", C.GRAY], ["3 HEADING", C.WHITE]], BLANK, OK);
+  } },
+
   installedHdg: { stage: "3", draw(t) {
     header(t, "3", "SAVED");
     t.text(8, 44, "Installed", 3, C.GREEN);
@@ -412,6 +432,23 @@ const SCREENS = {
     t.text(8, 84, "Samples are saved", 2, C.WHITE);
     t.text(8, 104, "on the unit.", 2, C.WHITE);
     frameEnd(t, [["Next: ", C.GRAY], ["upload at tern.local", C.WHITE]], BLANK, OK);
+  } },
+
+  cantStart: { stage: "1a", draw(t) {
+    header(t, "1a", "FAILED");
+    t.text(8, 44, "Can't start", 3, C.RED);
+    t.text(8, 84, "No target map -- run", 2, C.GRAY);
+    t.text(8, 104, "Check for updates on", 2, C.GRAY);
+    t.text(8, 124, "tern.local (WiFi).", 2, C.GRAY);
+    frameEnd(t, [["Nothing was collected", C.GRAY]], BLANK, OK);
+  } },
+
+  notInstalled: { stage: "1", draw(t) {
+    header(t, "1", "FAILED");
+    t.text(8, 44, "Not installed", 3, C.RED);
+    t.text(8, 84, "Nothing pending to", 2, C.GRAY);
+    t.text(8, 104, "install", 2, C.GRAY);
+    frameEnd(t, [["Your old cal stays on", C.GRAY]], BLANK, OK);
   } },
 
   failed: { stage: "2", draw(t) {

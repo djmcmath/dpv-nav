@@ -1,68 +1,150 @@
-Tern
+![Tern](images/logo-image-w-text.png)
 
-Built for Exploration
+# Tern DPV-Nav
 
+**Built for Exploration**
 
-Welcome to Tern: underwater navigation for technical divers who are tired of getting lost and wondering where they went.
+Underwater navigation for technical divers who are tired of getting lost and
+wondering where they went.
 
-Nominally, this is a simple dead reckoning navigation system designed to be installed on DPVs (aka "scooters").  I'm making this source-available, and attempting to use as many readily-available parts as possible to provide something that'll be accessible to most technical divers.  Some parts of the build are technical -- you'll need to manufacture and solder custom PCBs, flash firmware to ESP32s, and so on, but even if you can't solder or print parts, if you're in the technical diving community, odds are excellent you know someone who can.  
+---
 
-Yes, it's vibe coded.  I used Claude Code to great effect, covering a ton of ground in a matter of months that I hadn't been able to get through on my own.  Say what you will about AI-supported coding, this project exists, and wouldn't without AI support.
+## What it is
 
-About the name:
-- It's called Tern, after the Arctic Tern, which is just a fantastic bird.  They navigate from the north pole to the south every year -- mating in the Antarctic, then raising their young in transit and growing to maturity in the Arctic.  Then they migrate BACK to do it all again the next year.  Insane.
-- But hey, if a tiny bird can navigate thousands of kilometers every year, perhaps we can build a DIY-capable device that'll allow divers to cover much smaller distances with confidence underwater.
+A dead-reckoning navigation system that mounts on a DPV ("scooter"). It knows which
+way you're pointed, how fast you're moving through the water, and where you started,
+and from those three things it continuously estimates where you are — showing bearing
+and range to a waypoint you chose.
 
-Framing:
-- This is NOT "underwater GPS."  GPS doesn't work underwater, and there's no magic that will allow us to violate the laws of physics.  Precise positioning underwater is a delightful engineering problem, and there are a variety of excellent ways to know exactly where you are.  Precision is a function of expense -- how precise your position is depends almost entirely on how much you're willing to spend to get there.
-- This *is* a tool that'll tell you much more accurately where you are than anything else readily available in the space at this price point.  If your current process is to read your magnetic compass and keep track of time and distance using your dive computer and mental gymnastics, this will save you a lot of effort and produce a dramatically more accurate result.  I did a dive the other day where my buddy used her wrist-mounted compass -- showing plus or minus 20deg from what I was showing on the DPV -- and, coincidentally, we still hit the wreck.
-- The formal name is "dead reckoning," using heading and speed (plus an initial position from GPS on the surface) to determine an "estimated position."  Accuracy of the final position depends on quality of calibration, accuracy of initial position, and time / distance since last fix.  Each iteration takes the previous estimated position, adds the current course and speed, and produces a new estimated position.  Errors, naturally, compound, so the longer it's been since you've actually known where you were, the farther off you may be from where it says you are.  Additionally, knowing EXACTLY where you start matters -- that's why there's external GPS and an indication of fix quality on the headline of the display.
-- For planning purposes, assume that the error is about 10% of the distance since your last fix.  So if you submerge and run for 500m, assume you're within 50m of the target.  That'll require dropping a marker and running a reel out to conduct a search to find the wreck.  But at least you have some confidence that you're within a reasonable distance of the right spot.  If you calibrate with care and run a few tests on known courses, you may find that your accuracy is much better.  I've had runs with error rates in the 2-3%, for example.  (Future versions will track heading and speed calibration vs reality to estimate position uncertainty, and will allow reducing uncertainty by crossing known navigation points.)
-- Safety note: It's an aid, not an authoritative answer.  Dive within your limits and your training.  Don't blindly follow the computer -- it doesn't know your certification limits or how much breathing gas you have or, frankly, anything about your dive plan.  Heck, it doesn't even know where you are -- it's just estimating.  Additionally, you're adding a device with cables to your DPV, so you're bringing entanglement risk and complexity to your already existing challenges.  So be careful.
+The design goal is to make something that any technical diver can build, not to create a project that requires a bunch of expensive proprietary gear.  Therefore: The scope is deliberately small. The parts are deliberately ordinary. Some of the
+build is genuinely technical: you'll manufacture and solder custom PCBs, print parts,
+and flash firmware to a pair of ESP32s. But even if you can't solder or print, if
+you're in the technical diving community the odds are excellent that you know
+someone who can.
 
-Workflow and usage:
-- Assemble the whole device
-- Flash the firmware to both units (NAV and DISPLAY)
-- On the first power-up, the unit will attempt to calibrate gyro and accelerometer.  There will be a series of prompts displayed in the serial monitor walking you through this process.  You should only need to do this once.  Getting it right is important, but it's the least important input to the AHRS algorithm.
-- Set up wireless:
--- You can keep it as something that you connect to with a wireless device, or you can set it to automatically connect to a known wireless network.  Calibration is much easier if it has a good full-time wireless connection.
--- Make sure wireless is on ("WiFi AP" in white (or green), not gray, on the display)
--- Connect to wireless AP "Tern," with password "password", then browse to 192.168.4.1.
--- In the "WiFi Networks" section, press "Scan for networks," pick yours off the list, and type the password.  (The page goes quiet for a few seconds during the scan -- the radio has to leave the Tern AP to listen.)  It'll autoconnect to that network at next boot, if it's available.  Then it should appear as "tern.local" on your network.
--- Hidden networks and phone hotspots don't show up in a scan, so type the name in by hand and tick "Hidden network / phone hotspot"; the unit then tries it by name whether or not it's beaconing.  Two things bite people here, both on the phone: the unit is 2.4 GHz only (iPhone: turn on *Personal Hotspot > Maximize Compatibility*; Android: set the hotspot band to 2.4 GHz), and the hotspot has to actually be awake, so leave the Personal Hotspot screen open while pairing.
--- A phone can't serve its own hotspot and stay joined to the Tern AP at the same time.  Save the credentials from the phone first, then leave the page and switch the hotspot on -- the unit picks it up within about a minute on its own.  From a laptop or a second phone, "Try now" next to a saved network forces the attempt immediately.
-- Pair the device with the cloud.
--- Create an account on https://map.terndiving.com.
--- In the upper right corner, select the "gear" icon, then "My Devices," then "link a device."
--- On the device, select CONFIG > LINK ACCT.
--- Enter the code from the device into the blank on the web form.  Give it a name.  It's linked now.  You should only have to do this once.
-- Perform a baseline calibration.  This requires broad coverage of a "sphere" of directions to provide a baseline for what the magnetic environment of the board and housing look like.  This should happen while the unit is NOT mounted on your scooter, so it should be easy to rotate through the necessary coverage.  You'll need to point the unit in every direction, in every orientation, targeting coverage in roughly 30deg sectors.  So that's "north, level, upright" and "north, level, rolled to left side," and "north, level, rolled to right side," and so on.  A good calibration probably looks like 1200-1500 points, as an entering argument.
-- Cal data is automatically uploaded to the cloud, analyzed, and returned.  If you've done ok, you'll have a reasonably low RMS%, and you can hit "Accept."  If it's bad, "Reject" it and try again.
-- If it's good-but-not-great, you can run a gap-filling cal.  On tern.local, hit "Check for updates," and it will download a gap-filling target list.  Then run CAL > GAP FILL, pointing the unit at each indicated area.  The main grid gives heading and elevation, with the box in the lower right indicating roll coverage for the selected sector.  Perfection isn't necessary; go at it until you're frustrated, then hit the right button to end and upload the data.
-- The cal will be shown on the dive map (Calibration History).  If it's decent, hit "Accept," then, on tern.local, hit "Check for Updates" to install the accepted merged gap-fill calibration data.
-- Perform mounted calibration.  We've got a baseline, so we know what the closest parts of the environment look like, now we're figuring out what it looks like with the scooter there.  Similar to the gap-fill cal, you'll get a grid on screen showing coverage, but this is much reduced -- it's all horizontal, just pitched up 30 and down 30, around all the headings.  I find the easiest way to do this is to set the scooter on a stool in my living room.  I pick up one end, resting the other on the stool, and walk slowly around.  Then pick up the other end, walk in a slow circle.  Then level, walk in a slow circle.  I like to arrange the display so I can see it while I'm doing rotations, so I know if I need to go back and spend a little more time in a sector.  As with the other calibrations, it automatically uploads to the cloud, processes, and returns data.  If you can manage less than about 10% RMS on the mounted cal, you're doing ok.
-- Before performing the 12-point check, make sure your compass is aligned.  Anecdote: my compass, mounted to my scooter with a neatly milled professional-looking piece of aluminum, turned out to be 8 degrees off.  I've dove with others who've had 15 degree errors.  Please don't assume that your compass is perfect just because it's bolted to your scooter.  The best way to align your compass is to find the magnetic bearing between two points -- for example, your porch and a distant landmark, or the end of a pier and a well known building.  Look up the lat/lon of both points and plug them into any one of the online calculators that provide bearing between two points.  Correct the true bearing to a magnetic bearing, if necessary.  Note that down.  Line up your scooter on that heading and note the error between what your compass says and what you now know to be truth.
-- Final heading corrections aka 12-point cal.  It's highly beneficial to provide 12 actual headings to correct final errors.  The unit will prompt you to point at an actual heading (read off the compass, not the Tern DPV-Nav), then press the right button.  When complete, it'll automatically upload and process.  Normally, you'll have one or two sectors that need more coverage.  Check on the dive map to see what they are, and follow the directions (set to RAW bearings, enter the requested indicated headings, process, then "check for updates" to install the improved cal).
-- Perform a speed cal.  
--- The design method for an initial cal calls for a 300ft run.  Measure the distance, drag the unit through the water.  The clock automatically starts when it detects flow, and automatically stops when either flow stops or the unit rotates 90 degrees.  The initial thinking was that this had to be done in-water, on a scooter.  But it turns out you can drag it behind a boat, or walk down the beach with the unit duct-taped to a broom stick.  You just need to move it through 300ft of water at a relatively representative speed (30m/min is typical scooter speed).
--- You can also back speed calibration out of a dive that Dive Map has corrected against known positions: that correction reports a speed factor `s` where `true_speed = s x logged_speed`, and since the flow sensor's k-factor is a *divisor*, `k_new = k_old / s`.  Sanity check: if the unit read fast (`s < 1`), k goes up.  Full derivation, the traps, and a worked example are in [docs/calibration-guide.md](docs/calibration-guide.md#deriving-k-from-a-corrected-dive).
+**This is not "underwater GPS."** GPS doesn't work underwater and no firmware
+violates that. Precise underwater positioning is a delightful engineering problem
+with several excellent solutions, and precision scales almost perfectly with money
+spent. What this *is*: a tool that will tell you where you are far more accurately
+than anything else readily available at this price point. If your current process is
+a wrist compass plus elapsed time plus mental arithmetic, this is a large step up.
 
-On a Dive:
-- Plug in the battery, close the housing, make sure the unit boots cleanly
-- Let it get a GPS fix on the beach.  GPS doesn't like water at all, so powering everything on and getting this first fix on the beach is better than doing it while the scooter is in the water.
-- Use the web page (tern.local) to add named waypoints — go to the Waypoints section and enter a name, latitude, and longitude for each destination you plan to navigate to (e.g. "Bomber Line Start", "MV Scout")
-- Once GPS has a solid fix (4 bars, HDOP < 1.0) and you've set waypoints, you can go ahead and put the unit in standby (menu "OFF").  This conserves power, but keeps GPS soft-powered, so it'll reconnect within a few seconds of getting adequate signal.  When you're ready to use it again, press and hold both buttons for about a second (much like a Shearwater).
-- Use the menu (**NAV > Select WP**) to scroll through your saved waypoints and select the destination.
-- You'll get bearing and range to the waypoint.
-- Select CONFIG > LOG:LOW to start logging before the dive.  Preferably, start the logging while you're at the beach so you can get some GPS as an initial entry in the log.  For best results, keep the log running until you're back at the beach with GPS after the dive.
-- At intermediate known locations (surface fix, known waypoint), use **NAV > Arrive WP** to snap position and reset accumulated error before the next leg.
-- Some tips:
--- Get a fix as close to the target as possible.  e.g. if you can surface transit for a bit, make sure to get 4-bar GPS fix (indicating HDOP < 1.0) before submerging.  
--- Long straight runs at constant speed probably yield best results (need to test to confirm this).  If you're doing a lot of big circles, you're probably losing a little accuracy every time you do it.
--- The unit assumes that if you're moving slowly, you're finning around the wreck and not covering ground.  So if the flow meter is showing <6m/min, it'll assume that heading is meaningless and you're not moving.  This is important if you decide to start finning along for some reason.  Or in other words, it's only really navigating if you're scooting.  If you stop scooting and start finning, the unit assumes you're stopped, and won't update position -- even if you're happily moving through the water.
-- When you arrive at the point where the navigator thinks you're at the wreck, you're probably close, but not there.  In Lake Washington, "close" is rarely the same as "close enough."  Plan on putting down a marker (weight, stake in the ground, etc) and running out a reel.  For planning purposes, you're probably within 10% of the total run length (e.g. if it's been 500m since the last fix, total error is probably <50m).  Experience tends to indicate that a 50m radius circle is too big to search all at once, so plan on conducting a spiral search, e.g. let out 5-7m of line, make a circle, let out another 5-7m, etc.
+**For planning, assume error is about 10% of the distance since your last fix.** Run
+500 m from your last known position and expect to be within 50 m of the target —
+close enough to drop a marker and run a reel, not close enough to skip the search.
+Careful calibration and straight runs have produced 2–3% in practice, but 10% is the
+number to brief your buddy on.
 
-License:
-- Tern DPV-Nav is source-available and free for noncommercial use.  Firmware and software are licensed under [PolyForm Noncommercial 1.0.0](LICENSES/PolyForm-Noncommercial-1.0.0.txt); hardware designs and documentation under [CC BY-NC-SA 4.0](LICENSES/CC-BY-NC-SA-4.0.txt).
-- Build one, modify it, share your improvements.  Commercial use (selling units or kits, build services, or use in a commercial product) requires a separate license: contact [contact@terndiving.com].
-- See [LICENSE.md](LICENSE.md) for which license covers what, [SAFETY.md](SAFETY.md) before you build or dive, and [CONTRIBUTING.md](CONTRIBUTING.md) if you'd like to contribute.
+> **⚠ Safety** — this is an *aid*, not an authority. It doesn't know your
+> certification limits, your gas, your deco obligation, or your dive plan. It doesn't
+> actually know where you are; it's estimating, and the estimate's errors compound.
+> It also adds a cabled device to your DPV, which brings entanglement risk and task
+> loading to challenges you already have. Dive within your limits and your training.
+> **Read [SAFETY.md](SAFETY.md) before you build or dive.**
+
+## Design goals
+
+1. **Design for Manufacturability.** This isn't a $10,000 Italian-engineered underwater-equivalent-of-a-Ferrari.  It's a $500 DIY project.  It needs to balance effective functionality against cost and ability of a typical DIY-er to build.
+2. **Design for Simple Usability.** Minimize complexity wherever possible.  Tech divers do mental math all the time, approximations are typically good enough, and getting lost in menus and button pushing at depth is NOT what anyone wants to do.  The operation should remind people more of an iPad Touch than a Sony Alpha.
+3. **Fail loudly, never silently.** The failure mode that matters is bad data that
+   looks fine and gets discovered a week later. The backlog is ordered by this, not
+   by what's easiest.
+4. **Readily available parts**, and a build that stays within reach of a determined
+   hobbyist.
+5. **Source-available and DIY-first.** Build one, modify it, share what you learn.
+
+## Where this stands
+
+Diveable and in regular use. Current release **0.7.25**; nav board **Rev D**, display
+board **Rev B**.
+
+**Working and proven in the water:** tilt-compensated heading (Mahony AHRS),
+dead-reckoning position, flow-sensor speed with GPS override on the surface, up to
+200 named waypoints with arrive-to-reset, the full calibration chain (baseline →
+gap-fill → mounted → 12-point heading → speed) with cloud fitting and on-device
+accept/reject, dive logging with automatic upload and post-dive track correction,
+current measurement by holding station, depth-triggered dive/surface mode,
+magnetometer thermal compensation, and OTA updates for both boards together.
+
+**In flight:** the unified calibration screens (**0.7.26**) — one shared frame and
+button model across all five cal steps — are built and in test. The menu labels and
+screens described in the User Guide are the 0.7.25 ones until that ships.
+
+**Known gaps worth knowing about before you build:**
+
+- A new baseline or mounted mag cal **silently invalidates** the 12-point heading
+  cal. The rule (re-collect from scratch, never gap-fill) currently lives only in the
+  docs and in the builder's head. Nothing enforces it.
+- Forgetting to stop logging silently defers the whole dive's upload.
+- Magnetic declination is a hard-coded constant (currently set for the Seattle area), so a new dive site means editing that by hand in config.h.
+- Thermal compensation has never been tested on the **cold** side; every measurement
+  warmed from room temperature.
+- Polar cells in the gap-fill grid can't realistically be aimed at, because heading
+  gain goes as `tan(pitch)`.
+- Volumes 1 and 2 of the documentation are **drafts** with visible gaps.  To be frank, until I can retire and do this full time, everything will be in some state of draft.
+
+**→ [docs/backlog.md](docs/backlog.md)** is the full list, ordered by what bites a
+diver first rather than by what's easiest to fix. It also records decisions already
+settled, so they stop costing time. Read it before proposing work.
+
+## Documentation
+
+Everything lives in **[docs/](docs/)** — start at **[docs/README.md](docs/README.md)**
+for the index. Four volumes, in the order you'd use them:
+
+| | | |
+|---|---|---|
+| **0** | [System Overview](docs/overview.md) | What it is, how dead reckoning works, the four modules, why it's split that way. **Read this first.** |
+| **1** | [Manufacturing Guide](docs/manufacturing-guide.md) | Variant choices, BOM, PCBs, 3D printing, milling, potting. *Draft.* |
+| **2** | [Assembly Guide](docs/assembly-guide.md) | Soldering, wiring, sealing, leak testing, firmware, first boot. *Draft.* |
+| **3** | [User Guide](docs/user-guide.md) | First-time setup, calibration, the dive routine, menus, troubleshooting. |
+
+Deeper engineering reference — the calibration system, the AHRS, thermal
+compensation, the logging formats — is indexed in
+[docs/README.md](docs/README.md#engineering-reference).
+
+Hardware sources (KiCad schematics, PCB layouts, 3D models) are under
+[hardware/](hardware/).
+
+## Building the firmware
+
+```bash
+pio run -e nav        # nav board
+pio run -e display    # display board
+```
+
+Full toolchain and flashing instructions:
+[Assembly Guide §12](docs/assembly-guide.md#12-firmware).
+
+## About the name
+
+Named after the Arctic Tern, which is a fantastic bird. They navigate from the north
+pole to the south every year — mating in the Antarctic, raising their young in
+transit, growing to maturity in the Arctic — and then migrate back to do it all
+again. Insane.
+
+If a tiny bird can navigate thousands of kilometres a year, perhaps we can build a
+DIY-capable device that lets divers cover much smaller distances with confidence.
+
+## On how it was built
+
+Yes, it's vibe coded. I used Claude Code to great effect, covering a ton of ground in
+a matter of months that I hadn't been able to get through on my own. Say what you
+will about AI-supported coding: this project exists, and it wouldn't without AI
+support.
+
+## License
+
+Tern DPV-Nav is source-available and free for noncommercial use.
+
+- **Firmware and software** — [PolyForm Noncommercial 1.0.0](LICENSES/PolyForm-Noncommercial-1.0.0.txt)
+- **Hardware designs and documentation** — [CC BY-NC-SA 4.0](LICENSES/CC-BY-NC-SA-4.0.txt)
+
+Build one, modify it, share your improvements. Commercial use — selling units or
+kits, build services, or use in a commercial product — requires a separate license:
+contact `contact@terndiving.com`.
+
+See [LICENSE.md](LICENSE.md) for which license covers what, [SAFETY.md](SAFETY.md)
+before you build or dive, and [CONTRIBUTING.md](CONTRIBUTING.md) if you'd like to
+contribute. Build reports and troubleshooting entries are the most useful thing you
+can send.

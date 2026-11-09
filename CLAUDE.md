@@ -632,8 +632,31 @@ To force recalibration, delete the JSON files from LittleFS and reboot. Preferre
 - [src/util/motor_cal.h](src/util/motor_cal.h) — Motor-on heading offset: `load()` (reads `/motor_cal.json`, single `heading_offset_deg` field)
 - [src/util/mag_temp.h](src/util/mag_temp.h) — Magnetometer thermal compensation coefficients: `load()` (reads and validates `/mag_temp.json`); applied by `imu::setMagTempCompensation()`
 - [docs/mag-temperature-compensation.md](docs/mag-temperature-compensation.md) — Mag thermal drift: datasheet findings, 2026-09-14 measurement, file format, heading guideline, open items
-- [docs/overview.md](docs/overview.md) — Project overview, architecture, feature summary
-- [docs/user-guide.md](docs/user-guide.md) — User-facing guide: boot, display, buttons, dive workflow
+## Documentation Layout (reorganized 2026-11-09)
+
+[docs/README.md](docs/README.md) is the index, and it also defines the callout
+conventions (⚠ Safety / ⛔ Stop / ✅ Checkpoint / 💡 Note / 🔁 Variant / 📝 TBD) used
+across the guides. The human-facing docs are four volumes, read in order:
+
+- [docs/overview.md](docs/overview.md) — **Vol 0.** What the system is, how DR works, the honest accuracy number, the four modules and why it's split that way, the design goals. Written for a stranger orienting themselves.
+- [docs/manufacturing-guide.md](docs/manufacturing-guide.md) — **Vol 1, draft.** Variant choices, BOM, PCB fab, 3D printing, milling, potting the flow meter.
+- [docs/assembly-guide.md](docs/assembly-guide.md) — **Vol 2, draft.** Soldering, wiring, mechanical assembly, leak testing, firmware, first boot, build troubleshooting, maintenance.
+- [docs/user-guide.md](docs/user-guide.md) — **Vol 3.** First-time setup (first boot / WiFi / cloud pairing), calibration, the dive routine, menus, screens, settings, troubleshooting.
+
+Vols 1 and 2 were split out of the old `docs/assembly-guide-outline.md` (deleted).
+Prose the author had written *inside* the `[[ ]]` skeleton brackets was lifted into
+body text; genuinely unwritten sections became **📝 TBD** callouts that state what's
+missing. **Don't silently drop a TBD block** — it's the visible gap list, and
+`docs/README.md`'s author-notes comment holds the photo shot list keyed to them.
+
+Section numbers run continuously across Vols 1 and 2 (§1–9 manufacturing, §8–14
+assembly), so a cross-reference like "§9.1" means the same thing in both.
+
+Engineering reference, cited by path from source comments in this repo and in
+dive-map — **do not move these files**:
+
 - [docs/calibration-guide.md](docs/calibration-guide.md) — Sensor calibration (mag baseline + mounted two-stage workflow, gyro, accel, speed)
 - [docs/ahrs-orientation.md](docs/ahrs-orientation.md) — AHRS Mahony filter, Euler angles, heading
 - [docs/data-logging-guide.md](docs/data-logging-guide.md) — Data logging system (CSV to LittleFS)
+- [docs/backlog.md](docs/backlog.md) — Everything outstanding, ordered by what bites a diver, plus settled decisions
+- `docs/*-plan.md` — design plans; historical records of a decision, not current docs

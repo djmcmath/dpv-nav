@@ -1,10 +1,102 @@
 # DPV-Nav User Guide
 
-This guide is in three parts:
+**Volume 3 of 3.** This volume assumes you have a working device on the bench. If
+you're building one, start with the [System Overview](overview.md), then the
+[Manufacturing](manufacturing-guide.md) and [Assembly](assembly-guide.md) guides.
 
-1. **[Calibration](#calibration)**: done once for a new installation, and again whenever the physical setup changes, or if, for any reason, a calibration check fails.
-2. **[Diving with DPV-Nav](#diving-with-dpv-nav)**: the routine from the night before, through the dive, to the surface.
-3. **[Reference](#reference)**: menus, screens, settings and troubleshooting.
+This guide is in four parts:
+
+1. **[First-Time Setup](#first-time-setup)**: done once per unit — first boot, WiFi, and pairing with Dive Map.
+2. **[Calibration](#calibration)**: done once for a new installation, and again whenever the physical setup changes, or if, for any reason, a calibration check fails.
+3. **[Diving with DPV-Nav](#diving-with-dpv-nav)**: the routine from the night before, through the dive, to the surface.
+4. **[Reference](#reference)**: menus, screens, settings and troubleshooting.
+
+---
+
+# First-Time Setup
+
+Three things, each done once. Work through them in order: calibration is much easier
+with a reliable WiFi connection and a linked cloud account, because every
+calibration step uploads its samples and gets a graded result back.
+
+## 1. First Boot
+
+Power the unit on with **USB connected.**
+
+On the very first boot, with no calibration files present, the unit calibrates the
+gyroscope and accelerometer automatically. It prompts you through the sequence **on
+the serial monitor, not on the display**, so you need the USB connection to see it:
+
+- **Gyro:** 10 seconds completely at rest.
+- **Accel:** a six-orientation sequence (X+, X−, Y+, Y−, Z+, Z− facing down), 2.5
+  seconds each.
+
+```bash
+pio device monitor      # to watch the prompts
+```
+
+You should only ever need to do this once. Getting it right matters, but these are
+the *least* important inputs to the AHRS algorithm — don't agonize over them.
+
+> **💡 Note** — if the unit powers on but the display never links up, connect USB and
+> expect to walk through this sequence. A brand-new unit with no files runs it before
+> anything else.
+
+Mag calibration is **not** run at boot. You start it from the menu when you're ready,
+in [Calibration](#calibration) below.
+
+## 2. WiFi
+
+You can leave the unit as an access point you connect to directly, or — much better —
+teach it to join a network you own. Calibration is substantially easier with a
+reliable full-time connection.
+
+1. **Make sure WiFi is on.** The display's status bar shows **WiFi AP** in white or
+   green, not gray.
+2. **Join the unit's own access point:** network `Tern`, password `password`.
+3. **Browse to `192.168.4.1`.**
+4. In the **WiFi Networks** section, press **Scan for networks**, pick yours off the
+   list, and type the password. The page goes quiet for a few seconds during the
+   scan — the radio has to leave the Tern AP to listen.
+5. It will autoconnect to that network at the next boot whenever it's available, and
+   then appear on your network as **`tern.local`**.
+
+**Hidden networks and phone hotspots** don't appear in a scan. Type the name in by
+hand and tick **Hidden network / phone hotspot**; the unit then tries it by name
+whether or not it's beaconing.
+
+Two things bite people here, both on the phone side:
+
+- **The unit is 2.4 GHz only.** On iPhone, turn on *Personal Hotspot > Maximize
+  Compatibility*. On Android, set the hotspot band to 2.4 GHz.
+- **The hotspot has to actually be awake.** An idle hotspot stops beaconing and the
+  unit will never find it. Leave the Personal Hotspot screen open while pairing, or
+  toggle the hotspot off and back on.
+
+> **⚠ Note the chicken-and-egg** — a phone can't serve its own hotspot *and* stay
+> joined to the Tern AP at the same time. Save the credentials from the phone first,
+> then leave the page and switch the hotspot on; the unit picks it up within about a
+> minute on its own. From a laptop or a second phone, **Try now** next to a saved
+> network forces the attempt immediately.
+
+## 3. Pair With Dive Map
+
+Pairing uploads your calibrations for fitting and your dive logs for correction. It's
+done once per unit.
+
+1. Create an account at [map.terndiving.com](https://map.terndiving.com).
+2. Top right → the **gear** icon → **My Devices** → **Link a device**.
+3. On the unit: **SETUP > Link acct**.
+4. Type the code from the display into the web form, give the device a name, and
+   submit.
+
+That's it; the link persists. You should only have to do this once.
+
+> **💡 Note** — accepting a calibration **on the website** does not push it to the
+> unit by itself. Pull it with **Check for updates** under **Calibration Cloud Sync**
+> on `tern.local`. A calibration accepted on the device needs no such step.
+
+**→ Next: [Calibration](#calibration).**
 
 ---
 
@@ -184,7 +276,33 @@ After magnetometer calibration, systematic heading errors (5–20°) typically r
 
 **When to use:** after completing baseline + mounted mag cal. Run it somewhere magnetically clean, not a garage with a concrete floor.
 
-**First, check your compass.** The heading calibration aligns the IMU to an absolute reference. Most technical divers have some kind of compass mounted on their scooter, but it may or may not be accurate. My compass, for example, was ~12° off, and that led to a long series of confusing calibration results. Before aligning the IMU to your compass, make sure the compass is right. The best way is to point your scooter precisely at a distant object on a known bearing (use the alignment sights to get it as exact as you can), then correct whatever error your compass has. That gives you a single-bearing reference. Assuming your compass is round, you should be able to get a good calibration from there.
+**First, check your compass.** The heading calibration aligns the IMU to an absolute
+reference, so everything downstream inherits whatever error that reference has. Most
+technical divers have a compass mounted on their scooter, and it may or may not be
+accurate. Mine — mounted with a neatly milled, professional-looking piece of
+aluminum — was ~12° off, and that led to a long series of confusing calibration
+results. I've dived with others carrying 15° errors. **Do not assume your compass is
+right just because it's bolted to your scooter.**
+
+How to establish truth:
+
+1. **Find a known magnetic bearing between two points.** Your porch and a distant
+   landmark; the end of a pier and a recognizable building.
+2. **Look up the lat/lon of both points** and plug them into any of the online
+   bearing-between-two-points calculators.
+3. **Convert the true bearing to magnetic** if the calculator gave you true. Write it
+   down.
+4. **Line your scooter up on that heading** — use the alignment sights to get it as
+   exact as you can — and note the difference between what your compass reads and
+   what you now know to be true.
+
+That gives you a single-bearing reference. Assuming your compass is round, a good
+calibration follows from there.
+
+> **💡 Note** — each link in the reference chain (tube sight → handle compass → unit)
+> contributes its own 1–2°, which is most of the explanation for ±3° residuals seen
+> in the water. The 12-point check cannot see this error, because it is measured
+> against the same compass it's correcting to.
 
 **Part 1 — On-device collection:**
 
@@ -297,6 +415,22 @@ Speed cal measures how accurately the flow sensor reports speed: you travel a kn
 - After 3–6 runs the rolling average stabilizes; use ACCEPT each time.
 - Use RESET+ACCEPT when the DPV has been serviced or the impeller changed.
 
+**You can also back a speed cal out of a corrected dive.** When Dive Map corrects a
+dive against known positions it reports a speed factor `s`, where
+`true_speed = s × logged_speed`. The flow sensor's k-factor is a **divisor**, so:
+
+```
+k_new = k_old / s
+```
+
+Sanity check the sign before you trust it: if the unit read *fast* (`s < 1`), k goes
+**up**. The full derivation, the traps, and a worked example are in
+[calibration-guide.md](calibration-guide.md#deriving-k-from-a-corrected-dive).
+
+> **⛔ Stop** — a bad run already in the rolling average has to be cleared with
+> RESET+ACCEPT, not averaged out. Six good runs will not dilute one bad entry
+> enough to be safe.
+
 ---
 
 # Diving with DPV-Nav
@@ -335,7 +469,35 @@ Do the dive just like you normally would, except better informed. The display sh
 - **Arrive WP whenever you arrive at any marked point.** This snaps the dead-reckoning estimated position to that waypoint's true lat/lon, which clears the error built up on the leg behind you.
 - **Select WP** to set a new destination whenever you like. **Select WP → HOME** takes you back to your starting point.
 - **Mark** anything you want to find again later: with the menu closed, a single **BTN2** press. The screen flashes **MARKED** (or a red **NOT LOGGING** if logging is off, because Marks are only recorded in the log).
+- **Remember that it only navigates while you're scooting.** The unit assumes that
+  if you're moving slowly, you're finning around a wreck rather than covering ground.
+  Below about 6 m/min of flow it treats heading as meaningless and position as
+  stationary — so if you stop scooting and fin along, the unit thinks you're parked,
+  even though you're happily making way. This is deliberate, not a bug, but it will
+  cost you position if you fin a long distance.
 - **Take occasional current measurements** with **Current**: hold station pointing upstream for up to 60 s (see [Measuring the Current](#measuring-the-current)). In a typical lake dive, that might mean one reading in the shallows and another at 40 m. On a trip to the Alki Fishing Reef, it might mean one near the beginning, one at the reef, and one at the end.
+
+## Arriving at the Target
+
+When the navigator says you're at the wreck, you're probably close — but "close" is
+rarely the same as "close enough."
+
+**Plan on a search.** Put down a marker (a weight, a stake) and run out a reel. For
+planning purposes assume you're within **10% of the distance run since your last
+known fix**: 500 m of running means a 50 m radius of uncertainty.
+
+A 50 m circle is too big to search in one pass. Run a spiral instead: let out 5–7 m
+of line, make a circle, let out another 5–7 m, circle again.
+
+**What makes the number better.** A careful calibration and a straight run have
+produced 2–3% in practice. The things that move the needle, in rough order:
+
+- **Get your last fix as close to the target as possible.** If you can surface-transit
+  part of the way, do it, and get a 4-bar fix (HDOP < 1.0) before you submerge.
+- **Use Arrive WP at every known point.** Each one zeroes the accumulated error for
+  the leg ahead.
+- **Prefer long straight runs at constant speed.** A dive spent doing big circles
+  gives up a little accuracy on every turn.
 
 ## On Surfacing
 

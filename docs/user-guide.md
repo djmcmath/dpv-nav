@@ -326,7 +326,7 @@ Navigation is only as good as the last known position it starts from, so most of
 
 1. **Raise the GPS mast** and hold it as high as possible.
 2. **Wait until the LED on the nav unit goes solid green.** If the antenna dipped during the surface swim, the LED will have dropped back to red or amber. Solid green means a fresh, good fix is in the log, and that your position is as up to date and correct as possible before you start the dive.  That's also the fix the post-dive track correction anchors on.
-3. **Descend.** With a depth sensor, dive mode switches on by itself at about 4 ft (1.3 m). Without one, optionally, switch it yourself: **SETUP > Op Mode → DIVE**. Dive mode turns off GPS and WiFi; the LED drops to a faint green heartbeat every 4 s. Calibration is removed from the menu during DIVE mode.
+3. **Descend.** With a depth sensor, dive mode switches on by itself at about 10 ft (3 m). GPS and WiFi stay on through the surface swim, even with the unit riding a metre down in the wave-wash. Without one, optionally, switch it yourself: **SETUP > Op Mode → DIVE**. Dive mode turns off GPS and WiFi; the LED drops to a faint green heartbeat every 4 s. Calibration is removed from the menu during DIVE mode.
 
 ## During the Dive
 
@@ -339,7 +339,7 @@ Do the dive just like you normally would, except better informed. The display sh
 
 ## On Surfacing
 
-1. **Leave dive mode.** With a depth sensor, the unit returns to surface mode after staying shallower than ~2 ft (0.6 m) for 30 seconds. The LED stays dark during that dwell, then starts again from red as the GPS comes back. Without a depth sensor, switch it yourself: **SETUP > Op Mode → SURF**.
+1. **Leave dive mode.** With a depth sensor, the unit returns to surface mode after staying shallower than ~6.5 ft (2 m) for 15 seconds. A safety stop at 3–5 m stays in dive mode. The LED stays dark during that dwell, then starts again from red as the GPS comes back. Without a depth sensor, switch it yourself: **SETUP > Op Mode → SURF**.
 2. **Raise the mast and get a closing GPS fix.** Wait for solid green: the surfacing fix is now in the log.
 3. **Turn Log OFF.** That closes the file, and a closed file is what the automatic upload sends the next time the unit joins a known network. A file that is still open is skipped, so forgetting this step silently delays the dive's upload.
 
@@ -383,7 +383,7 @@ The NeoPixel on the nav board, visible through the clear housing. Underway, it's
 | Red/yellow flicker | No data from the GPS module at all: unplugged, or dead. |
 | Fast magenta | Nav failed its boot self-test and halted. Shown even if the display is dark, since the display link may be what failed. |
 | Brief faint green every 4 s | Heartbeat: dive mode (or GPS turned off) and heading is live. No flash at all means nav is blocked or its heading has gone bad. |
-| Dark | Powered off. Also briefly after surfacing: GPS stays off for the 30 s surface dwell, then the sequence starts again from red. |
+| Dark | Powered off. Also briefly after surfacing: GPS stays off for the 15 s surface dwell, then the sequence starts again from red. |
 
 After a dive, solid green again means the *surfacing* fix is logged. It resets every time the GPS restarts and every time a new log file opens.
 
@@ -517,7 +517,7 @@ There's no way to measure a current at depth by difference: no GPS, and usually 
 
 The device boots in the **last saved mode** (surface mode on first boot). Dive mode turns off GPS processing and the WiFi radio; surface mode turns both back on. The selection is saved to NVS immediately. Switch manually with **SETUP > Op Mode**.
 
-**Automatic depth trigger:** if a depth sensor is installed (see [Depth Sensor](#depth-sensor)), Op Mode also switches itself, with no button press needed. Crossing ~4 ft (1.3 m) depth engages dive mode immediately (radios off fast). Returning to the surface reverts to surface mode automatically, but only after staying shallower than ~2 ft (0.6 m) for 30 seconds straight, so wave chop at the surface doesn't flap GPS/WiFi on and off. The manual menu toggle still works, but on a board with a depth sensor the automatic trigger can override it on the next check (e.g. forcing DIVE on the bench with no water reverts to SURFACE after ~30 s).
+**Automatic depth trigger:** if a depth sensor is installed (see [Depth Sensor](#depth-sensor)), Op Mode also switches itself, with no button press needed. Crossing ~10 ft (3 m) depth engages dive mode immediately (radios off). That is deep enough that the surface swim never trips it, even with the unit a metre down in the wave-wash, and a real descent passes it in seconds. Returning to the surface reverts to surface mode automatically after staying shallower than ~6.5 ft (2 m) for 15 seconds straight. The 2 m exit is shallower than a safety stop, so the stop stays in dive mode, and the 1 m gap between the two depths keeps the mode from flapping. The manual menu toggle still works, but on a board with a depth sensor the automatic trigger can override it on the next check (e.g. forcing DIVE on the bench with no water reverts to SURFACE after ~15 s).
 
 ## Depth Sensor
 
@@ -614,8 +614,9 @@ Key settings in [src/config.h](../src/config.h):
 | `ENABLE_DEBUG_PACKET` | 0 | Nav device sends DebugPacket: 0 = off, 1 = on |
 | `NVS_POS_SAVE_INTERVAL_MS` | 30000 | How often estimated position is written to NVS (ms) |
 | `WATER_DENSITY_FRESH_KG_M3` / `WATER_DENSITY_SALT_KG_M3` | 997 / 1025 | Water density for depth calc — selected at runtime via SETUP > Water |
-| `DEPTH_DIVE_TRIGGER_M` | 1.3 | Depth (m) that auto-triggers dive mode (GPS+WiFi off) |
-| `DEPTH_SURFACE_REVERT_M` / `DEPTH_SURFACE_REVERT_DWELL_S` | 0.6 / 30 | Depth + dwell time to auto-revert to surface mode |
+| `DEPTH_DIVE_TRIGGER_M` | 3.0 | Depth (m) that auto-triggers dive mode (GPS+WiFi off) |
+| `DEPTH_SURFACE_REVERT_M` / `DEPTH_SURFACE_REVERT_DWELL_S` | 2.0 / 15 | Depth + dwell time to auto-revert to surface mode |
+| `DEPTH_OTA_UNDERWATER_M` | 0.6 | OTA updates are refused deeper than this |
 
 Units (metric m/m·min⁻¹ vs imperial ft/ft·min⁻¹) are a runtime toggle, DISPLAY > Units, not a compile-time setting. It governs distance, speed, and depth together.
 

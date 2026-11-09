@@ -488,13 +488,22 @@ constexpr float WATER_DENSITY_SALT_KG_M3  = 1025.0f;
 constexpr bool  DEFAULT_SALT_WATER        = true;  // saltwater diving is the primary use case
 
 // Depth-driven surface<->dive mode transition (disables GPS+WiFi in dive
-// mode). Asymmetric on purpose: entering dive mode is immediate (kill the
-// radios fast once underwater), reverting to surface requires staying
-// shallow for a sustained period (avoids GPS/WiFi flapping from wave action
-// at the surface).
-constexpr float DEPTH_DIVE_TRIGGER_M         = 1.3f;   // ~4 ft — crossing this enters dive mode immediately
-constexpr float DEPTH_SURFACE_REVERT_M       = 0.6f;  // ~2 ft — must stay shallower than this...
-constexpr float DEPTH_SURFACE_REVERT_DWELL_S = 30.0f;  // ...for this long before reverting to surface mode
+// mode). Both thresholds sit well below the surface swim on purpose: with the
+// mast up the depth sensor rides at 0.3-1.5 m in the wave-wash (2026-11-08
+// log peaked at 1.48 m), and the old 1.3 m trigger kept dropping into dive
+// mode there, then made the diver hold the unit under 0.6 m for 30 s to get
+// GPS back. A real descent goes through 3 m in seconds, so a few extra metres
+// with the radios on costs nothing.
+//   - Enter at 3 m, immediately: no dwell, nothing at the surface reaches it.
+//   - Exit below 2 m for 15 s: shallower than a 3-5 m safety stop, so a stop
+//     stays in dive mode (BTN2 Mark, cal hidden), and the 1 m gap between the
+//     two thresholds stops it flapping. At the surface the sensor never
+//     reaches 2 m, so wave surges don't keep restarting the 15 s count.
+// Not the OTA "unit is underwater" gate -- that is DEPTH_OTA_UNDERWATER_M.
+constexpr float DEPTH_DIVE_TRIGGER_M         = 3.0f;   // ~10 ft — crossing this enters dive mode immediately
+constexpr float DEPTH_SURFACE_REVERT_M       = 2.0f;   // ~6.5 ft — must stay shallower than this...
+constexpr float DEPTH_SURFACE_REVERT_DWELL_S = 15.0f;  // ...for this long before reverting to surface mode
+constexpr float DEPTH_OTA_UNDERWATER_M       = 0.6f;   // ~2 ft — OTA refused deeper than this
 
 // ---------------------------------------------------------------------------
 // Cloud calibration (docs/cloud-calibration-plan.md)

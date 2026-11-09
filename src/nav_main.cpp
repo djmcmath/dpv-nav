@@ -458,7 +458,7 @@ static char wpBuf[3200];  // waypoint list packet — up to 50 waypoints in JSON
 // ---- OTA gating (see nav_main.h / net/ota.cpp) -----------------------------
 const char* otaBlockedReason() {
     if (gDiveMode) return "Dive mode is on";
-    if (depth::isPresent() && depth::getDepth_m() > DEPTH_SURFACE_REVERT_M) {
+    if (depth::isPresent() && depth::getDepth_m() > DEPTH_OTA_UNDERWATER_M) {
         return "The unit is underwater";
     }
     if (logging::isLogging()) return "Logging is on -- stop logging first";

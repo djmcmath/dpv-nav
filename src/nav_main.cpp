@@ -2202,8 +2202,9 @@ static void setDiveMode(bool dive) {
 // device stays in whatever state it was in, so this is purely informational.
 static void sendGapFillRefusal(const char* why) {
     CalCloudResultPacket rpkt{};
-    rpkt.cal_type = (uint8_t)CalType::BASELINE;
-    rpkt.stage    = (uint8_t)CalCloudStage::FAILED;
+    rpkt.cal_type    = (uint8_t)CalType::BASELINE;
+    rpkt.stage       = (uint8_t)CalCloudStage::FAILED;
+    rpkt.installable = false;   // a gap-fill: the display names step 1a
     strncpy(rpkt.error, why, sizeof(rpkt.error) - 1);
     rpkt.error[sizeof(rpkt.error) - 1] = '\0';
 

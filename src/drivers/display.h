@@ -8,6 +8,19 @@ struct CalProgressPacket;
 
 namespace display {
 
+// The calibration steps as the cal screens present them
+// (docs/cal-screens-unified-plan.md): 1 Baseline, 1a Fill gaps (optional),
+// 2 Mounted, 3 Heading. Every cal screen's header shows all four, with this
+// one marked.
+enum class CalStep : uint8_t { BASELINE, FILL_GAPS, MOUNTED, HEADING };
+
+// Why a cal ended on the failed screen, which decides what it says to do next.
+enum class CalFailKind : uint8_t {
+    TRANSPORT,  // the upload didn't get through: samples are on the unit, retry at tern.local
+    REJECTED,   // the server got the samples and refused to fit them: collect again
+    REFUSED,    // nav refused to start a gap-fill (no baseline, no target map): nothing collected
+};
+
 // Initialize SPI bus and ST7789 TFT (320x240 landscape).  Call once during setup.
 bool init();
 
@@ -168,46 +181,47 @@ void showHdgFourierCalPrompt(int step, int total, float targetDeg, float indicat
 void showHdgFourierCalAck(int step, int total, float targetDeg, float indicatedDeg,
                            float errDeg, float avgErrDeg);
 
-// Cloud calibration screens (docs/cloud-calibration-plan.md). Shown after a
-// bin-coverage cal (Baseline/Mounted), or the 12-point Fourier heading cal
-// (heading-cal-cloud-plan.md), completes and the nav device uploads the CSV
-// for fitting.
+// Calibration screens share one frame: header (step strip, step name,
+// counter), work area, status line, and two softkeys (BTN1 left, BTN2 right).
+// See "The calibration frame" in display.cpp and
+// docs/cal-screens-unified-plan.md. Every one is safe to call on every render:
+// it repaints only what changed.
 //
-// Waiting: shown immediately, before the (blocking, on the nav device)
-// upload+fit round trip has a result. secondsWaiting is cosmetic only.
-void showCloudCalWaiting(uint32_t secondsWaiting);
+// The left softkey's hold fill (0-100) and the "Hold BTN1 to ..." hint, from
+// display_main's util/cal_keys.h tracker. Call before each cal render.
+void setCalKeysOverlay(uint8_t holdPct, bool hint);
 
-// No WiFi connection — upload was skipped. BTN2 dismisses.
-void showCloudCalOffline();
+// Shared closing screens, after a step's collection ends and nav uploads the
+// samples for fitting (docs/cloud-calibration-plan.md).
+//
+// Uploading: nav is blocked in the upload and fit. secondsWaiting is cosmetic.
+void showCloudCalWaiting(CalStep step, uint32_t secondsWaiting);
 
-// Upload/fit failed, or the nav device never responded. BTN2 dismisses.
-// `rejected` = the upload worked and the server refused to fit the samples;
-// the screen then says so instead of offering a retry that cannot help.
-void showCloudCalFailed(const char* message, bool rejected = false);
+// No WiFi: the upload was skipped; the samples stay on the unit. BTN2: OK.
+void showCloudCalOffline(CalStep step);
 
-// Fit succeeded — accept/reject the result.
-//   quality:      0=good, 1=warn, 2=bad (CalCloudQuality)
-//   rmsPct:       baseline/mounted: % of fitted radius. hdg: leave-one-out
-//                 worst-case error in degrees (the number the band grades; -1 = the
-//                 server did not send it, shown as "--"), reusing the same wire
-//                 field rather than growing a parallel one.
-//                 hdg gets its own layout: one big number + GOOD/OK/POOR, and
-//                 ACCEPT/REJECT as two half-screen buttons; no recommendation
-//                 text (it quoted the number a second time).
+// The upload failed, the server refused to fit, or nav refused to start a
+// gap-fill (see CalFailKind). message is shown wrapped, up to 3 lines. BTN2: OK.
+void showCloudCalFailed(CalStep step, CalFailKind kind, const char* message);
+
+// The fit succeeded: the result and the decision. BTN2 = ACCEPT, hold BTN1 =
+// REJECT.
+//   quality:      CalCloudQuality (GOOD/WARN/BAD), shown as GOOD/OK/POOR
+//   value:        baseline/mounted: rms_pct, as a %. heading: the leave-one-out
+//                 worst-case error in degrees, which arrives in the same wire
+//                 field; < 0 = the server didn't send it, shown as "--".
 //   coverageGaps: baseline only, empty coverage-grid cells; -1 = not applicable
 //                 (mounted/hdg fit, or a pre-9-axis-firmware baseline CSV) and
 //                 shows nothing extra. See baseline-cal-coverage-feedback-plan.md.
-//   choice:       0=ACCEPT, 1=REJECT (highlighted item)
-//   calType:      CalType enum (BASELINE/MOUNTED/HDG) -- selects the "%"/"deg" label.
-void showCloudCalResult(uint8_t quality, float rmsPct, const char* recommendation,
-                         int16_t coverageGaps, uint8_t choice, uint8_t calType);
+void showCloudCalResult(CalStep step, uint8_t quality, float value, int16_t coverageGaps);
 
-// Gap-fill's upload result screen: no ACCEPT/REJECT, single BTN2 dismiss.
-// coverageGaps here counts remaining thin/empty cells in THIS PATCH's own
-// coverage (a handful out of 60 -- gap-fill only samples what it was sent to);
-// -1 = not applicable. See the definition for why this fit is never offered
-// as something to install.
-void showGapFillUploaded(float rmsPct, const char* recommendation, int16_t coverageGaps);
+// Gap-fill's upload result: nothing to accept on the unit, BTN2: OK. See the
+// definition for why that fit is never offered as an install. coverageGaps
+// counts thin or empty cells in this patch's own coverage; -1 = not sent.
+void showGapFillUploaded(float rmsPct, int16_t coverageGaps);
+
+// After a BTN1 hold: "Quit" (a collecting screen) or "Rejected" (a result).
+void showCalDiscarded(CalStep step, bool rejected);
 
 // Cloud account-link screens (device-code account link). Shown after the
 // diver selects "Link acct" from the Config menu. No URL is ever shown --

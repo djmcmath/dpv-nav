@@ -373,14 +373,15 @@ struct CalCloudResultPacket {
     int16_t coverage_gaps;        // stage == DONE only; baseline only. -1 = not
                                    // applicable (mounted, or pre-9-axis-firmware CSV).
                                    // See divemap's baseline-cal-coverage-feedback-plan.md.
-    // stage == DONE only. False for a gap-fill upload: that fit is computed
+    // Every stage. False for a gap-fill upload: that fit is computed
     // from ONLY the cells the diver just patched (a handful out of 60), and
     // is a merge candidate on the website, never something to install
     // standalone. True (the default) preserves old wire behaviour for
     // baseline/mounted, where accepting IS the intended action. The display
     // must not offer ACCEPT/REJECT when this is false -- see
     // divemap/docs/architecture/baseline-cal-coverage-feedback-plan.md,
-    // "gap-fill never overwrites the active baseline on its own."
+    // "gap-fill never overwrites the active baseline on its own." Also false
+    // on nav's refusal to start a gap-fill, so the display names step 1a.
     bool    installable = true;
 };
 

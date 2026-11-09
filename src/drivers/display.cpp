@@ -144,13 +144,9 @@ static char g_cloudLinkWaitingLastCode[16] = "";
 // redraw on the next prompt call.
 static bool g_hdgCalPromptStaticDrawn = false;
 
-// Heading cal result screen: headline is drawn once, and only the two
-// buttons repaint when the ACCEPT/REJECT choice changes. Big filled buttons
-// repainted at 4 Hz would flicker. Reset by clear() and reinit().
-static bool    g_hdgResultDrawn     = false;
-static int8_t  g_hdgResultLastChoice = -1;
-static uint8_t g_hdgResultLastQuality = 0;
-static float   g_hdgResultLastErr     = 0.0f;
+// The cal frame's per-band caches (header, status, keys, work area); see
+// "The calibration frame" below. Reset by clear() and reinit().
+namespace display { static void resetCalFrame(); }
 
 // ---------------------------------------------------------------------------
 // Nav mode layout constants
@@ -260,7 +256,7 @@ void clear() {
     g_cloudLinkWaitingStaticDrawn = false;
     g_cloudLinkWaitingLastCode[0] = '\0';
     g_hdgCalPromptStaticDrawn = false;
-    g_hdgResultDrawn = false;
+    resetCalFrame();
     tft.fillScreen(COLOR_BLACK);
     delay(50);
     bootLineY = 0;
@@ -278,7 +274,7 @@ void reinit() {
     g_cloudLinkWaitingStaticDrawn = false;
     g_cloudLinkWaitingLastCode[0] = '\0';
     g_hdgCalPromptStaticDrawn = false;
-    g_hdgResultDrawn = false;
+    resetCalFrame();
     Serial.println("[DISP] reinit complete");
 }
 
@@ -1527,6 +1523,266 @@ void showSpeedCalResult(uint16_t dist_ft, uint16_t elapsed_s,
 }
 
 // ---------------------------------------------------------------------------
+// The calibration frame (docs/cal-screens-unified-plan.md)
+//
+// Every cal screen -- each step's collecting screen and the shared upload,
+// result and ending screens -- is drawn in one frame:
+//
+//   y   0-23   header: step strip 1 1a 2 3 (current step on a cyan box), the
+//              step's name, a counter right-aligned; cyan rule at y 23
+//   y  24-183  work area: the only band that differs between screens
+//   y 186-209  status: one instruction at size 2; dim rule at y 184
+//   y 212-239  softkeys: BTN1 left, BTN2 right
+//
+// Each band keeps its own last-drawn cache, all reset by clear() and reinit(),
+// so a screen calls the helpers on every render and nothing is repainted
+// unless it changed. The cal screens render at up to 10 Hz, and anything
+// repainted that often flickers.
+// ---------------------------------------------------------------------------
+static constexpr int CAL_WORK_Y   = 24;
+static constexpr int CAL_WORK_H   = 160;      // y 24-183
+static constexpr int CAL_STATUS_Y = 190;
+static constexpr int CAL_KEY_Y    = 212;
+static constexpr int CAL_KEY_W    = 156;
+static constexpr int CAL_KEY_H    = 26;
+static constexpr int CAL_KEY_R    = 5;
+static constexpr int CAL_KEY_X[2] = { 2, 162 };   // BTN1 is physically on the left
+static constexpr uint16_t COLOR_STEP_TEXT = 0x52AA;  // the steps not being worked
+static constexpr uint16_t COLOR_DIM_TEXT  = 0x4208;  // a key that can't act yet
+static constexpr uint16_t COLOR_OPEN_CELL = 0x1082;  // a grid cell nothing is asked of
+
+enum class KeyStyle : uint8_t {
+    BLANK,   // dim outline, no label: the button does nothing here
+    DIM,     // dim label: the action isn't available yet
+    NORMAL,  // gray outline, white label
+    GO,      // green fill: MARK once the level gate is ready
+    HOLD,    // gray label; fills red while BTN1 is held (QUIT, REJECT)
+};
+struct CalKey  { const char* label; KeyStyle style; };
+struct CalText { const char* text; uint16_t color; };
+
+static const CalKey KEY_BLANK  = { "", KeyStyle::BLANK };
+static const CalKey KEY_QUIT   = { "hold: QUIT", KeyStyle::HOLD };
+static const CalKey KEY_REJECT = { "hold: REJECT", KeyStyle::HOLD };
+static const CalKey KEY_OK     = { "OK", KeyStyle::NORMAL };
+
+static int textW(const char* s, int size) { return (int)strlen(s) * 6 * size; }
+
+// --- Softkey overlay, pushed in by display_main before each render ----------
+static uint8_t g_calHoldPct = 0;
+static bool    g_calHint    = false;
+
+void setCalKeysOverlay(uint8_t holdPct, bool hint) {
+    g_calHoldPct = holdPct > 100 ? 100 : holdPct;
+    g_calHint    = hint;
+}
+
+// --- Header -----------------------------------------------------------------
+static int8_t g_calHdrStep = -1;
+static char   g_calHdrCounter[12] = "";
+static int    g_calHdrCounterW = 0;
+
+static const char* const kCalStepIds[4]   = { "1", "1a", "2", "3" };
+static const char* const kCalStepNames[4] = { "BASELINE", "FILL GAPS", "MOUNTED", "HEADING" };
+
+// counter counts toward whatever ends the step, or names the phase on the
+// closing screens; "" draws none.
+static void drawCalHeader(CalStep step, const char* counter) {
+    const int s = (int)step;
+    if (s != g_calHdrStep) {
+        g_calHdrStep       = (int8_t)s;
+        g_calHdrCounter[0] = '\0';
+        g_calHdrCounterW   = 0;
+        invalidateNavCache();
+        tft.fillRect(0, 0, SCREEN_WIDTH, 23, COLOR_BLACK);
+        tft.setTextSize(2);
+        int x = 2;
+        for (int i = 0; i < 4; i++) {
+            const int w = textW(kCalStepIds[i], 2) + 6;
+            if (i == s) {
+                tft.fillRoundRect(x, 1, w, 20, 3, COLOR_CYAN);
+                tft.setTextColor(COLOR_BLACK, COLOR_CYAN);
+            } else {
+                tft.setTextColor(COLOR_STEP_TEXT, COLOR_BLACK);
+            }
+            tft.setCursor(x + 3, 3);
+            tft.print(kCalStepIds[i]);
+            x += w + 5;
+        }
+        tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
+        tft.setCursor(x + 1, 3);
+        tft.print(kCalStepNames[s]);
+        tft.drawFastHLine(0, 23, SCREEN_WIDTH, COLOR_CYAN);
+    }
+    if (strcmp(counter, g_calHdrCounter) != 0) {
+        const int w = textW(counter, 2);
+        if (g_calHdrCounterW > w) {
+            tft.fillRect(318 - g_calHdrCounterW, 3, g_calHdrCounterW - w, 16, COLOR_BLACK);
+        }
+        tft.setTextSize(2);
+        tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+        tft.setCursor(318 - w, 3);
+        tft.print(counter);
+        strncpy(g_calHdrCounter, counter, sizeof(g_calHdrCounter) - 1);
+        g_calHdrCounter[sizeof(g_calHdrCounter) - 1] = '\0';
+        g_calHdrCounterW = w;
+    }
+}
+
+// --- Status line --------------------------------------------------------------
+static char g_calStatusSig[96] = "";   // the parts as last drawn, colours included
+static int  g_calStatusW = 0;
+
+// Parts are drawn left to right, each in its own colour ("Next: " gray, then
+// what's next in white). The line holds 26 characters.
+static void drawCalStatus(const CalText* parts, int n) {
+    char sig[sizeof(g_calStatusSig)];
+    int k = 0;
+    sig[0] = '\0';
+    for (int i = 0; i < n && k < (int)sizeof(sig); i++) {
+        k += snprintf(sig + k, sizeof(sig) - k, "%04x%s|", parts[i].color, parts[i].text);
+    }
+    if (strcmp(sig, g_calStatusSig) == 0) return;
+    strncpy(g_calStatusSig, sig, sizeof(g_calStatusSig) - 1);
+    g_calStatusSig[sizeof(g_calStatusSig) - 1] = '\0';
+
+    tft.drawFastHLine(0, 184, SCREEN_WIDTH, COLOR_DIM_GRAY);
+    tft.setTextSize(2);
+    int x = 4;
+    for (int i = 0; i < n; i++) {
+        tft.setTextColor(parts[i].color, COLOR_BLACK);
+        tft.setCursor(x, CAL_STATUS_Y);
+        tft.print(parts[i].text);
+        x += textW(parts[i].text, 2);
+    }
+    if (g_calStatusW > x) tft.fillRect(x, CAL_STATUS_Y, g_calStatusW - x, 16, COLOR_BLACK);
+    g_calStatusW = x;
+}
+
+// --- Softkeys -----------------------------------------------------------------
+struct CalKeyCache { char label[16]; int8_t style; int fillPx; };
+static CalKeyCache g_calKeyCache[2] = { { "", -1, 0 }, { "", -1, 0 } };
+
+// Columns [from, to) of the rounded key shape, for the hold fill. Same corner
+// test as the key's outline, so the fill stays inside it.
+static void fillKeyColumns(int x, int from, int to, uint16_t color) {
+    for (int i = from; i < to; i++) {
+        const int ccx = i < CAL_KEY_R ? CAL_KEY_R
+                      : i > CAL_KEY_W - 1 - CAL_KEY_R ? CAL_KEY_W - 1 - CAL_KEY_R : i;
+        const int dx = i - ccx;
+        const int inset = dx ? CAL_KEY_R - (int)sqrtf((float)(CAL_KEY_R * CAL_KEY_R - dx * dx)) : 0;
+        tft.drawFastVLine(x + i, CAL_KEY_Y + inset, CAL_KEY_H - 2 * inset, color);
+    }
+}
+
+static void drawCalKey(int side, const CalKey& k, uint8_t holdPct) {
+    CalKeyCache& c = g_calKeyCache[side];
+    const int x = CAL_KEY_X[side];
+    const int fillPx = (k.style == KeyStyle::HOLD) ? (int)holdPct * CAL_KEY_W / 100 : 0;
+    const bool sameKey = c.style == (int8_t)k.style && strcmp(c.label, k.label) == 0;
+    if (sameKey && fillPx == c.fillPx) return;
+
+    const int lx = x + (CAL_KEY_W - textW(k.label, 2)) / 2;
+    const int ly = CAL_KEY_Y + 6;
+    tft.setTextSize(2);
+    if (sameKey && fillPx > c.fillPx) {
+        // The hold is growing: paint only the new columns, then the label back
+        // over them. Transparent, because part of it sits on red.
+        fillKeyColumns(x, c.fillPx, fillPx, COLOR_RED);
+        tft.setTextColor(COLOR_WHITE);
+        tft.setCursor(lx, ly);
+        tft.print(k.label);
+        c.fillPx = fillPx;
+        return;
+    }
+
+    // A different key, or a hold let go: repaint the whole key.
+    uint16_t outline = COLOR_GRAY, ink = COLOR_WHITE, bg = COLOR_BLACK;
+    switch (k.style) {
+        case KeyStyle::BLANK: outline = COLOR_DIM_GRAY; break;
+        case KeyStyle::DIM:   outline = COLOR_DIM_GRAY; ink = COLOR_DIM_TEXT; break;
+        case KeyStyle::GO:    outline = COLOR_GREEN; ink = COLOR_BLACK; bg = COLOR_GREEN; break;
+        case KeyStyle::HOLD:  ink = fillPx > 0 ? COLOR_WHITE : COLOR_GRAY; break;
+        default:              break;
+    }
+    tft.fillRoundRect(x, CAL_KEY_Y, CAL_KEY_W, CAL_KEY_H, CAL_KEY_R, bg);
+    tft.drawRoundRect(x, CAL_KEY_Y, CAL_KEY_W, CAL_KEY_H, CAL_KEY_R, outline);
+    if (fillPx > 0) fillKeyColumns(x, 0, fillPx, COLOR_RED);
+    if (k.style != KeyStyle::BLANK) {
+        if (fillPx > 0) tft.setTextColor(ink);
+        else            tft.setTextColor(ink, bg);
+        tft.setCursor(lx, ly);
+        tft.print(k.label);
+    }
+    strncpy(c.label, k.label, sizeof(c.label) - 1);
+    c.label[sizeof(c.label) - 1] = '\0';
+    c.style  = (int8_t)k.style;
+    c.fillPx = fillPx;
+}
+
+// Status line and both keys. A short BTN1 press on a screen whose left key is
+// a hold puts the hint in the status line for a moment (display_main times it).
+static void drawCalFooter(const CalText* parts, int n, const CalKey& left, const CalKey& right) {
+    if (g_calHint && left.style == KeyStyle::HOLD) {
+        const CalText hint = { strstr(left.label, "REJECT") ? "Hold BTN1 to reject"
+                                                            : "Hold BTN1 to quit",
+                               COLOR_WHITE };
+        drawCalStatus(&hint, 1);
+    } else {
+        drawCalStatus(parts, n);
+    }
+    drawCalKey(0, left, g_calHoldPct);
+    drawCalKey(1, right, 0);
+}
+
+// --- Work area ----------------------------------------------------------------
+// The work area belongs to one screen at a time. A screen passes a signature
+// of its static content; a different one clears the band and the screen draws
+// that content again. This is also what keeps the endings from repainting the
+// whole screen on every render, which they used to do at 4 Hz.
+static uint32_t g_calWorkSig = 0;   // 0 = nothing drawn
+
+enum class CalWork : uint8_t {
+    BARS = 1, GRID, MOUNTED, HDG_PROMPT, HDG_MARKED,
+    UPLOAD, RESULT, SENT, OFFLINE, FAILED, DISCARDED, INSTALLED,
+};
+
+static uint32_t calSig(uint32_t h, const void* data, size_t n) {
+    const uint8_t* p = (const uint8_t*)data;
+    for (size_t i = 0; i < n; i++) { h ^= p[i]; h *= 16777619u; }
+    return h;
+}
+static uint32_t calSig(CalWork id) { return calSig(2166136261u, &id, sizeof(id)); }
+static uint32_t calSigStr(uint32_t h, const char* s) { return calSig(h, s, s ? strlen(s) : 0); }
+
+// True when the band was just cleared for `sig`, i.e. the caller should draw
+// its static content now.
+static bool claimCalWork(uint32_t sig) {
+    if (sig == 0) sig = 1;
+    if (sig == g_calWorkSig) return false;
+    g_calWorkSig = sig;
+    tft.fillRect(0, CAL_WORK_Y, SCREEN_WIDTH, CAL_WORK_H, COLOR_BLACK);
+    return true;
+}
+
+static void resetCalFrame() {
+    g_calHdrStep       = -1;
+    g_calHdrCounter[0] = '\0';
+    g_calHdrCounterW   = 0;
+    g_calStatusSig[0]  = '\0';
+    g_calStatusW       = 0;
+    for (auto& k : g_calKeyCache) { k.label[0] = '\0'; k.style = -1; k.fillPx = 0; }
+    g_calWorkSig = 0;
+}
+
+static void drawWorkText(int x, int y, const char* s, uint8_t size, uint16_t color) {
+    tft.setTextSize(size);
+    tft.setTextColor(color, COLOR_BLACK);
+    tft.setCursor(x, y);
+    tft.print(s);
+}
+
+// ---------------------------------------------------------------------------
 // Fourier heading calibration: prompt screen
 //
 // Static layout (header/labels/separators/footer instruction) is drawn once
@@ -1776,10 +2032,9 @@ void showHdgFourierCalAck(int step, int total, float targetDeg, float indicatedD
 // Cloud calibration (docs/cloud-calibration-plan.md)
 // ---------------------------------------------------------------------------
 
-// Greedy word-wrap for short status text at text size 1. maxCharsPerLine
-// should stay comfortably under SCREEN_WIDTH / 6 (the default GFX font is
-// ~6px wide per char at size 1); no other screen in this file has needed
-// multi-line body text before now, so this is new rather than reused.
+// Greedy word-wrap for short status text, at whatever text size the caller
+// set. maxCharsPerLine must fit SCREEN_WIDTH at that size (6 px a character
+// per unit of size).
 static void printWrapped(int16_t x, int16_t y, const char* text, int maxCharsPerLine,
                           int16_t lineHeight, int maxLines) {
     if (!text) return;
@@ -1806,98 +2061,83 @@ static void printWrapped(int16_t x, int16_t y, const char* text, int maxCharsPer
     }
 }
 
-void showCloudCalWaiting(uint32_t secondsWaiting) {
+// Upload in progress. Nav is blocked in the upload and fit and sends
+// nothing, so only the seconds count moves; it redraws when it changes.
+void showCloudCalWaiting(CalStep step, uint32_t secondsWaiting) {
     if (!tftReady) return;
-    invalidateNavCache();
-    tft.fillScreen(COLOR_BLACK);
-
-    tft.setTextSize(2);
-    tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
-    tft.setCursor(4, 4);
-    tft.print("CLOUD CAL");
-    tft.drawFastHLine(0, 28, SCREEN_WIDTH, COLOR_CYAN);
-
-    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
-    tft.setCursor(4, 60);
-    tft.print("Uploading...");
-
-    tft.setTextSize(1);
-    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
-    tft.setCursor(4, 92);
-    tft.print("Please wait, this can take");
-    tft.setCursor(4, 106);
-    tft.print("up to 30 seconds.");
-
-    char buf[16];
-    snprintf(buf, sizeof(buf), "%lus", (unsigned long)secondsWaiting);
-    tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
-    tft.setCursor(4, 130);
-    tft.print(buf);
+    static uint32_t sShownS = UINT32_MAX;
+    drawCalHeader(step, "UPLOAD");
+    if (claimCalWork(calSig(CalWork::UPLOAD))) {
+        drawWorkText(8, 44, "Uploading", 3, COLOR_WHITE);
+        drawWorkText(8, 128, "Takes up to 30 s.", 2, COLOR_GRAY);
+        drawWorkText(8, 150, "The unit is busy.", 2, COLOR_GRAY);
+        sShownS = UINT32_MAX;
+    }
+    if (secondsWaiting != sShownS) {
+        sShownS = secondsWaiting;
+        char buf[12];
+        snprintf(buf, sizeof(buf), "%lu s  ", (unsigned long)secondsWaiting);
+        drawWorkText(8, 80, buf, 3, COLOR_YELLOW);
+    }
+    static const CalText kStatus[] = { { "Please wait", COLOR_GRAY } };
+    drawCalFooter(kStatus, 1, KEY_BLANK, KEY_BLANK);
 }
 
-void showCloudCalOffline() {
+void showCloudCalOffline(CalStep step) {
     if (!tftReady) return;
-    invalidateNavCache();
-    tft.fillScreen(COLOR_BLACK);
-
-    tft.setTextSize(2);
-    tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
-    tft.setCursor(4, 4);
-    tft.print("CLOUD CAL");
-    tft.drawFastHLine(0, 28, SCREEN_WIDTH, COLOR_CYAN);
-
-    tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
-    tft.setCursor(4, 50);
-    tft.print("No WiFi");
-
-    tft.setTextSize(1);
-    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
-    tft.setCursor(4, 84);
-    tft.print("Connect to WiFi to finish");
-    tft.setCursor(4, 98);
-    tft.print("calibration in the cloud.");
-    tft.setCursor(4, 114);
-    tft.print("Raw samples are saved --");
-    tft.setCursor(4, 128);
-    tft.print("nothing is lost.");
-
-    tft.drawFastHLine(0, 152, SCREEN_WIDTH, COLOR_CYAN);
-    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
-    tft.setCursor(4, 160);
-    tft.print("Press BTN2 to exit");
+    drawCalHeader(step, "OFFLINE");
+    if (claimCalWork(calSig(CalWork::OFFLINE))) {
+        drawWorkText(8, 44, "No WiFi", 3, COLOR_YELLOW);
+        drawWorkText(8, 84, "Samples are saved", 2, COLOR_WHITE);
+        drawWorkText(8, 104, "on the unit.", 2, COLOR_WHITE);
+    }
+    static const CalText kStatus[] = { { "Next: ", COLOR_GRAY },
+                                       { "upload at tern.local", COLOR_WHITE } };
+    drawCalFooter(kStatus, 2, KEY_BLANK, KEY_OK);
 }
 
-void showCloudCalFailed(const char* message, bool rejected) {
+void showCloudCalFailed(CalStep step, CalFailKind kind, const char* message) {
     if (!tftReady) return;
-    invalidateNavCache();
-    tft.fillScreen(COLOR_BLACK);
+    const char* msg = (message && message[0]) ? message : "unknown error";
+    drawCalHeader(step, "FAILED");
+    uint32_t sig = calSig(CalWork::FAILED);
+    sig = calSig(sig, &kind, sizeof(kind));
+    sig = calSigStr(sig, msg);
+    if (claimCalWork(sig)) {
+        const char* head = kind == CalFailKind::REJECTED ? "Fit rejected"
+                         : kind == CalFailKind::REFUSED  ? "Can't start"
+                                                         : "Upload failed";
+        drawWorkText(8, 44, head, 3, COLOR_RED);
+        // 26 characters a line at size 2; the wire's 64-character error fits
+        // in three. nav cuts a longer one at a sentence or word boundary.
+        tft.setTextSize(2);
+        tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+        printWrapped(8, 84, msg, 26, 20, 3);
+    }
+    // A rejection is the server's verdict on samples it received, and a
+    // refusal means nothing was collected: retrying at tern.local helps
+    // neither, so only a transport failure points there.
+    static const CalText kTransport[] = { { "Next: ", COLOR_GRAY }, { "retry at tern.local", COLOR_WHITE } };
+    static const CalText kRejected[]  = { { "Next: ", COLOR_GRAY }, { "collect again", COLOR_WHITE } };
+    static const CalText kRefused[]   = { { "Nothing was collected", COLOR_GRAY } };
+    switch (kind) {
+        case CalFailKind::REJECTED: drawCalFooter(kRejected, 2, KEY_BLANK, KEY_OK); break;
+        case CalFailKind::REFUSED:  drawCalFooter(kRefused, 1, KEY_BLANK, KEY_OK);  break;
+        default:                    drawCalFooter(kTransport, 2, KEY_BLANK, KEY_OK); break;
+    }
+}
 
-    tft.setTextSize(2);
-    tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
-    tft.setCursor(4, 4);
-    tft.print("CLOUD CAL");
-    tft.drawFastHLine(0, 28, SCREEN_WIDTH, COLOR_CYAN);
-
-    tft.setTextColor(COLOR_RED, COLOR_BLACK);
-    tft.setCursor(4, 50);
-    tft.print(rejected ? "Fit rejected" : "Upload failed");
-
-    tft.setTextSize(1);
-    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
-    printWrapped(4, 84, message ? message : "unknown error", 50, 12, 3);
-
-    // A rejection is the server's verdict on samples it received: sending the
-    // same ones again gets the same answer, so do not offer a retry.
-    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
-    tft.setCursor(4, 132);
-    tft.print(rejected ? "The samples uploaded fine." : "Raw samples are saved --");
-    tft.setCursor(4, 146);
-    tft.print(rejected ? "Collect again to replace them." : "retry from tern.local.");
-
-    tft.drawFastHLine(0, 168, SCREEN_WIDTH, COLOR_CYAN);
-    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
-    tft.setCursor(4, 176);
-    tft.print("Press BTN2 to exit");
+// After a hold on BTN1: QUIT on a collecting screen, REJECT on a result.
+void showCalDiscarded(CalStep step, bool rejected) {
+    if (!tftReady) return;
+    drawCalHeader(step, "");
+    if (claimCalWork(calSig(calSig(CalWork::DISCARDED), &rejected, sizeof(rejected)))) {
+        drawWorkText(8, 52, rejected ? "Rejected" : "Quit", 4, COLOR_WHITE);
+        drawWorkText(8, 104, rejected ? "Your old cal stays on." : "Nothing was uploaded.", 2,
+                     COLOR_GRAY);
+    }
+    static const CalText kStatus[] = { { "Back to the nav screen", COLOR_GRAY } };
+    drawCalFooter(kStatus, 1, KEY_BLANK, KEY_BLANK);
 }
 
 // ---------------------------------------------------------------------------
@@ -1941,204 +2181,85 @@ void showLogUpload(uint8_t done, uint8_t total, uint32_t secondsWaiting) {
     tft.print(buf);
 }
 
-// Heading cal result: one number, one grade, two buttons that fill the lower
-// half. maxErrDeg is the server's leave-one-out worst case -- the error to
-// expect at a heading the fit didn't see, which is what the band grades; < 0 means the server didn't send it, shown as "--" rather than falling
-// back to the RMS. The recommendation text is deliberately not shown: it
-// quotes the same number again, which is how this screen came to show two
-// different "max errors".
-static void drawHdgResultButton(int16_t x, const char* label, const char* hint, bool selected) {
-    static constexpr int16_t BTN_Y = 124, BTN_W = 154, BTN_H = 112;
-    const uint16_t fill = selected ? COLOR_YELLOW : COLOR_DIM_GRAY;
-    const uint16_t ink  = selected ? COLOR_BLACK  : COLOR_GRAY;
-    tft.fillRoundRect(x, BTN_Y, BTN_W, BTN_H, 8, fill);
-    if (!selected) tft.drawRoundRect(x, BTN_Y, BTN_W, BTN_H, 8, COLOR_GRAY);
-
-    tft.setTextColor(ink, fill);
-    tft.setTextSize(3);
-    const int16_t labelW = (int16_t)strlen(label) * 18;
-    tft.setCursor(x + (BTN_W - labelW) / 2, BTN_Y + 34);
-    tft.print(label);
-
-    tft.setTextSize(1);
-    const int16_t hintW = (int16_t)strlen(hint) * 6;
-    tft.setCursor(x + (BTN_W - hintW) / 2, BTN_Y + 80);
-    tft.print(hint);
-}
-
-static void showHdgCalResult(uint8_t quality, float maxErrDeg, uint8_t choice) {
-    // A tern.local retry-upload can deliver a new result while this is up.
-    if (!g_hdgResultDrawn || quality != g_hdgResultLastQuality ||
-        maxErrDeg != g_hdgResultLastErr) {
-        g_hdgResultLastQuality = quality;
-        g_hdgResultLastErr     = maxErrDeg;
-        invalidateNavCache();
-        tft.fillScreen(COLOR_BLACK);
-
-        uint16_t bandColor = COLOR_GREEN;
-        const char* bandLabel = "GOOD";
-        if (quality == 1)      { bandColor = COLOR_YELLOW; bandLabel = "OK"; }
-        else if (quality == 2) { bandColor = COLOR_RED;    bandLabel = "POOR"; }
-
-        char num[12];
-        if (maxErrDeg < 0.0f) snprintf(num, sizeof(num), "--" "\xF7");
-        else                  snprintf(num, sizeof(num), "%.1f" "\xF7", (double)maxErrDeg);
-
-        tft.setTextColor(bandColor, COLOR_BLACK);
-        tft.setTextSize(6);                       // 36 x 48 px per char
-        tft.setCursor(8, 24);
-        tft.print(num);
-
-        tft.setTextSize(4);                       // 24 x 32 px per char
-        tft.setCursor(SCREEN_WIDTH - 8 - (int16_t)strlen(bandLabel) * 24, 32);
-        tft.print(bandLabel);
-
-        tft.setTextSize(2);
-        tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
-        tft.setCursor(8, 4);
-        tft.print("HEADING CAL");
-        tft.setCursor(8, 82);
-        tft.print("likely worst error");
-
-        g_hdgResultDrawn      = true;
-        g_hdgResultLastChoice = -1;               // force the buttons below
-    }
-
-    if ((int8_t)choice != g_hdgResultLastChoice) {
-        g_hdgResultLastChoice = (int8_t)choice;
-        drawHdgResultButton(4,   "ACCEPT", choice == 0 ? "BTN2 to confirm" : "BTN1 to select", choice == 0);
-        drawHdgResultButton(162, "REJECT", choice == 1 ? "BTN2 to confirm" : "BTN1 to select", choice == 1);
-    }
-}
-
-void showCloudCalResult(uint8_t quality, float rmsPct, const char* recommendation,
-                         int16_t coverageGaps, uint8_t choice, uint8_t calType) {
+// The fit's result: one number in the band colour with GOOD/OK/POOR beside
+// it, and the decision. Baseline and mounted show rms_pct; heading shows the
+// server's leave-one-out worst case, which arrives in the same field (< 0:
+// the server didn't send it, shown as "--" rather than falling back to the
+// RMS). The server's recommendation text is not shown: the band says it,
+// and on heading it once quoted a second, different "max error".
+void showCloudCalResult(CalStep step, uint8_t quality, float value, int16_t coverageGaps) {
     if (!tftReady) return;
-    if (calType == (uint8_t)CalType::HDG) {
-        showHdgCalResult(quality, rmsPct, choice);
-        return;
-    }
-    invalidateNavCache();
-    tft.fillScreen(COLOR_BLACK);
+    const bool isHdg = (step == CalStep::HEADING);
+    char num[12];
+    if (!isHdg)            snprintf(num, sizeof(num), "%.0f%%", (double)value);
+    else if (value < 0.0f) snprintf(num, sizeof(num), "--" "\xF7");
+    else                   snprintf(num, sizeof(num), "%.1f" "\xF7", (double)value);
 
-    tft.setTextSize(2);
-    tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
-    tft.setCursor(4, 4);
-    tft.print("CLOUD CAL");
+    uint16_t bandColor = COLOR_GREEN;
+    const char* band = "GOOD";
+    if (quality == (uint8_t)CalCloudQuality::WARN)     { bandColor = COLOR_YELLOW; band = "OK"; }
+    else if (quality == (uint8_t)CalCloudQuality::BAD) { bandColor = COLOR_RED;    band = "POOR"; }
 
-    uint16_t bandColor  = COLOR_GREEN;
-    const char* bandLabel = "GOOD";
-    if (quality == 1)      { bandColor = COLOR_YELLOW; bandLabel = "MARGINAL"; }
-    else if (quality == 2) { bandColor = COLOR_RED;    bandLabel = "BAD"; }
-
-    // Baseline/mounted only -- hdg returned to showHdgCalResult() above.
-    char buf[28];
-    snprintf(buf, sizeof(buf), "%s  %.0f%% RMS", bandLabel, (double)rmsPct);
-    tft.setTextColor(bandColor, COLOR_BLACK);
-    tft.setCursor(4, 30);
-    tft.print(buf);
-
-    tft.drawFastHLine(0, 54, SCREEN_WIDTH, COLOR_CYAN);
-
-    // Recommendation text comes straight from the backend (already short —
-    // see device-calibration-plan.md's `recommendation` field); wrap rather
-    // than truncate since "recommend rejecting" is the important half.
-    tft.setTextSize(1);
-    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
-    printWrapped(4, 64, recommendation ? recommendation : "", 50, 12, 3);
-
-    // Coverage-gap note (baseline-cal-coverage-feedback-plan.md, step 5): a
-    // second, independent axis from RMS quality above -- a "good" fit can
-    // still be missing coverage in specific orientations. Terse by design
-    // (screen only has this one line of room before the accept/reject rule);
-    // full detail lives on the website. Silent when not applicable (mounted,
-    // pre-9-axis CSV) or when coverage is already full, rather than clutter
-    // the screen with a "0 gaps" non-finding.
-    if (coverageGaps > 0) {
-        char covBuf[40];
-        snprintf(covBuf, sizeof(covBuf), "%d orientation gap%s -- see website",
-                  coverageGaps, coverageGaps == 1 ? "" : "s");
-        tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
-        tft.setCursor(4, 100);
-        tft.print(covBuf);
-    }
-
-    tft.drawFastHLine(0, 112, SCREEN_WIDTH, COLOR_CYAN);
-
-    static const char* const labels[2] = { "ACCEPT", "REJECT" };
-    const int rowY[2] = { 122, 148 };
-    for (int i = 0; i < 2; i++) {
-        if (i == (int)choice) {
-            tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
-            tft.setCursor(4, rowY[i]);
-            tft.print("> ");
-            tft.print(labels[i]);
-        } else {
-            tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
-            tft.setCursor(4, rowY[i]);
-            tft.print("  ");
-            tft.print(labels[i]);
+    drawCalHeader(step, "RESULT");
+    // A tern.local retry-upload can deliver a new result while this is up.
+    uint32_t sig = calSig(CalWork::RESULT);
+    sig = calSig(sig, &step, sizeof(step));
+    sig = calSig(sig, &quality, sizeof(quality));
+    sig = calSigStr(sig, num);
+    sig = calSig(sig, &coverageGaps, sizeof(coverageGaps));
+    if (claimCalWork(sig)) {
+        drawWorkText(8, 36, num, 6, bandColor);
+        drawWorkText(SCREEN_WIDTH - 4 - textW(band, 4), 44, band, 4, bandColor);
+        drawWorkText(8, 96, isHdg ? "likely worst error" : "RMS error", 2, COLOR_GRAY);
+        // Baseline only: empty cells in the coverage grid, an axis of its own
+        // apart from the RMS. Silent when there are none, or when it doesn't
+        // apply (-1: mounted, heading, or a pre-9-axis CSV).
+        if (coverageGaps > 0) {
+            char gbuf[28];
+            snprintf(gbuf, sizeof(gbuf), "%d orientation gap%s", coverageGaps,
+                     coverageGaps == 1 ? "" : "s");
+            drawWorkText(8, 120, gbuf, 2, COLOR_GRAY);
         }
     }
 
-    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
-    tft.setCursor(4, 200);
-    tft.print("BTN1:cycle  BTN2:confirm");
+    static const CalKey kAccept = { "ACCEPT", KeyStyle::NORMAL };
+    if (quality == (uint8_t)CalCloudQuality::BAD) {
+        static char again[16];
+        snprintf(again, sizeof(again), "run %s again", kCalStepIds[(int)step]);
+        const CalText parts[] = { { "Next: ", COLOR_GRAY }, { again, COLOR_RED } };
+        drawCalFooter(parts, 2, KEY_REJECT, kAccept);
+    } else {
+        static const CalText kStatus[] = { { "Press ACCEPT to install", COLOR_WHITE } };
+        drawCalFooter(kStatus, 1, KEY_REJECT, kAccept);
+    }
 }
 
-// Gap-fill's upload result: informational only, no ACCEPT/REJECT. That fit
-// covers only the cells just patched -- a handful out of 60 -- and its only
-// useful destiny is as a merge candidate on the website. Offering to install
-// it standalone (showCloudCalResult's ACCEPT/REJECT, defaulting to ACCEPT)
-// would let a diver who presses BTN2 without reading closely silently
-// overwrite a good full-sphere baseline with a partial one. See
+// Gap-fill's upload result: nothing to accept on the unit. That fit covers
+// only the cells just patched -- a handful out of 60 -- and its only useful
+// destiny is as a merge candidate on the website. Offering it as an install
+// would let a diver who presses BTN2 without reading overwrite a good
+// full-sphere baseline with a partial one. See
 // divemap/docs/architecture/baseline-cal-coverage-feedback-plan.md.
-void showGapFillUploaded(float rmsPct, const char* recommendation, int16_t coverageGaps) {
+// coverageGaps counts the patch's own thin or empty cells; -1 = not sent.
+void showGapFillUploaded(float rmsPct, int16_t coverageGaps) {
     if (!tftReady) return;
-    invalidateNavCache();
-    tft.fillScreen(COLOR_BLACK);
-
-    tft.setTextSize(2);
-    tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
-    tft.setCursor(4, 4);
-    tft.print("GAP-FILL UPLOADED");
-
-    char buf[28];
-    snprintf(buf, sizeof(buf), "%.0f%% RMS (this patch)", (double)rmsPct);
-    tft.setTextSize(1);
-    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
-    tft.setCursor(4, 30);
-    tft.print(buf);
-
-    tft.drawFastHLine(0, 44, SCREEN_WIDTH, COLOR_CYAN);
-
-    // Same recommendation text calibration-processor would give a solo
-    // baseline -- shown as context, not as a verdict on this patch alone.
-    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
-    printWrapped(4, 52, recommendation ? recommendation : "", 50, 10, 3);
-
-    if (coverageGaps >= 0) {
-        char covBuf[48];
-        snprintf(covBuf, sizeof(covBuf), "%d cell%s remain thin/empty",
-                  coverageGaps, coverageGaps == 1 ? "" : "s");
-        tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
-        tft.setCursor(4, 90);
-        tft.print(covBuf);
+    drawCalHeader(CalStep::FILL_GAPS, "SENT");
+    char rbuf[20];
+    snprintf(rbuf, sizeof(rbuf), "Patch RMS %.0f%%", (double)rmsPct);
+    uint32_t sig = calSigStr(calSig(CalWork::SENT), rbuf);
+    sig = calSig(sig, &coverageGaps, sizeof(coverageGaps));
+    if (claimCalWork(sig)) {
+        drawWorkText(8, 44, "Uploaded", 3, COLOR_GREEN);
+        drawWorkText(8, 84, rbuf, 2, COLOR_WHITE);
+        if (coverageGaps >= 0) {
+            char gbuf[28];
+            snprintf(gbuf, sizeof(gbuf), "%d cell%s still thin", coverageGaps,
+                     coverageGaps == 1 ? "" : "s");
+            drawWorkText(8, 108, gbuf, 2, COLOR_GRAY);
+        }
     }
-
-    tft.drawFastHLine(0, 104, SCREEN_WIDTH, COLOR_CYAN);
-
-    tft.setTextSize(2);
-    tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
-    tft.setCursor(4, 116);
-    tft.print("Go to the website");
-    tft.setCursor(4, 138);
-    tft.print("to merge & accept.");
-
-    tft.setTextSize(1);
-    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
-    tft.setCursor(4, 200);
-    tft.print("BTN2: OK");
+    static const CalText kStatus[] = { { "Next: ", COLOR_GRAY }, { "merge on website", COLOR_WHITE } };
+    drawCalFooter(kStatus, 2, KEY_BLANK, KEY_OK);
 }
 
 void showCloudLinkWaiting(const char* userCode, uint32_t secondsWaiting) {

@@ -730,13 +730,14 @@ size_t calCloudResultPacketToBytes(const CalCloudResultPacket& pkt, char* buf, s
         doc["crc"] = pkt.recommendation;
         doc["cid"] = pkt.calibration_id;
         doc["ccg"] = pkt.coverage_gaps;
-        // Omit when true (the common case) to save bandwidth, same convention
-        // as the other DONE-only fields; decoder defaults absent -> true.
-        if (!pkt.installable) doc["in"] = false;
     } else if (pkt.stage == (uint8_t)CalCloudStage::FAILED) {
         doc["cer"] = pkt.error;
         if (pkt.rejected) doc["rj"] = true;
     }
+    // Every stage, not just DONE: the display names the cal step from it, and
+    // a gap-fill that failed or went offline is step 1a, not 1. Omitted when
+    // true (the common case); the decoder defaults absent -> true.
+    if (!pkt.installable) doc["in"] = false;
 
     size_t n = serializeJson(doc, buf, bufLen - 1);
     if (n == 0 || n >= bufLen - 1) return 0;

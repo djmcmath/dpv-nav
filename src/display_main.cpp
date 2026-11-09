@@ -13,6 +13,7 @@
 #include "drivers/display.h"
 #include "menu/menu.h"
 #include "nav/state.h"
+#include "util/cal_keys.h"
 #include "util/ota_confirm.h"
 #include "version.h"
 #include <dpvlink.h>
@@ -210,21 +211,44 @@ enum class CloudCalUiPhase : uint8_t {
 static CloudCalUiPhase   gCloudCalPhase          = CloudCalUiPhase::NONE;
 static uint32_t          gCloudCalWaitStartMs    = 0;
 static constexpr uint32_t CLOUD_CAL_WAIT_TIMEOUT_MS = 40000;  // > nav's ~30s worst case
-static uint8_t           gCloudCalChoice         = 0;  // 0=ACCEPT, 1=REJECT
 // False for a gap-fill result: that fit covers only the cells just patched
 // and must never be offered as a standalone install (see nav_main.cpp's
-// ACCEPT_CLOUD_CAL comment). The RESULT screen shows no ACCEPT/REJECT toggle
+// ACCEPT_CLOUD_CAL comment). The RESULT screen shows no ACCEPT/REJECT
 // when this is false -- just an acknowledgement.
 static bool              gCloudCalInstallable    = true;
 static uint8_t           gCloudCalQuality        = 0;
-static uint8_t           gCloudCalType           = 0;  // CalType enum -- selects % vs deg label
 static float             gCloudCalRmsPct         = 0.0f;
 static int16_t           gCloudCalCoverageGaps   = -1;  // baseline only; -1 = n/a
-static char              gCloudCalRecommendation[96] = "";
 static char              gCloudCalError[64]          = "";
-// The server refused to fit the samples, as opposed to never receiving them.
-static bool              gCloudCalRejected           = false;
+static display::CalFailKind gCloudCalFailKind        = display::CalFailKind::TRANSPORT;
 static char              gCloudCalId[40]             = "";
+
+// ---- Unified cal screens (docs/cal-screens-unified-plan.md) ----------------
+// The step every cal screen's header marks. Set when a cal starts (the start
+// command, then each CalProgressPacket) and from every CalCloudResultPacket,
+// so a tern.local retry-upload with no session behind it still names the
+// right step.
+static display::CalStep gCalStep = display::CalStep::BASELINE;
+
+// Set when START_GAPFILL_CAL goes out, cleared by the first GAP_FILL progress
+// packet, any result packet, or GAPFILL_START_TIMEOUT_MS. A FAILED result
+// while it's set is nav refusing to start (no baseline, no target map):
+// nothing was collected or uploaded, so it must not read "Upload failed".
+static bool     gGapFillStarting   = false;
+static uint32_t gGapFillStartingMs = 0;
+static constexpr uint32_t GAPFILL_START_TIMEOUT_MS = 5000;
+
+// Softkeys (util/cal_keys.h): BTN2 keeps going, holding BTN1 throws the work
+// away. The hold fill and the hint go to display::setCalKeysOverlay().
+static cal_keys::Tracker gCalKeys;
+static uint8_t  gCalHoldPct     = 0;
+static uint32_t gCalHintUntilMs = 0;   // 0 = no hint
+static constexpr uint32_t CAL_HINT_MS = 1500;
+
+// "Quit" / "Rejected", shown for CAL_DISCARD_SHOW_MS after a hold. 0 = not up.
+static uint32_t gCalDiscardUntilMs  = 0;
+static bool     gCalDiscardRejected = false;
+static constexpr uint32_t CAL_DISCARD_SHOW_MS = 1500;
 
 // ---- Cloud account-link UI state (device-auth bootstrap, RFC 8628) --------
 // Entered when the diver selects "Link acct" from the Config menu. The nav
@@ -710,7 +734,8 @@ void loop() {
     bool uploadingLogs = navValid && (lastNav.flags2 & FLAG2_UPLOADING) &&
                          (now - lastNavMs < LOG_UPLOAD_TIMEOUT_MS);
     bool linkAlive = calCompleteHolding || gBaselineFinishPending ||
-                     awaitingCloudCal || awaitingCloudLink || awaitingWifi ||
+                     awaitingCloudCal || gCalDiscardUntilMs != 0 ||
+                     awaitingCloudLink || awaitingWifi ||
                      uploadingLogs ||
                      (navValid && (now - lastNavMs < NAV_TIMEOUT_MS));
 
@@ -720,13 +745,29 @@ void loop() {
             display::clear();
         }
         // Live data — render at 4 Hz, or at the 10 Hz NavPacket rate while a
-        // heading cal collects: the diver levels against that screen's
-        // horizon, and it redraws only what changed.
+        // heading cal collects (the diver levels against that screen's
+        // horizon) or while BTN1's hold fills a softkey (20 steps over the
+        // hold, not 8). Both screens redraw only what changed.
         const uint32_t renderIntervalMs =
-            (gHdgFourierCalPhase == HdgFourierCalPhase::COLLECTING) ? HDG_CAL_RENDER_INTERVAL_MS
-                                                                    : DISPLAY_INTERVAL_MS;
+            (gHdgFourierCalPhase == HdgFourierCalPhase::COLLECTING || gCalHoldPct > 0)
+                ? HDG_CAL_RENDER_INTERVAL_MS
+                : DISPLAY_INTERVAL_MS;
+        if (gGapFillStarting && now - gGapFillStartingMs >= GAPFILL_START_TIMEOUT_MS) {
+            gGapFillStarting = false;
+        }
         if (now - lastDisplayMs >= renderIntervalMs) {
             lastDisplayMs = now;
+            display::setCalKeysOverlay(gCalHoldPct, gCalHintUntilMs != 0 && now < gCalHintUntilMs);
+
+            // "Quit" / "Rejected" after a hold, then back to the nav screen.
+            if (gCalDiscardUntilMs != 0) {
+                if (now < gCalDiscardUntilMs) {
+                    display::showCalDiscarded(gCalStep, gCalDiscardRejected);
+                    return;
+                }
+                gCalDiscardUntilMs = 0;
+                display::clear();
+            }
 
             // Baseline: BTN2 was pressed, waiting for nav to confirm completion.
             // Times out (command likely dropped) back to the normal rough-scan
@@ -763,27 +804,26 @@ void loop() {
                 switch (gCloudCalPhase) {
                     case CloudCalUiPhase::WAITING:
                         if (now - gCloudCalWaitStartMs >= CLOUD_CAL_WAIT_TIMEOUT_MS) {
-                            gCloudCalPhase = CloudCalUiPhase::FAILED;
-                            gCloudCalRejected = false;
+                            gCloudCalPhase    = CloudCalUiPhase::FAILED;
+                            gCloudCalFailKind = display::CalFailKind::TRANSPORT;
                             strncpy(gCloudCalError, "No response from nav device",
                                     sizeof(gCloudCalError) - 1);
                             gCloudCalError[sizeof(gCloudCalError) - 1] = '\0';
-                            display::showCloudCalFailed(gCloudCalError, gCloudCalRejected);
+                            display::showCloudCalFailed(gCalStep, gCloudCalFailKind, gCloudCalError);
                         } else {
-                            display::showCloudCalWaiting((now - gCloudCalWaitStartMs) / 1000);
+                            display::showCloudCalWaiting(gCalStep, (now - gCloudCalWaitStartMs) / 1000);
                         }
                         break;
                     case CloudCalUiPhase::OFFLINE:
-                        display::showCloudCalOffline();
+                        display::showCloudCalOffline(gCalStep);
                         break;
                     case CloudCalUiPhase::FAILED:
-                        display::showCloudCalFailed(gCloudCalError, gCloudCalRejected);
+                        display::showCloudCalFailed(gCalStep, gCloudCalFailKind, gCloudCalError);
                         break;
                     case CloudCalUiPhase::RESULT:
                         if (gCloudCalInstallable) {
-                            display::showCloudCalResult(gCloudCalQuality, gCloudCalRmsPct,
-                                                        gCloudCalRecommendation, gCloudCalCoverageGaps,
-                                                        gCloudCalChoice, gCloudCalType);
+                            display::showCloudCalResult(gCalStep, gCloudCalQuality, gCloudCalRmsPct,
+                                                        gCloudCalCoverageGaps);
                         } else {
                             // Gap-fill: informational only, no accept/reject
                             // choice to make on-device -- this fit is a merge
@@ -792,8 +832,7 @@ void loop() {
                             // accepted=null is exactly its correct resting
                             // state until the diver resolves it on the website
                             // (by merging it in, or ignoring it).
-                            display::showGapFillUploaded(gCloudCalRmsPct, gCloudCalRecommendation,
-                                                         gCloudCalCoverageGaps);
+                            display::showGapFillUploaded(gCloudCalRmsPct, gCloudCalCoverageGaps);
                         }
                         break;
                     default:
@@ -1088,6 +1127,14 @@ static void processNavLine() {
             // screen came between.
             if (!calProgressValid) display::clear();
             calProgressValid   = true;
+            if (lastCalProgress.phase == (uint8_t)CalPhase::GAP_FILL) {
+                gCalStep         = display::CalStep::FILL_GAPS;
+                gGapFillStarting = false;
+            } else if (lastCalProgress.cal_type == (uint8_t)CalType::MOUNTED) {
+                gCalStep = display::CalStep::MOUNTED;
+            } else {
+                gCalStep = display::CalStep::BASELINE;
+            }
             lastCalProgressMs  = millis();
             lastNavMs          = millis();  // keep link-alive timer refreshed
             if (lastCalProgress.complete && !calCompleteHolding) {
@@ -1149,23 +1196,32 @@ static void processNavLine() {
         CalCloudResultPacket pkt{};
         if (bytesToCalCloudResultPacket(rxBuf, rxPos, pkt)) {
             lastNavMs = millis();  // keep link-alive timer refreshed
+            // The packet says which step it belongs to: a gap-fill is a
+            // baseline collection that can't be installed. That holds for a
+            // live session and for a tern.local retry-upload alike.
+            gCalStep = pkt.cal_type == (uint8_t)CalType::MOUNTED ? display::CalStep::MOUNTED
+                     : pkt.cal_type == (uint8_t)CalType::HDG     ? display::CalStep::HEADING
+                     : pkt.installable                           ? display::CalStep::BASELINE
+                                                                 : display::CalStep::FILL_GAPS;
+            const bool refused = gGapFillStarting;
+            if (refused) gCalStep = display::CalStep::FILL_GAPS;
+            gGapFillStarting = false;
+            gCalHintUntilMs  = 0;
             if (pkt.stage == (uint8_t)CalCloudStage::OFFLINE) {
                 gCloudCalPhase = CloudCalUiPhase::OFFLINE;
             } else if (pkt.stage == (uint8_t)CalCloudStage::FAILED) {
-                gCloudCalPhase = CloudCalUiPhase::FAILED;
-                gCloudCalRejected = pkt.rejected;
+                gCloudCalPhase    = CloudCalUiPhase::FAILED;
+                gCloudCalFailKind = pkt.rejected ? display::CalFailKind::REJECTED
+                                  : refused      ? display::CalFailKind::REFUSED
+                                                 : display::CalFailKind::TRANSPORT;
                 strncpy(gCloudCalError, pkt.error, sizeof(gCloudCalError) - 1);
                 gCloudCalError[sizeof(gCloudCalError) - 1] = '\0';
             } else {
                 gCloudCalPhase   = CloudCalUiPhase::RESULT;
                 gCloudCalQuality = pkt.quality;
-                gCloudCalType    = pkt.cal_type;
                 gCloudCalRmsPct  = pkt.rms_pct;
                 gCloudCalCoverageGaps = pkt.coverage_gaps;
                 gCloudCalInstallable  = pkt.installable;
-                gCloudCalChoice  = 0;
-                strncpy(gCloudCalRecommendation, pkt.recommendation, sizeof(gCloudCalRecommendation) - 1);
-                gCloudCalRecommendation[sizeof(gCloudCalRecommendation) - 1] = '\0';
                 strncpy(gCloudCalId, pkt.calibration_id, sizeof(gCloudCalId) - 1);
                 gCloudCalId[sizeof(gCloudCalId) - 1] = '\0';
             }
@@ -1259,6 +1315,19 @@ static void sendCmd(DisplayCmd cmd) {
     size_t n = displayCmdToBytes(cmd, txBuf, sizeof(txBuf));
     if (n > 0) {
         Serial1.write(txBuf, n);
+    }
+    // The menu starts cals from menu.cpp through this callback, so this is
+    // the one place the display learns a cal is starting.
+    switch (cmd) {
+        case DisplayCmd::START_BASELINE_CAL: gCalStep = display::CalStep::BASELINE; break;
+        case DisplayCmd::START_MOUNTED_CAL:  gCalStep = display::CalStep::MOUNTED;  break;
+        case DisplayCmd::START_GAPFILL_CAL:
+            gCalStep           = display::CalStep::FILL_GAPS;
+            gGapFillStarting   = true;
+            gGapFillStartingMs = millis();
+            break;
+        case DisplayCmd::START_HDG_FOURIER_CAL: gCalStep = display::CalStep::HEADING; break;
+        default: break;
     }
 }
 
@@ -1372,10 +1441,37 @@ static void consumePendingReleases() {
     if (!btn2.pressed && btn2.pressStartMs > 0) btn2.fired = true;
 }
 
+// The cal screens' softkeys (util/cal_keys.h), run once per pass on any cal
+// screen. Marks whichever button it acted on as fired and keeps the hold fill
+// and the hint for the next render. leftIsHold: the left key is QUIT or
+// REJECT here; otherwise a BTN1 hold or tap does nothing, and the caller
+// ignores `discard`.
+static cal_keys::Result calKeys(bool leftIsHold) {
+    const uint32_t now = millis();
+    const cal_keys::Result r =
+        gCalKeys.update({ btn1.pressed, btn1.pressStartMs, btn1.fired },
+                        { btn2.pressed, btn2.pressStartMs, btn2.fired }, now);
+    if (r.discard || r.shortPress) btn1.fired = true;
+    if (r.advance) btn2.fired = true;
+    gCalHoldPct = (leftIsHold && !r.discard) ? r.holdPct : 0;
+    if (r.shortPress && leftIsHold) gCalHintUntilMs = now + CAL_HINT_MS;
+    if (gCalHoldPct > 0) gCalHintUntilMs = 0;   // the fill says it better
+    return r;
+}
+
+// Leave whatever cal screen is up for the "Quit" / "Rejected" screen.
+static void showCalDiscardedFor(bool rejected) {
+    gCalDiscardUntilMs  = millis() + CAL_DISCARD_SHOW_MS;
+    gCalDiscardRejected = rejected;
+    gCalHoldPct         = 0;
+    gCalHintUntilMs     = 0;
+}
+
 // Full-screen modes that own the buttons. Returns true if one of them handled
 // (or deliberately ignored) this pass, in which case the menu must not see it.
 static bool handleModalButtons() {
     uint32_t now = millis();
+    gCalHoldPct = 0;   // calKeys() sets it again on any cal screen with a hold key
 
     // --- Both buttons held 2s → reset display --------------------------------
     if (btn1.pressed && btn2.pressed && !btn1.fired && !btn2.fired) {
@@ -1389,6 +1485,12 @@ static bool handleModalButtons() {
             btn2.fired = true;
             return true;
         }
+    }
+
+    // --- "Quit" / "Rejected": both buttons claimed and inert ---------------
+    if (gCalDiscardUntilMs != 0) {
+        calKeys(false);
+        return true;
     }
 
     // --- Baseline / gap-fill: BTN2 declares collection done, ends the session ---
@@ -1571,47 +1673,39 @@ static bool handleModalButtons() {
     }
 
     // --- Cloud calibration result UI -----------------------------------------
-    if (gCloudCalPhase == CloudCalUiPhase::OFFLINE || gCloudCalPhase == CloudCalUiPhase::FAILED) {
-        // BTN2: dismiss
-        if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
-            btn2.fired = true;
+    // OFFLINE, FAILED, and gap-fill's "sent" (a result that can't be
+    // installed): BTN2 is OK. Gap-fill sends no ACCEPT/REJECT ever -- the
+    // uploaded fit stays parked at accepted=null on the server, its correct
+    // resting state until the website resolves it.
+    if (gCloudCalPhase == CloudCalUiPhase::OFFLINE || gCloudCalPhase == CloudCalUiPhase::FAILED ||
+        (gCloudCalPhase == CloudCalUiPhase::RESULT && !gCloudCalInstallable)) {
+        if (calKeys(false).advance) {
             gCloudCalPhase = CloudCalUiPhase::NONE;
             display::clear();
         }
         return true;
     }
+    // RESULT: BTN2 accepts in one press; holding BTN1 rejects, slower on
+    // purpose, and a tap only shows the hint.
     if (gCloudCalPhase == CloudCalUiPhase::RESULT) {
-        if (!gCloudCalInstallable) {
-            // Gap-fill: single dismiss, no ACCEPT/REJECT command ever sent.
-            // The uploaded fit stays parked at accepted=null on the server --
-            // its correct resting state until the website resolves it.
-            if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
-                btn2.fired = true;
-                gCloudCalPhase = CloudCalUiPhase::NONE;
-                display::clear();
-            }
-            return true;
-        }
-        // BTN1: cycle ACCEPT/REJECT
-        if (!btn1.pressed && !btn1.fired && btn1.pressStartMs > 0) {
-            btn1.fired = true;
-            gCloudCalChoice = (gCloudCalChoice + 1) % 2;
-        }
-        // BTN2: confirm choice
-        if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
-            btn2.fired = true;
-            DisplayCmd cmd = (gCloudCalChoice == 0) ? DisplayCmd::ACCEPT_CLOUD_CAL
-                                                     : DisplayCmd::REJECT_CLOUD_CAL;
-            sendCloudCalRespond(cmd, gCloudCalId);
-            Serial.printf("[CLOUD_CAL] choice: %s\n", gCloudCalChoice == 0 ? "ACCEPT" : "REJECT");
+        const cal_keys::Result r = calKeys(true);
+        if (r.advance) {
+            sendCloudCalRespond(DisplayCmd::ACCEPT_CLOUD_CAL, gCloudCalId);
+            Serial.println("[CLOUD_CAL] ACCEPT");
             gCloudCalPhase = CloudCalUiPhase::NONE;
             display::clear();
+        } else if (r.discard) {
+            sendCloudCalRespond(DisplayCmd::REJECT_CLOUD_CAL, gCloudCalId);
+            Serial.println("[CLOUD_CAL] REJECT (BTN1 held)");
+            gCloudCalPhase = CloudCalUiPhase::NONE;
+            showCalDiscardedFor(true);
         }
         return true;
     }
     // WAITING: no button action -- the nav device is mid-upload and won't see
     // anything sent right now anyway (it's blocked on the network call).
     if (gCloudCalPhase == CloudCalUiPhase::WAITING) {
+        calKeys(false);
         return true;
     }
 

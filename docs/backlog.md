@@ -264,6 +264,39 @@ Features and UX with a design already thought through.
   update at the surface. The WMM option needs no network, which suits a unit that is often
   offline.
 
+- [ ] **Mounted cal: do the tilted rows earn their time?**
+
+  Every mounted cal so far has filled the whole +30 and −30 rows, not just the 6 spread
+  cells per tilted row the firmware needs today (`MAG_CAL_SECTORS_MID`, `kNeedTotal` = 24),
+  and the unified cal screens (2026-11-09) raise auto-finish to all 36 cells to keep
+  encouraging that. Nobody has checked whether the extra cells change the result.
+
+  What the server does with them: the mounted correction is fitted from the **level row
+  only** (≥ `MIN_MOUNTED_LEVEL_SAMPLES` = 30 still, level samples, no azimuth gap over
+  `MOUNTED_LEVEL_MAX_GAP_DEG` = 90°, in dive-map's `calibration-processor/callib/fit.py`).
+  The tilted rows only free the vertical hard iron b_z in
+  `compute_mounted_correction_body`, which needs `MOUNTED_BODY_MIN_TILTED_SAMPLES` = 36
+  still, tilted samples, about two dwells. The first real refit after that shipped
+  (2026-10-23) found b_z ≈ 0 on this unit.
+
+  *Analysis:* refit past mounted CSVs with the tilted rows thinned (all 12, the 6-spread
+  rule, two dwells per row, none) and compare b_z, its standard error, and the heading
+  residuals at tilt. If thinning changes nothing, drop auto-finish back to 24 or lower in
+  `mounted_dwell.h` and tell divers they can stop early. The analysis runs in dive-map;
+  the rule it decides lives here.
+
+- [ ] **Calibration walkthrough in the user guide**
+
+  The unified cal screens make calibration one process (1 Baseline, 1a Fill gaps, 2
+  Mounted, 3 Heading) with the same frame and buttons throughout. `user-guide.md` should
+  walk a new owner through it screen by screen: what each step is for, what to do, what
+  "done" looks like, and what each result means.
+
+  *Images:* `tools/cal_screen_mock/` renders every screen (`node
+  tools/cal_screen_mock/render.js` → `png/`). Those are the 2026-11-09 design mockups, so
+  bring `screens.js` in line with the shipped `display.cpp` and re-render before they go
+  into the guide. Depends on the cal screen redesign shipping first.
+
 ---
 
 ## Tier 4 — Long tail

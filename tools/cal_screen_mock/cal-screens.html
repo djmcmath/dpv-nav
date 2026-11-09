@@ -1,0 +1,787 @@
+<title>DPV-Nav Cal Screens</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: one reading column for the rules, then a section per step with bezel-framed 320x240 screens in a wrapping grid. */
+:root {
+  --bg: #e7ecee;
+  --surface: #f6f8f9;
+  --fg: #122023;
+  --muted: #526569;
+  --line: #c2ced1;
+  --accent: #0a6c77;
+  --accent-ink: #ffffff;
+  --danger: #b3261e;
+  --bezel: #151b1d;
+  --bezel-edge: #2a3437;
+  --font-body: "Atkinson Hyperlegible", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0c1214; --surface: #141c1f; --fg: #e0e9eb; --muted: #8da1a5; --line: #263336;
+    --accent: #45c1cb; --accent-ink: #061113; --danger: #ff6b5e; --bezel: #040708; --bezel-edge: #1e282b;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0c1214; --surface: #141c1f; --fg: #e0e9eb; --muted: #8da1a5; --line: #263336;
+  --accent: #45c1cb; --accent-ink: #061113; --danger: #ff6b5e; --bezel: #040708; --bezel-edge: #1e282b;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 16px; line-height: 1.55; }
+.page { max-width: 1160px; margin: 0 auto; padding-inline: 20px; padding-block: 40px 72px; display: grid; gap: 64px; }
+.eyebrow { font-family: var(--font-mono); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+h1 { font-size: clamp(30px, 4.4vw, 44px); line-height: 1.1; margin: 10px 0 14px; text-wrap: balance; letter-spacing: -0.01em; }
+h2 { display: flex; align-items: center; gap: 12px; font-size: 24px; line-height: 1.2; margin: 0 0 8px; text-wrap: balance; }
+p { margin: 0; }
+.lead { max-width: 68ch; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; margin-top: 22px; font-size: 14px; color: var(--muted); }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg button { font: inherit; font-size: 14px; padding: 6px 12px; background: var(--surface); color: var(--fg); border: 0; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.step { font-family: var(--font-mono); font-weight: 600; font-size: 15px; min-width: 2.4em; text-align: center; padding: 2px 8px; border-radius: 5px; background: var(--accent); color: var(--accent-ink); }
+.step.opt { background: transparent; color: var(--accent); box-shadow: inset 0 0 0 1.5px var(--accent); }
+.sec-intro { max-width: 70ch; color: var(--muted); margin-bottom: 22px; }
+
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr)); gap: 30px 24px; }
+figure { margin: 0; display: grid; gap: 10px; align-content: start; min-width: 0; }
+.bezel { background: var(--bezel); border-radius: 12px; padding: 12px; box-shadow: inset 0 0 0 1px var(--bezel-edge); }
+.bezel canvas { display: block; width: 100%; height: auto; aspect-ratio: 4 / 3; image-rendering: pixelated; }
+body[data-size="real"] .bezel { justify-self: start; padding: 7px; border-radius: 7px; }
+body[data-size="real"] .bezel canvas { width: 1.6in; }
+figcaption { display: grid; gap: 3px; }
+figcaption .label { font-family: var(--font-mono); font-size: 13px; font-weight: 600; }
+figcaption p { font-size: 15px; color: var(--muted); max-width: 60ch; }
+.holdbtn { justify-self: start; font-family: var(--font-mono); font-size: 13px; padding: 7px 14px; border-radius: 7px; border: 1px solid var(--line); background: var(--surface); color: var(--fg); cursor: pointer; user-select: none; -webkit-user-select: none; touch-action: none; }
+.holdbtn.active { border-color: var(--danger); color: var(--danger); }
+
+.frame { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); gap: 36px; align-items: start; }
+@media (max-width: 860px) { .frame { grid-template-columns: minmax(0, 1fr); } }
+.bands { list-style: none; margin: 0; padding: 0; display: grid; gap: 14px; }
+.bands li { display: grid; grid-template-columns: 7.5em minmax(0, 1fr); gap: 14px; }
+.bands b { display: block; }
+.bands .y { font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
+.tablewrap { overflow-x: auto; margin-top: 28px; }
+table { border-collapse: collapse; font-size: 14.5px; width: 100%; min-width: 500px; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-family: var(--font-mono); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 400; }
+td.k { font-family: var(--font-mono); font-size: 13.5px; font-weight: 600; }
+td.k.x { color: var(--danger); }
+.rule { margin-top: 16px; max-width: 66ch; }
+.questions ol { margin: 0; padding-left: 1.4em; display: grid; gap: 12px; max-width: 72ch; }
+.questions li::marker { font-family: var(--font-mono); color: var(--accent); }
+</style>
+
+<div class="page">
+  <header>
+    <div class="eyebrow">DPV-Nav · display board · proposal for review</div>
+    <h1>Calibration screens in one frame</h1>
+    <p class="lead">Each screen below is drawn pixel for pixel at the panel's 320 × 240, using the firmware's own 5×7 font and RGB565 colors, so text sizes look here as they will on the unit. The numbering presents heading calibration as three steps: <b>1</b> Baseline, <b>1a</b> Fill gaps when the baseline result asks for it, <b>2</b> Mounted and <b>3</b> Heading.</p>
+    <div class="toolbar">
+      <span>Screen size</span>
+      <div class="seg" role="group" aria-label="Screen size">
+        <button type="button" id="size-large" aria-pressed="true">Large</button>
+        <button type="button" id="size-real" aria-pressed="false">About real size</button>
+      </div>
+      <span id="size-note" hidden>The panel is 2.0 in across the diagonal. Most screens draw this a little small.</span>
+    </div>
+  </header>
+
+  <section aria-labelledby="frame-h">
+    <h2 id="frame-h">The frame</h2>
+    <p class="sec-intro">Every calibration screen has the same four bands. Only the work area changes from step to step.</p>
+    <div class="frame">
+      <figure>
+        <div class="bezel"><canvas data-screen="mounted" role="img" aria-label="Step 2 Mounted, holding a cell: grid, horizon, motion and hold bars, status Holding, keys hold QUIT and FINISH"></canvas></div>
+        <button type="button" class="holdbtn" data-hold>Hold for BTN1</button>
+        <figcaption><span class="label">2 Mounted, holding a cell</span><p>Press and hold the button for two seconds to see QUIT fill and fire.</p></figcaption>
+      </figure>
+      <div>
+        <ol class="bands">
+          <li><div><b>Header</b><span class="y">y 0–23</span></div><p>The step strip (1, 1a, 2, 3), the step name, and a counter. The counter always counts toward whatever ends the step: samples to 2160 on Baseline, target cells on Fill gaps, cells to 36 on Mounted, marks to 12 on Heading. On the closing screens it names the phase instead.</p></li>
+          <li><div><b>Work area</b><span class="y">y 24–183</span></div><p>The step's own widgets. This is the only band that changes from step to step.</p></li>
+          <li><div><b>Status</b><span class="y">y 186–209</span></div><p>One line saying what to do now. Red means you're blocked, yellow means adjust, green means good. On closing screens it says what comes next.</p></li>
+          <li><div><b>Keys</b><span class="y">y 212–239</span></div><p>The left label is BTN1 and the right label is BTN2. Each one says what the button does right now. Dim text means not yet; an empty outline means that button does nothing on this screen.</p></li>
+        </ol>
+        <div class="tablewrap">
+          <table>
+            <thead><tr><th>Screen</th><th>BTN1 press</th><th>BTN1 hold 2 s</th><th>BTN2 press</th></tr></thead>
+            <tbody>
+              <tr><td>1 Baseline, 1a Fill gaps</td><td>hint</td><td class="k x">QUIT</td><td class="k">FINISH</td></tr>
+              <tr><td>2 Mounted</td><td>hint</td><td class="k x">QUIT</td><td class="k">FINISH</td></tr>
+              <tr><td>3 Heading</td><td>hint</td><td class="k x">QUIT</td><td class="k">MARK</td></tr>
+              <tr><td>Uploading</td><td>nothing</td><td>nothing</td><td>nothing</td></tr>
+              <tr><td>Result</td><td>hint</td><td class="k x">REJECT</td><td class="k">ACCEPT</td></tr>
+              <tr><td>Fill gaps sent, No WiFi, Failed</td><td>nothing</td><td>nothing</td><td class="k">OK</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="rule"><b>BTN2 keeps going. Holding BTN1 throws the work away.</b> A short BTN1 press only flashes "Hold BTN1 to quit" in the status line, so a diver can learn the hold without reading the manual.</p>
+      </div>
+    </div>
+  </section>
+
+  <section aria-labelledby="s1-h">
+    <h2 id="s1-h"><span class="step">1</span>Baseline</h2>
+    <p class="sec-intro">Baseline starts on the bars and switches to the grid when the in-session fit locks. It ends when you press FINISH, or by itself when the sample buffer fills at 2160 (60 cells × 18 × 2). A full grid does not end it.</p>
+    <div class="cards">
+      <figure>
+        <div class="bezel"><canvas data-screen="bars" role="img" aria-label="Baseline before lock: X Y Z coverage bars, 212 of 2160 samples"></canvas></div>
+        <figcaption><span class="label">Before lock</span><p>Samples here count toward the same 2160 the grid shows, so the counter carries straight over when the grid appears. FINISH is dimmed until 40 samples.</p></figcaption>
+      </figure>
+      <figure>
+        <div class="bezel"><canvas data-screen="baseGrid" role="img" aria-label="Baseline grid near the sample cap: 1980 of 2160, 38 of 60 cells, status Auto-finish at 2160"></canvas></div>
+        <figcaption><span class="label">After lock, near the cap</span><p>Samples landing in finished cells are refused, so the count slows as the grid fills. In the last 10% the status line warns "Auto-finish at 2160"; before that it reads "Fill red &amp; yellow cells". Rows shrink from 30 to 24 px to make room for the frame.</p></figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section aria-labelledby="s1a-h">
+    <h2 id="s1a-h"><span class="step opt">1a</span>Fill gaps <span class="eyebrow">optional</span></h2>
+    <p class="sec-intro">Only needed when the baseline result lists gaps. The counter is target cells done. The step ends by itself when every target is done, or when you press FINISH.</p>
+    <div class="cards">
+      <figure>
+        <div class="bezel"><canvas data-screen="gapGrid" role="img" aria-label="Fill gaps grid: 9 of 14 targets, status Fill red and yellow cells"></canvas></div>
+        <figcaption><span class="label">Collecting</span><p>Dark cells aren't targets. The status line gives one instruction for the whole step. A per-cell hint would flicker, because rolling the unit almost always moves heading and elevation too.</p></figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section aria-labelledby="s2-h">
+    <h2 id="s2-h"><span class="step">2</span>Mounted</h2>
+    <p class="sec-intro">Mounted ends by itself when all 36 cells are filled, or when you press FINISH, which sends whatever you have. The server fits the level row, so it refuses a run with too few level cells (fewer than 30 still, level samples, or a gap wider than 90° around the circle), and the result screen says why. Today BTN1 here opens the menu where you can't see it. In the frame, every calibration screen owns both buttons.</p>
+    <div class="cards">
+      <figure>
+        <div class="bezel"><canvas data-screen="mountedOut" role="img" aria-label="Mounted, out of window: yellow highlight, motion bar shows turning, status Nose up to 30"></canvas></div>
+        <figcaption><span class="label">Out of window</span><p>Every empty cell is red, because the guidance for now is to fill all 36. Today's firmware stops at 24: the level row plus 6 spread cells in each tilted row. Whether the extra 12 help is a backlog question. The motion cause ("still", "turning") now sits inside the motion bar. Grid rows shrink from 26 to 20 px.</p></figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section aria-labelledby="s3-h">
+    <h2 id="s3-h"><span class="step">3</span>Heading</h2>
+    <p class="sec-intro">The target is what you steer to, using an external compass. The unit's own reading sits below it, smaller and gray, labeled INDICATED HDG so the two numbers don't read as a pair to make match. You can still see how far off the unit is. MARK turns green only when the level gate reports ready.</p>
+    <div class="cards">
+      <figure>
+        <div class="bezel"><canvas data-screen="hdgReady" role="img" aria-label="Heading cal, ready: target 120, indicated 123, MARK key green"></canvas></div>
+        <figcaption><span class="label">Ready</span><p>Level, still and settled, so the hold bar is full and MARK is lit.</p></figcaption>
+      </figure>
+      <figure>
+        <div class="bezel"><canvas data-screen="hdgNotLevel" role="img" aria-label="Heading cal, not level: horizon outside the yellow brackets, MARK key dimmed"></canvas></div>
+        <figcaption><span class="label">Not level</span><p>MARK is dimmed and the horizon sits outside the yellow brackets.</p></figcaption>
+      </figure>
+      <figure>
+        <div class="bezel"><canvas data-screen="marked" role="img" aria-label="Marked acknowledgement inside the frame, counter at 5 of 12, next target 150"></canvas></div>
+        <figcaption><span class="label">Marked</span><p>This replaces today's full-screen flash. The counter has already moved to 5/12, and the status line shows the next target.</p></figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section aria-labelledby="end-h">
+    <h2 id="end-h">Every ending</h2>
+    <p class="sec-intro">The ending is the same for all four steps. The header keeps the step's name, so you never land on an anonymous CLOUD CAL screen. On results, the color of the number is the recommendation; after you accept, the Installed screen says what comes next.</p>
+    <div class="cards">
+      <figure>
+        <div class="bezel"><canvas data-screen="upload" role="img" aria-label="Uploading, 14 seconds, both keys empty"></canvas></div>
+        <figcaption><span class="label">Uploading</span><p>The nav board is blocked on the upload, so there's nothing to press.</p></figcaption>
+      </figure>
+      <figure>
+        <div class="bezel"><canvas data-screen="resBase" role="img" aria-label="Baseline result 9 percent OK in yellow, 4 orientation gaps, press ACCEPT to install"></canvas></div>
+        <figcaption><span class="label">Result: 1 Baseline, OK</span><p>The color is the recommendation. What comes next is shown after you accept, once the unit knows it.</p></figcaption>
+      </figure>
+      <figure>
+        <div class="bezel"><canvas data-screen="resMount" role="img" aria-label="Mounted result 14 percent POOR in red, next run 2 again"></canvas></div>
+        <button type="button" class="holdbtn" data-hold>Hold for BTN1</button>
+        <figcaption><span class="label">Result: 2 Mounted, POOR</span><p>Red means do it again. ACCEPT still takes one press; REJECT needs the hold.</p></figcaption>
+      </figure>
+      <figure>
+        <div class="bezel"><canvas data-screen="resHdg" role="img" aria-label="Heading result 2.1 degrees GOOD in green, press ACCEPT to install"></canvas></div>
+        <figcaption><span class="label">Result: 3 Heading, GOOD</span><p>The heading grade is the likely worst error, in degrees.</p></figcaption>
+      </figure>
+      <figure>
+        <div class="bezel"><canvas data-screen="saving" role="img" aria-label="After ACCEPT: Saving, both keys empty"></canvas></div>
+        <figcaption><span class="label">Saving</span><p>After ACCEPT the nav board installs the cal, tells the server, and for a baseline downloads the new gap-fill map. That blocks it for a few seconds, so the display waits here instead of flashing NO LINK.</p></figcaption>
+      </figure>
+      <figure>
+        <div class="bezel"><canvas data-screen="installedBase" role="img" aria-label="Baseline installed, gap-fill map of 9 cells ready, next 1a Fill gaps"></canvas></div>
+        <figcaption><span class="label">Installed: 1 Baseline</span><p>The gap-fill map arrives with the accept, so 1a can start straight away with no trip to tern.local. With no cells to fill, Next says 2 MOUNTED.</p></figcaption>
+      </figure>
+      <figure>
+        <div class="bezel"><canvas data-screen="installedNoMap" role="img" aria-label="Baseline installed, gap-fill map not updated, next sync at tern.local"></canvas></div>
+        <figcaption><span class="label">Installed, map not updated</span><p>If the download fails, the old map is deleted, so 1a refuses rather than chase the previous baseline's gaps.</p></figcaption>
+      </figure>
+      <figure>
+        <div class="bezel"><canvas data-screen="installedHdg" role="img" aria-label="Heading installed, all 3 steps done"></canvas></div>
+        <figcaption><span class="label">Installed: 3 Heading</span><p>The last step closes the whole process.</p></figcaption>
+      </figure>
+      <figure>
+        <div class="bezel"><canvas data-screen="gapSent" role="img" aria-label="Fill gaps uploaded, next merge on website, OK"></canvas></div>
+        <figcaption><span class="label">Fill gaps sent</span><p>There's no accept here, because the patch is merged on the website.</p></figcaption>
+      </figure>
+      <figure>
+        <div class="bezel"><canvas data-screen="offline" role="img" aria-label="No WiFi, samples saved on the unit, next upload at tern.local, OK"></canvas></div>
+        <figcaption><span class="label">No WiFi</span><p>This closes the backlog item: the screen says where the upload happens instead of only promising nothing is lost.</p></figcaption>
+      </figure>
+      <figure>
+        <div class="bezel"><canvas data-screen="failed" role="img" aria-label="Upload failed, HTTP -3 connection reset, next retry at tern.local, OK"></canvas></div>
+        <figcaption><span class="label">Upload failed</span><p>Same layout as No WiFi, with a red headline and the error underneath.</p></figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section class="questions" aria-labelledby="q-h">
+    <h2 id="q-h">Decided</h2>
+    <ol>
+      <li>The steps are numbered 1, 1a (optional), 2 and 3. The 1a token shows on every screen.</li>
+      <li>BTN2 keeps going. Holding BTN1 for 2 s throws the work away (QUIT, REJECT), and the left key fills while you hold.</li>
+      <li>Results show the number in the grade's color plus a one-word grade: GOOD, OK or POOR.</li>
+      <li>Mounted gets FINISH at any time and ends by itself at 36 cells.</li>
+      <li>Grid guidance stays broad ("Fill red &amp; yellow cells"), because per-cell hints would flicker as the unit rolls.</li>
+      <li>On Heading, the target is the main number. The unit's indicated heading is secondary and labeled as such.</li>
+      <li>Grid rows are 24 px on Baseline and Fill gaps, 20 px on Mounted.</li>
+      <li>Accepting a baseline on the unit downloads its gap-fill map straight away. If that fails, the stale map is deleted.</li>
+      <li>The Cal menu reads Baseline (1), Fill gaps (1a), Mounted (2), Heading (3), then Speed cal.</li>
+    </ol>
+  </section>
+</div>
+
+<script>
+const FONT_HEX = "00000000003e5b4f5b3e3e6b4f6b3e1c3e7c3e1c183c7e3c181c577d571c1c5e7f5e1c00183c1800ffe7c3e7ff0018241800ffe7dbe7ff30483a060e2629792926407f050507407f05253f5a3ce73c5a7f3e1c1c08081c1c3e7f14227f22145f5f005f5f06097f017f006689956a606060606094a2ffa29408047e040810207e201008082a1c08081c2a08081e101010100c1e0c1e0c30383e3830060e3e0e06000000000000005f00000007000700147f147f14242a7f2a12231308646236495620500008070300001c2241000041221c002a1c7f1c2a08083e080800807030000808080808000060600020100804023e5149453e00427f400072494949462141494d331814127f1027454545393c4a49493141211109073649494936464949291e0000140000004034000000081422411414141414004122140802015909063e415d594e7c1211127c7f494949363e414141227f4141413e7f494949417f090909013e414151737f0808087f00417f41002040413f017f081422417f404040407f021c027f7f0408107f3e4141413e7f090909063e4151215e7f09192946264949493203017f01033f4040403f1f2040201f3f4038403f631408146303047804036159494d43007f4141410204081020004141417f04020102044040404040000307080020545478407f284444383844444428384444287f385454541800087e090218a4a49c787f0804047800447d40002040403d007f1028440000417f40007c047804787c080404783844444438fc1824241818242418fc7c08040408485454542404043f44243c4040207c1c2040201c3c4030403c44281028444c9090907c4464544c4400083641000000770000004136080002010204023c2623263c1ea1a161123a4040207a385454555921555579412254547842215554784020545579400c1e5272123955555559395454545939555454580000457c410002457d420001457c407d1211127df0282528f07c545545002054547c547c0a097f4932494949323a4444443a324a4848303a4141217a3a42402078009da0a07d3d4242423d3d4040403d3c24ff2424487e4943662b2ffc2f2bff0929f620c0887e090320545479410000447d413048484a32384040227a007a0a0a727d0d19317d2629292f28262929292630484d4020380808080808080808382f10c8acba2f102834fa00007b000008142a142222142a14085500550055aa55aa55aaff55ff55ff000000ff00101010ff00141414ff001010ff00ff1010f010f0141414fc001414f700ff0000ff00ff1414f404fc141417101f10101f101f1414141f00101010f0000000001f101010101f10101010f010000000ff101010101010101010ff10000000ff140000ff00ff00001f10170000fc04f414141710171414f404f40000ff00f714141414141414f700f7141414171410101f101f141414f4141010f010f000001f101f0000001f14000000fc140000f010f01010ff10ff141414ff141010101f00000000f010fffffffffff0f0f0f0f0ffffff0000000000ffff0f0f0f0f0f3844443844fc4a4a4a347e02020606027e027e0263554941633844443c04407e201e2006027e020299a5e7a5991c2a492a1c4c7201724c304a4d4d303048784830bc625a463d3e494949007e0101017e2a2a2a2a2a44445f444440514a444040444a51400000ff0103e080ff000008086b6b083612362436060f090f06000018180000001010003040ff0101001f01011e00191d1712003c3c3c3c0000000000";
+/* Pixel mock of the DPV-Nav display board: ST7789 320x240, RGB565 colours,
+   Adafruit GFX classic 5x7 font (6x8 cell per text size). FONT_HEX is the
+   library's glcdfont.c, inserted at build time. */
+
+const FONT = (() => {
+  const a = new Uint8Array(1280);
+  for (let i = 0; i < 1280; i++) a[i] = parseInt(FONT_HEX.substr(i * 2, 2), 16);
+  return a;
+})();
+
+const C = {
+  BLACK: 0x0000, WHITE: 0xFFFF, RED: 0xF800, GREEN: 0x07E0, CYAN: 0x07FF,
+  YELLOW: 0xFFE0, GRAY: 0x7BEF, DIM: 0x2104, OPEN: 0x1082, DIMTEXT: 0x4208,
+  STEP: 0x52AA, SKY: 0x2AD4, GROUND: 0x7A83,
+};
+
+class TFT {
+  constructor() { this.buf = new Uint16Array(76800); this.clip = null; }
+  px(x, y, c) {
+    if (x < 0 || y < 0 || x >= 320 || y >= 240) return;
+    const k = this.clip;
+    if (k && (x < k[0] || y < k[1] || x >= k[0] + k[2] || y >= k[1] + k[3])) return;
+    this.buf[y * 320 + x] = c;
+  }
+  fillRect(x, y, w, h, c) { for (let j = y; j < y + h; j++) for (let i = x; i < x + w; i++) this.px(i, j, c); }
+  hline(x, y, w, c) { this.fillRect(x, y, w, 1, c); }
+  vline(x, y, h, c) { this.fillRect(x, y, 1, h, c); }
+  rect(x, y, w, h, c) {
+    this.hline(x, y, w, c); this.hline(x, y + h - 1, w, c);
+    this.vline(x, y, h, c); this.vline(x + w - 1, y, h, c);
+  }
+  line(x0, y0, x1, y1, c) {
+    const dx = Math.abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+    const dy = -Math.abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+    let err = dx + dy;
+    for (;;) {
+      this.px(x0, y0, c);
+      if (x0 === x1 && y0 === y1) break;
+      const e2 = 2 * err;
+      if (e2 >= dy) { err += dy; x0 += sx; }
+      if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+  }
+  fillCircle(cx, cy, r, c) {
+    for (let dy = -r; dy <= r; dy++) {
+      const dx = Math.round(Math.sqrt(r * r - dy * dy));
+      this.hline(cx - dx, cy + dy, 2 * dx + 1, c);
+    }
+  }
+  inRound(i, j, x, y, w, h, r) {
+    if (i < x || j < y || i >= x + w || j >= y + h) return false;
+    const ccx = i < x + r ? x + r : i > x + w - 1 - r ? x + w - 1 - r : i;
+    const ccy = j < y + r ? y + r : j > y + h - 1 - r ? y + h - 1 - r : j;
+    const dx = i - ccx, dy = j - ccy;
+    return dx * dx + dy * dy <= r * r;
+  }
+  fillRound(x, y, w, h, r, c, clipW = w) {
+    for (let j = y; j < y + h; j++)
+      for (let i = x; i < x + clipW; i++)
+        if (this.inRound(i, j, x, y, w, h, r)) this.px(i, j, c);
+  }
+  round(x, y, w, h, r, c) {
+    for (let j = y; j < y + h; j++)
+      for (let i = x; i < x + w; i++)
+        if (this.inRound(i, j, x, y, w, h, r) && !this.inRound(i, j, x + 1, y + 1, w - 2, h - 2, r - 1))
+          this.px(i, j, c);
+  }
+  fillTri(x0, y0, x1, y1, x2, y2, c) {
+    const E = [[x0, y0, x1, y1], [x1, y1, x2, y2], [x2, y2, x0, y0]];
+    const lo = Math.min(y0, y1, y2), hi = Math.max(y0, y1, y2);
+    for (let y = lo; y <= hi; y++) {
+      const xs = [];
+      for (const [ax, ay, bx, by] of E) {
+        if (ay === by) { if (y === ay) xs.push(ax, bx); }
+        else if (y >= Math.min(ay, by) && y <= Math.max(ay, by)) xs.push(ax + (y - ay) * (bx - ax) / (by - ay));
+      }
+      if (xs.length) {
+        const a = Math.round(Math.min(...xs)), b = Math.round(Math.max(...xs));
+        this.hline(a, y, b - a + 1, c);
+      }
+    }
+  }
+  // Transparent background, as the firmware's labels on a black screen.
+  text(x, y, str, s, fg) {
+    for (const ch of str) {
+      const code = ch === "°" ? 248 : ch === "±" ? 241 : ch.charCodeAt(0);
+      for (let i = 0; i < 5; i++) {
+        const bits = FONT[code * 5 + i];
+        for (let j = 0; j < 8; j++) if ((bits >> j) & 1) this.fillRect(x + i * s, y + j * s, s, s, fg);
+      }
+      x += 6 * s;
+    }
+  }
+}
+
+const tw = (s, z) => [...s].length * 6 * z;
+
+// ---------------------------------------------------------------------------
+// The frame: header 0-23, work area 24-183, status 186-209, softkeys 212-239.
+// ---------------------------------------------------------------------------
+const STAGES = [["1", "BASELINE"], ["1a", "FILL GAPS"], ["2", "MOUNTED"], ["3", "HEADING"]];
+
+function header(t, stage, count) {
+  let x = 2;
+  for (const [id] of STAGES) {
+    const w = tw(id, 2) + 6;
+    if (id === stage) { t.fillRound(x, 1, w, 20, 3, C.CYAN); t.text(x + 3, 3, id, 2, C.BLACK); }
+    else t.text(x + 3, 3, id, 2, C.STEP);
+    x += w + 5;
+  }
+  t.text(x + 1, 3, STAGES.find(s => s[0] === stage)[1], 2, C.CYAN);
+  if (count) t.text(318 - tw(count, 2), 3, count, 2, C.WHITE);
+  t.hline(0, 23, 320, C.CYAN);
+}
+
+function key(t, side, k, fill) {
+  const x = side ? 162 : 2, y = 212, w = 156, h = 26, r = 5;
+  let ink;
+  switch (k.style) {
+    case "blank": t.round(x, y, w, h, r, C.DIM); return;
+    case "dim": t.round(x, y, w, h, r, C.DIM); ink = C.DIMTEXT; break;
+    case "normal": t.round(x, y, w, h, r, C.GRAY); ink = C.WHITE; break;
+    case "go": t.fillRound(x, y, w, h, r, C.GREEN); ink = C.BLACK; break;
+    case "hold":
+      t.round(x, y, w, h, r, C.GRAY); ink = C.GRAY;
+      if (fill > 0) { t.fillRound(x, y, w, h, r, C.RED, Math.round(w * Math.min(1, fill))); ink = C.WHITE; }
+      break;
+  }
+  t.text(x + ((w - tw(k.label, 2)) >> 1), y + 6, k.label, 2, ink);
+}
+
+function frameEnd(t, statusParts, left, right, fill = 0) {
+  t.hline(0, 184, 320, C.DIM);
+  let x = 4;
+  for (const [s, c] of statusParts) { t.text(x, 190, s, 2, c); x += tw(s, 2); }
+  key(t, 0, left, fill);
+  key(t, 1, right, 0);
+}
+
+const QUIT = { label: "hold: QUIT", style: "hold" };
+const REJECT = { label: "hold: REJECT", style: "hold" };
+const FINISH = { label: "FINISH", style: "normal" };
+const ACCEPT = { label: "ACCEPT", style: "normal" };
+const OK = { label: "OK", style: "normal" };
+const BLANK = { label: "", style: "blank" };
+
+// ---------------------------------------------------------------------------
+// Shared widgets
+// ---------------------------------------------------------------------------
+const CELL = { G: C.GREEN, Y: C.YELLOW, R: C.RED, ".": C.OPEN };
+const GX = 26, GY = 36, CW = 24;
+
+function ticks(t, rowLabels, rh) {
+  ["N", "", "", "E", "", "", "S", "", "", "W", "", ""].forEach((l, c) => { if (l) t.text(GX + c * CW + 10, 27, l, 1, C.WHITE); });
+  rowLabels.forEach((l, r) => t.text(2, GY + r * rh + (rh >> 1) - 4, l, 1, C.GRAY));
+}
+
+function cells(t, rows, rh, nums) {
+  let n = 0;
+  rows.forEach((row, r) => [...row].forEach((ch, c) => {
+    const cx = GX + c * CW, cy = GY + r * rh;
+    t.fillRect(cx + 1, cy + 1, CW - 2, rh - 2, CELL[ch]);
+    if (ch === "Y" && nums) t.text(cx + 4, cy + (rh >> 1) - 4, String(nums[n++ % nums.length]), 1, C.BLACK);
+  }));
+}
+
+function highlight(t, r, c, rh, col) {
+  const cx = GX + c * CW, cy = GY + r * rh;
+  t.rect(cx, cy, CW, rh, col); t.rect(cx + 1, cy + 1, CW - 2, rh - 2, col);
+}
+
+function dot(t, x, y) { t.fillCircle(x, y, 4, C.BLACK); t.fillCircle(x, y, 3, C.WHITE); }
+
+const EDGES = [90, 60, 30, -30, -60, -90];   // elevation bands, as mag_orient::elevBand()
+function grid5(t, rows, cur, hdg, pitch, nums) {
+  const RH = 24;
+  ticks(t, ["+60", "+30", "  0", "-30", "-60"], RH);
+  cells(t, rows, RH, nums);
+  highlight(t, cur[0], cur[1], RH, C.WHITE);
+  let dr = 0;
+  while (dr < 4 && pitch < EDGES[dr + 1]) dr++;
+  const frac = (EDGES[dr] - pitch) / (EDGES[dr] - EDGES[dr + 1]);
+  dot(t, Math.round(GX + hdg / 360 * 12 * CW), Math.round(GY + (dr + frac) * RH));
+}
+
+function grid3(t, rows, cur, inWin, hdg, pitch) {
+  const RH = 20;
+  ticks(t, ["+30", "  0", "-30"], RH);
+  cells(t, rows, RH, null);
+  highlight(t, cur[0], cur[1], RH, inWin ? C.WHITE : C.YELLOW);
+  dot(t, Math.round(GX + hdg / 360 * 12 * CW), Math.round(GY + (45 - pitch) / 90 * 3 * RH));
+}
+
+function rollWidget(t, x, y, S, cols, cur) {
+  const e = S - 1, cx = x + (e >> 1), cy = y + (e >> 1);
+  const T = [[x, y, x + e, y], [x + e, y, x + e, y + e], [x + e, y + e, x, y + e], [x, y + e, x, y]];
+  T.forEach(([ax, ay, bx, by], k) => t.fillTri(ax, ay, bx, by, cx, cy, cols[k]));
+  if (cur >= 0) {
+    const [ax, ay, bx, by] = T[cur];
+    t.line(ax, ay, bx, by, C.WHITE); t.line(ax, ay, cx, cy, C.WHITE); t.line(bx, by, cx, cy, C.WHITE);
+  }
+}
+
+// drawHorizon() from display.cpp, at a parameterised size: error from the
+// target pitch, exaggerated by gain, brackets at +-tol.
+function horizon(t, x0, y0, S, pErr, roll, tol, gain, inWin) {
+  t.clip = [x0, y0, S, S];
+  const mid = S >> 1, off = pErr * gain;
+  const dr = Math.max(-60, Math.min(60, roll * gain));
+  const slope = Math.tan(dr * Math.PI / 180);
+  for (let x = 0; x < S; x++) {
+    const yh = Math.max(0, Math.min(S, mid + off + (x - mid) * slope));
+    const y = Math.floor(yh);
+    if (y > 0) t.vline(x0 + x, y0, y, C.SKY);
+    if (y < S) t.vline(x0 + x, y0 + y, S - y, C.GROUND);
+  }
+  const yl = Math.floor(mid + off - mid * slope), yr = Math.floor(mid + off + (S - 1 - mid) * slope);
+  for (let k = -2; k <= 2; k++) t.line(x0, y0 + yl + k, x0 + S - 1, y0 + yr + k, C.WHITE);
+  const mark = inWin ? C.GREEN : C.YELLOW, tp = Math.round(tol * gain);
+  for (let side = 0; side < 2; side++) {
+    const xo = side ? S - 4 : 3, xa = side ? S - 14 : 3;
+    for (let k = 0; k < 3; k++) {
+      t.vline(x0 + xo + (side ? -k : k), y0 + mid - tp, 2 * tp + 1, mark);
+      t.hline(x0 + xa, y0 + mid - tp + k, 11, mark);
+      t.hline(x0 + xa, y0 + mid + tp - k, 11, mark);
+    }
+  }
+  t.hline(x0 + mid - 12, y0 + mid, 8, C.BLACK);
+  t.hline(x0 + mid + 5, y0 + mid, 8, C.BLACK);
+  t.fillCircle(x0 + mid, y0 + mid, 2, C.BLACK);
+  t.clip = null;
+  t.rect(x0, y0, S, S, C.GRAY);
+}
+
+function bar(t, x, y, w, h, frac, col, label, labelCol) {
+  t.rect(x, y, w, h, C.GRAY);
+  const fw = Math.round((w - 2) * frac);
+  if (fw > 0) t.fillRect(x + 1, y + 1, fw, h - 2, col);
+  if (label) t.text(x + 6, y + 2, label, 2, labelCol);
+}
+
+function hdgCal(t, f, ind, pitch, roll, level, hold, att, statusParts, markStyle) {
+  header(t, "3", "4/12");
+  t.text(4, 28, "Align to external compass", 2, C.GRAY);
+  t.text(4, 55, "TARGET", 2, C.GRAY);
+  t.text(220, 48, "120°", 4, C.WHITE);
+  t.text(4, 86, "INDICATED HDG", 2, C.GRAY);
+  t.text(244, 82, ind, 3, C.GRAY);
+  horizon(t, 4, 104, 80, pitch, roll, 3, 6, level);
+  t.text(92, 107, "HOLD", 2, C.GRAY);
+  bar(t, 170, 106, 146, 18, hold, C.GREEN);
+  t.text(92, 133, att, 2, C.GRAY);
+  t.text(92, 159, "Avg err +2°", 2, C.YELLOW);
+  frameEnd(t, statusParts, QUIT, { label: "MARK", style: markStyle }, f);
+}
+
+function result(t, f, stage, num, word, col, sub, extra, next) {
+  header(t, stage, "RESULT");
+  t.text(8, 36, num, 6, col);
+  t.text(316 - tw(word, 4), 44, word, 4, col);
+  t.text(8, 96, sub, 2, C.GRAY);
+  if (extra) t.text(8, 120, extra, 2, C.GRAY);
+  frameEnd(t, next, REJECT, ACCEPT, f);
+}
+
+// ---------------------------------------------------------------------------
+// Screens
+// ---------------------------------------------------------------------------
+const SCREENS = {
+  bars: { stage: "1", draw(t, f = 0) {
+    header(t, "1", "212/2160");
+    [["X", 92], ["Y", 64], ["Z", 31]].forEach(([a, v], i) => {
+      const y = 34 + i * 28;
+      t.text(4, y + 4, a, 2, C.GRAY);
+      t.rect(24, y, 292, 22, C.GRAY);
+      t.fillRect(25, y + 1, Math.round(290 * v / 100), 20, v >= 80 ? C.GREEN : v >= 40 ? C.YELLOW : C.RED);
+    });
+    t.text(4, 126, "Finding north...", 2, C.WHITE);
+    t.text(4, 150, "The grid appears", 2, C.GRAY);
+    t.text(4, 166, "once it locks.", 2, C.GRAY);
+    frameEnd(t, [["Tumble the unit randomly", C.YELLOW]], QUIT, FINISH, f);
+  } },
+
+  baseGrid: { stage: "1", draw(t, f = 0) {
+    header(t, "1", "1980/2160");
+    grid5(t, ["RYRYGYRRYRYR", "GGYGGGGYGYGG", "GGGGGGGGGGGG", "GGGGYGGGGGGY", "YGYGGYRGGRGY"],
+          [1, 9], 284, 41, [7, 12, 3, 9, 14, 5, 11, 8, 16, 2]);
+    t.text(4, 162, "38/60 cells", 2, C.WHITE);
+    t.text(150, 162, "284° +41°", 2, C.YELLOW);
+    rollWidget(t, 287, 157, 26, [C.GREEN, C.YELLOW, C.RED, C.GREEN], 1);
+    frameEnd(t, [["Auto-finish at 2160", C.YELLOW]], QUIT, FINISH, f);
+  } },
+
+  gapGrid: { stage: "1a", draw(t, f = 0) {
+    header(t, "1a", "9/14");
+    grid5(t, ["..G..Y...R..", ".G..G...G...", "....G...Y...", "..G...G..G..", ".R.Y..G....."],
+          [2, 8], 255, -8, [11, 6, 4]);
+    t.text(4, 162, "5 cells left", 2, C.WHITE);
+    t.text(160, 162, "255° -8°", 2, C.YELLOW);
+    rollWidget(t, 287, 157, 26, [C.GREEN, C.RED, C.RED, C.YELLOW], 0);
+    frameEnd(t, [["Fill red & yellow cells", C.YELLOW]], QUIT, FINISH, f);
+  } },
+
+  mounted: { stage: "2", hold: "QUIT", draw(t, f = 0) {
+    header(t, "2", "16/36");
+    grid3(t, ["GGRGRRGRGRRR", "GGGGRGGRGGGR", "RRGRRRGRRRRR"], [1, 4], true, 130, 1);
+    horizon(t, 4, 100, 80, 1, -2, 10, 2, true);
+    t.text(92, 102, "MOTION", 2, C.GRAY);
+    bar(t, 170, 101, 146, 18, 0, C.RED, "still", C.GREEN);
+    t.text(92, 126, "HOLD", 2, C.GRAY);
+    bar(t, 170, 125, 146, 18, 0.6, C.CYAN);
+    t.text(92, 152, "130° P+01 R-02", 2, C.WHITE);
+    frameEnd(t, [["Holding...", C.GREEN]], QUIT, FINISH, f);
+  } },
+
+  mountedOut: { stage: "2", draw(t, f = 0) {
+    header(t, "2", "16/36");
+    grid3(t, ["GGRGRRGRGRRR", "GGGGRGGRGGGR", "RRGRRRGRRRRR"], [0, 6], false, 200, 18);
+    horizon(t, 4, 100, 80, -12, 3, 10, 2, false);
+    t.text(92, 102, "MOTION", 2, C.GRAY);
+    bar(t, 170, 101, 146, 18, 0.4, C.RED, "turning", C.WHITE);
+    t.text(92, 126, "HOLD", 2, C.GRAY);
+    bar(t, 170, 125, 146, 18, 0, C.CYAN);
+    t.text(92, 152, "200° P+18 R+03", 2, C.WHITE);
+    frameEnd(t, [["Nose up to 30", C.YELLOW]], QUIT, FINISH, f);
+  } },
+
+  hdgReady: { stage: "3", draw(t, f = 0) {
+    hdgCal(t, f, "123°", 0.8, -0.4, true, 1, "P+0.8 R-0.4", [["Ready - press MARK", C.GREEN]], "go");
+  } },
+
+  hdgNotLevel: { stage: "3", draw(t, f = 0) {
+    hdgCal(t, f, "126°", 4.1, -1.2, false, 0, "P+4.1 R-1.2", [["Not level", C.RED]], "dim");
+  } },
+
+  marked: { stage: "3", draw(t) {
+    header(t, "3", "5/12");
+    t.text(70, 44, "MARKED", 5, C.GREEN);
+    t.text(52, 108, "TGT 120°  IND 123°", 2, C.WHITE);
+    t.text(64, 134, "err +3°  avg +2°", 2, C.YELLOW);
+    frameEnd(t, [["Next: ", C.GRAY], ["150°", C.WHITE]],
+             { label: "hold: QUIT", style: "dim" }, { label: "MARK", style: "dim" });
+  } },
+
+  upload: { stage: "2", draw(t) {
+    header(t, "2", "UPLOAD");
+    t.text(8, 44, "Uploading", 3, C.WHITE);
+    t.text(8, 80, "14 s", 3, C.YELLOW);
+    t.text(8, 128, "Takes up to 30 s.", 2, C.GRAY);
+    t.text(8, 150, "The unit is busy.", 2, C.GRAY);
+    frameEnd(t, [["Please wait", C.GRAY]], BLANK, BLANK);
+  } },
+
+  resBase: { stage: "1", draw(t, f = 0) {
+    result(t, f, "1", "9%", "OK", C.YELLOW, "RMS error", "4 orientation gaps",
+           [["Press ACCEPT to install", C.WHITE]]);
+  } },
+
+  resMount: { stage: "2", hold: "REJECT", draw(t, f = 0) {
+    result(t, f, "2", "14%", "POOR", C.RED, "RMS error", null,
+           [["Next: ", C.GRAY], ["run 2 again", C.RED]]);
+  } },
+
+  resHdg: { stage: "3", draw(t, f = 0) {
+    result(t, f, "3", "2.1°", "GOOD", C.GREEN, "likely worst error", null,
+           [["Press ACCEPT to install", C.WHITE]]);
+  } },
+
+  saving: { stage: "1", draw(t) {
+    header(t, "1", "SAVING");
+    t.text(8, 36, "9%", 6, C.YELLOW);
+    t.text(316 - tw("OK", 4), 44, "OK", 4, C.YELLOW);
+    t.text(8, 96, "RMS error", 2, C.GRAY);
+    t.text(8, 120, "4 orientation gaps", 2, C.GRAY);
+    frameEnd(t, [["Saving...", C.GREEN]], BLANK, BLANK);
+  } },
+
+  installedBase: { stage: "1", draw(t) {
+    header(t, "1", "SAVED");
+    t.text(8, 44, "Installed", 3, C.GREEN);
+    t.text(8, 84, "Gap-fill map: 9 cells", 2, C.WHITE);
+    t.text(8, 104, "ready on the unit.", 2, C.WHITE);
+    frameEnd(t, [["Next: ", C.GRAY], ["1a FILL GAPS", C.WHITE]], BLANK, OK);
+  } },
+
+  installedNoMap: { stage: "1", draw(t) {
+    header(t, "1", "SAVED");
+    t.text(8, 44, "Installed", 3, C.GREEN);
+    t.text(8, 84, "Gap-fill map not", 2, C.YELLOW);
+    t.text(8, 104, "updated: timeout", 2, C.YELLOW);
+    frameEnd(t, [["Next: ", C.GRAY], ["sync at tern.local", C.WHITE]], BLANK, OK);
+  } },
+
+  installedHdg: { stage: "3", draw(t) {
+    header(t, "3", "SAVED");
+    t.text(8, 44, "Installed", 3, C.GREEN);
+    t.text(8, 84, "Heading cal is on.", 2, C.WHITE);
+    frameEnd(t, [["All 3 steps done", C.GREEN]], BLANK, OK);
+  } },
+
+  gapSent: { stage: "1a", draw(t) {
+    header(t, "1a", "SENT");
+    t.text(8, 44, "Uploaded", 3, C.GREEN);
+    t.text(8, 84, "Patch RMS 8%", 2, C.WHITE);
+    t.text(8, 108, "3 cells still thin", 2, C.GRAY);
+    frameEnd(t, [["Next: ", C.GRAY], ["merge on website", C.WHITE]], BLANK, OK);
+  } },
+
+  offline: { stage: "2", draw(t) {
+    header(t, "2", "OFFLINE");
+    t.text(8, 44, "No WiFi", 3, C.YELLOW);
+    t.text(8, 84, "Samples are saved", 2, C.WHITE);
+    t.text(8, 104, "on the unit.", 2, C.WHITE);
+    frameEnd(t, [["Next: ", C.GRAY], ["upload at tern.local", C.WHITE]], BLANK, OK);
+  } },
+
+  failed: { stage: "2", draw(t) {
+    header(t, "2", "FAILED");
+    t.text(8, 44, "Upload failed", 3, C.RED);
+    t.text(8, 84, "HTTP -3: connection", 2, C.GRAY);
+    t.text(8, 104, "reset", 2, C.GRAY);
+    frameEnd(t, [["Next: ", C.GRAY], ["retry at tern.local", C.WHITE]], BLANK, OK);
+  } },
+};
+
+// What a completed hold leads to.
+const AFTER = {
+  QUIT(t, stage) {
+    header(t, stage, "");
+    t.text(8, 52, "Quit", 4, C.WHITE);
+    t.text(8, 104, "Nothing was uploaded.", 2, C.GRAY);
+    frameEnd(t, [["Back to the nav screen", C.GRAY]], BLANK, BLANK);
+  },
+  REJECT(t, stage) {
+    header(t, stage, "");
+    t.text(8, 52, "Rejected", 4, C.WHITE);
+    t.text(8, 104, "Your old cal stays on.", 2, C.GRAY);
+    frameEnd(t, [["Back to the nav screen", C.GRAY]], BLANK, BLANK);
+  },
+};
+
+
+const HOLD_MS = 2000;
+const off = document.createElement("canvas");
+off.width = 320; off.height = 240;
+const offCtx = off.getContext("2d");
+
+function paint(canvas, t) {
+  const img = offCtx.createImageData(320, 240), d = img.data;
+  for (let i = 0; i < 76800; i++) {
+    const c = t.buf[i];
+    d[i * 4] = ((c >> 11) & 31) * 255 / 31;
+    d[i * 4 + 1] = ((c >> 5) & 63) * 255 / 63;
+    d[i * 4 + 2] = (c & 31) * 255 / 31;
+    d[i * 4 + 3] = 255;
+  }
+  offCtx.putImageData(img, 0, 0);
+  const ctx = canvas.getContext("2d");
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(off, 0, 0, canvas.width, canvas.height);
+}
+
+function render(canvas, fill) {
+  const t = new TFT();
+  SCREENS[canvas.dataset.screen].draw(t, fill || 0);
+  paint(canvas, t);
+}
+
+document.querySelectorAll("canvas[data-screen]").forEach(cv => {
+  cv.width = 960; cv.height = 720;
+  render(cv, 0);
+});
+
+// Press-and-hold demo: the left key fills over HOLD_MS, then the hold fires.
+document.querySelectorAll("[data-hold]").forEach(btn => {
+  const canvas = btn.closest("figure").querySelector("canvas");
+  const screen = SCREENS[canvas.dataset.screen];
+  const label = btn.textContent;
+  let raf = 0, t0 = 0, busy = false;
+
+  const step = now => {
+    const f = (now - t0) / HOLD_MS;
+    if (f >= 1) { fire(); return; }
+    render(canvas, f);
+    raf = requestAnimationFrame(step);
+  };
+  const start = e => {
+    if (busy || raf) return;
+    if (e) e.preventDefault();
+    t0 = performance.now();
+    btn.classList.add("active");
+    raf = requestAnimationFrame(step);
+  };
+  const stop = () => {
+    if (!raf) return;
+    cancelAnimationFrame(raf); raf = 0;
+    btn.classList.remove("active");
+    render(canvas, 0);
+  };
+  const fire = () => {
+    raf = 0; busy = true;
+    btn.classList.remove("active");
+    render(canvas, 1);
+    setTimeout(() => {
+      const t = new TFT();
+      AFTER[screen.hold](t, screen.stage);
+      paint(canvas, t);
+      btn.textContent = "Resetting…";
+      setTimeout(() => { busy = false; btn.textContent = label; render(canvas, 0); }, 1800);
+    }, 200);
+  };
+
+  btn.addEventListener("pointerdown", start);
+  ["pointerup", "pointerleave", "pointercancel"].forEach(ev => btn.addEventListener(ev, stop));
+  btn.addEventListener("keydown", e => { if ((e.key === " " || e.key === "Enter") && !e.repeat) start(e); });
+  btn.addEventListener("keyup", e => { if (e.key === " " || e.key === "Enter") stop(); });
+  btn.addEventListener("contextmenu", e => e.preventDefault());
+});
+
+// Screen size toggle.
+const sizeNote = document.getElementById("size-note");
+function setSize(real) {
+  document.body.dataset.size = real ? "real" : "large";
+  document.getElementById("size-real").setAttribute("aria-pressed", String(real));
+  document.getElementById("size-large").setAttribute("aria-pressed", String(!real));
+  sizeNote.hidden = !real;
+  try { localStorage.setItem("calScreensSize", real ? "real" : "large"); } catch (e) {}
+}
+document.getElementById("size-real").addEventListener("click", () => setSize(true));
+document.getElementById("size-large").addEventListener("click", () => setSize(false));
+try { if (localStorage.getItem("calScreensSize") === "real") setSize(true); } catch (e) {}
+</script>

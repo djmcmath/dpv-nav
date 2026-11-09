@@ -19,6 +19,7 @@ enum class CalFailKind : uint8_t {
     TRANSPORT,  // the upload didn't get through: samples are on the unit, retry at tern.local
     REJECTED,   // the server got the samples and refused to fit them: collect again
     REFUSED,    // nav refused to start a gap-fill (no baseline, no target map): nothing collected
+    NOT_INSTALLED,  // ACCEPT, but nav couldn't install it (copy failed, or nothing was pending)
 };
 
 // Initialize SPI bus and ST7789 TFT (320x240 landscape).  Call once during setup.
@@ -208,7 +209,9 @@ void showCloudCalOffline(CalStep step);
 void showCloudCalFailed(CalStep step, CalFailKind kind, const char* message);
 
 // The fit succeeded: the result and the decision. BTN2 = ACCEPT, hold BTN1 =
-// REJECT.
+// REJECT. saving: ACCEPT was pressed and nav is installing it (and, for a
+// baseline, fetching its gap-fill map); the result stays up with "Saving..."
+// and no keys until nav reports back.
 //   quality:      CalCloudQuality (GOOD/WARN/BAD), shown as GOOD/OK/POOR
 //   value:        baseline/mounted: rms_pct, as a %. heading: the leave-one-out
 //                 worst-case error in degrees, which arrives in the same wire
@@ -216,7 +219,13 @@ void showCloudCalFailed(CalStep step, CalFailKind kind, const char* message);
 //   coverageGaps: baseline only, empty coverage-grid cells; -1 = not applicable
 //                 (mounted/hdg fit, or a pre-9-axis-firmware baseline CSV) and
 //                 shows nothing extra. See baseline-cal-coverage-feedback-plan.md.
-void showCloudCalResult(CalStep step, uint8_t quality, float value, int16_t coverageGaps);
+void showCloudCalResult(CalStep step, uint8_t quality, float value, int16_t coverageGaps,
+                        bool saving = false);
+
+// Installed, with what comes next. Baseline adds its gap-fill map's outcome:
+// targetCount thin + empty cells downloaded (0 = coverage complete), or -1 and
+// mapError when it wasn't. BTN2: OK.
+void showCalInstalled(CalStep step, int16_t targetCount, const char* mapError);
 
 // Gap-fill's upload result: nothing to accept on the unit, BTN2: OK. See the
 // definition for why that fit is never offered as an install. coverageGaps

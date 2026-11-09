@@ -54,9 +54,23 @@ String checkForUpdates();
 // means nothing. See src/util/mag_cal_orient.h.
 //
 // Deliberately a local read with no network call: the diver may well be at the
-// water with no WiFi by the time they run gap-fill, and the map is only
-// refreshed by checkForUpdates(), which is an explicit action.
+// water with no WiFi by the time they run gap-fill. The map is refreshed by
+// checkForUpdates() and by refreshGapFillTargets() below.
 bool loadTargets(uint8_t outGrid60[60]);
+
+// Downloads the gap-fill target map for the device's current (is_current)
+// baseline and caches it where loadTargets() reads it. One blocking HTTPS
+// call. On true, targetCount = thin + empty cells (0 = coverage complete) and
+// degraded = the map knows empty cells only. On false, err is diver-readable
+// and the cached map is untouched -- the caller decides whether a stale one
+// may stay (clearTargets()). Called from checkForUpdates() and by nav_main
+// right after a baseline is accepted on the unit.
+bool refreshGapFillTargets(int& targetCount, bool& degraded, String& err);
+
+// Deletes the cached target map. For when it can no longer be trusted to match
+// the installed baseline: gap-fill then refuses with the sync instruction
+// instead of sending the diver to the previous baseline's cells.
+void clearTargets();
 
 // Reads the last-synced per-roll-sector coverage statuses into
 // `outRollGrid60x4` (MAG_CAL_ROLL_SECTORS entries per cell, same status

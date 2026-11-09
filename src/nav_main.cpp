@@ -194,6 +194,7 @@ static const char* gBinCalCsvPath = nullptr;
 static char gCloudCalId[40]          = "";
 static char gCloudCalPendingPath[40] = "";
 static char gCloudCalActivePath[24]  = "";
+static CalType gCloudCalType         = CalType::BASELINE;
 
 // Result of runCalUploadAndNotify() -- a caller-facing summary of what a
 // cloud upload+fit round trip did, independent of the CalCloudResultPacket
@@ -269,6 +270,7 @@ static CloudCalOutcome runCalUploadAndNotify(CalType calType, const char* mode,
 
             strncpy(gCloudCalId, cr.calibrationId.c_str(), sizeof(gCloudCalId) - 1);
             gCloudCalId[sizeof(gCloudCalId) - 1] = '\0';
+            gCloudCalType = calType;
             // Defense in depth, in case a mismatched display build (old
             // firmware, unaware of `installable`) ever sends
             // ACCEPT_CLOUD_CAL for a non-installable result anyway: leaving
@@ -2661,53 +2663,114 @@ static void handleDisplayCmd() {
                     case DisplayCmd::ACCEPT_CLOUD_CAL: {
                         char cid[40];
                         parseCloudCalId(cmdBuf, cmdPos, cid, sizeof(cid));
+                        // Whatever happens, the display hears back once it's
+                        // all done (CAL_RESPONDED): it holds its Saving
+                        // screen until then, because this can block for two
+                        // HTTPS round trips and NO LINK would otherwise flash.
+                        CalRespondedPacket rp{};
+                        rp.cal_type = (uint8_t)gCloudCalType;
+                        rp.accepted = true;
                         if (strlen(gCloudCalId) > 0 && strcmp(cid, gCloudCalId) == 0 &&
                             strlen(gCloudCalPendingPath) > 0) {
                             // Copy the staged result over the active cal file, then
                             // reload -- same effect as the web file-manager's existing
                             // "Reload Cal Files" action, just triggered from here.
+                            bool copied = false;
                             File src = LittleFS.open(gCloudCalPendingPath, FILE_READ);
                             if (src) {
                                 File dst = LittleFS.open(gCloudCalActivePath, FILE_WRITE);
                                 if (dst) {
+                                    copied = true;
                                     uint8_t copyBuf[256];
                                     size_t n;
                                     while ((n = src.read(copyBuf, sizeof(copyBuf))) > 0) {
-                                        dst.write(copyBuf, n);
+                                        if (dst.write(copyBuf, n) != n) { copied = false; break; }
                                     }
                                     dst.close();
-                                    Serial.printf("[CLOUD_CAL] Accepted -- %s -> %s\n",
-                                                  gCloudCalPendingPath, gCloudCalActivePath);
-                                    loadCalibration();
+                                    if (!copied) {
+                                        Serial.printf("[CLOUD_CAL] ERROR: short write to %s\n",
+                                                      gCloudCalActivePath);
+                                        snprintf(rp.error, sizeof(rp.error), "Could not write %s",
+                                                 gCloudCalActivePath);
+                                    }
                                 } else {
                                     Serial.printf("[CLOUD_CAL] ERROR: could not open %s for write\n",
                                                   gCloudCalActivePath);
+                                    snprintf(rp.error, sizeof(rp.error), "Could not open %s",
+                                             gCloudCalActivePath);
                                 }
                                 src.close();
                             } else {
                                 Serial.printf("[CLOUD_CAL] ERROR: could not open %s\n",
                                               gCloudCalPendingPath);
+                                snprintf(rp.error, sizeof(rp.error), "Staged result is missing");
                             }
-                            cloud::respondToCalibration(String(gCloudCalId), true);
+
+                            // Tell the server only what really happened: an
+                            // accept the unit didn't install would make the
+                            // server and the unit disagree about the current cal.
+                            if (copied) {
+                                Serial.printf("[CLOUD_CAL] Accepted -- %s -> %s\n",
+                                              gCloudCalPendingPath, gCloudCalActivePath);
+                                loadCalibration();
+                                rp.installed = true;
+                                const bool responded =
+                                    cloud::respondToCalibration(String(gCloudCalId), true);
+
+                                // A new baseline brings its own gap-fill map, so
+                                // Fill gaps can start straight away. The server
+                                // serves the map of whichever baseline is current,
+                                // and accepting is what makes this one current: if
+                                // the server didn't take the accept, it would hand
+                                // back the previous baseline's map. So no download
+                                // then, and no stale map either -- gap-fill refuses
+                                // with the sync instruction instead of sending the
+                                // diver to the old baseline's cells.
+                                if (strcmp(gCloudCalActivePath, storage::MAG_BASE_FILE) == 0) {
+                                    int targets = 0;
+                                    bool degraded = false;
+                                    String err;
+                                    if (!responded) {
+                                        cal_sync::clearTargets();
+                                        snprintf(rp.error, sizeof(rp.error), "server didn't confirm");
+                                    } else if (cal_sync::refreshGapFillTargets(targets, degraded, err)) {
+                                        rp.target_count = (int16_t)targets;
+                                    } else {
+                                        cal_sync::clearTargets();
+                                        copyForDisplay(rp.error, sizeof(rp.error), err.c_str());
+                                    }
+                                }
+                            }
                         } else {
                             Serial.println("[CLOUD_CAL] ACCEPT with no matching pending result -- ignored");
+                            snprintf(rp.error, sizeof(rp.error), "Nothing pending to install");
                         }
                         gCloudCalId[0]          = '\0';
                         gCloudCalPendingPath[0] = '\0';
+                        char rbuf[160];
+                        size_t rn = calRespondedPacketToBytes(rp, rbuf, sizeof(rbuf));
+                        if (rn > 0) Serial1.write(rbuf, rn);
                         break;
                     }
                     case DisplayCmd::REJECT_CLOUD_CAL: {
                         char cid[40];
                         parseCloudCalId(cmdBuf, cmdPos, cid, sizeof(cid));
+                        CalRespondedPacket rp{};
+                        rp.cal_type = (uint8_t)gCloudCalType;
+                        rp.accepted = false;
                         if (strlen(gCloudCalId) > 0 && strcmp(cid, gCloudCalId) == 0) {
                             if (strlen(gCloudCalPendingPath) > 0) LittleFS.remove(gCloudCalPendingPath);
                             cloud::respondToCalibration(String(gCloudCalId), false);
                             Serial.println("[CLOUD_CAL] Rejected -- discarding pending result");
                         } else {
                             Serial.println("[CLOUD_CAL] REJECT with no matching pending result -- ignored");
+                            snprintf(rp.error, sizeof(rp.error), "Nothing pending to reject");
                         }
                         gCloudCalId[0]          = '\0';
                         gCloudCalPendingPath[0] = '\0';
+                        char rbuf[160];
+                        size_t rn = calRespondedPacketToBytes(rp, rbuf, sizeof(rbuf));
+                        if (rn > 0) Serial1.write(rbuf, rn);
                         break;
                     }
                     case DisplayCmd::LINK_ACCOUNT: {

@@ -586,6 +586,67 @@ int main() {
         rx.rejected = true;   // poison
         check(bytesToCalCloudResultPacket(buf, n, rx) && !rx.rejected,
               "an ordinary failure does not read as a rejection");
+
+        // installable rides every stage: the display names the cal step from
+        // it, and a gap-fill that failed or went offline is step 1a.
+        tx.cal_type    = (uint8_t)CalType::BASELINE;
+        tx.installable = false;
+        for (uint8_t stage : { (uint8_t)CalCloudStage::FAILED, (uint8_t)CalCloudStage::OFFLINE }) {
+            tx.stage = stage;
+            n = calCloudResultPacketToBytes(tx, buf, sizeof(buf));
+            rx.installable = true;   // poison
+            check(bytesToCalCloudResultPacket(buf, n, rx) && !rx.installable,
+                  "a gap-fill's failure or offline result says it can't be installed");
+        }
+        tx.installable = true;
+        n = calCloudResultPacketToBytes(tx, buf, sizeof(buf));
+        check(bytesToCalCloudResultPacket(buf, n, rx) && rx.installable,
+              "and a baseline's says it can");
+    }
+
+    // --- CalRespondedPacket ------------------------------------------------------
+    {
+        CalRespondedPacket tx{};
+        tx.cal_type     = (uint8_t)CalType::BASELINE;
+        tx.accepted     = true;
+        tx.installed    = true;
+        tx.target_count = 9;
+        size_t n = calRespondedPacketToBytes(tx, buf, sizeof(buf));
+        check(n > 0 && identifyPacket(buf, n) == PacketType::CAL_RESPONDED, "responded packet is type A");
+        CalRespondedPacket rx{};
+        rx.error[0] = 'x';   // poison
+        check(bytesToCalRespondedPacket(buf, n, rx), "responded round-trips");
+        check(rx.cal_type == tx.cal_type && rx.accepted && rx.installed && rx.target_count == 9,
+              "responded fields survive");
+        check(rx.error[0] == '\0', "no error reads as empty");
+
+        tx.installed    = false;
+        tx.target_count = -1;
+        strncpy(tx.error, "Nothing pending to install -- nav restarted?", sizeof(tx.error) - 1);
+        n = calRespondedPacketToBytes(tx, buf, sizeof(buf));
+        check(bytesToCalRespondedPacket(buf, n, rx) && !rx.installed && rx.target_count == -1 &&
+              strcmp(rx.error, tx.error) == 0, "a failed install carries its reason");
+
+        // A CalCloudResultPacket must never parse as one, nor the reverse.
+        CalCloudResultPacket r{};
+        r.stage = (uint8_t)CalCloudStage::DONE;
+        n = calCloudResultPacketToBytes(r, buf, sizeof(buf));
+        check(identifyPacket(buf, n) == PacketType::CAL_CLOUD_RESULT, "a result is still type R");
+    }
+
+    // --- max_samples_reached travels in every phase ------------------------------
+    // Baseline's buffer usually fills after its grid locks.
+    {
+        CalProgressPacket tx{};
+        tx.cal_type = (uint8_t)CalType::BASELINE;
+        tx.phase    = (uint8_t)CalPhase::BASELINE_GRID;
+        tx.bins_total = 60;
+        tx.complete = true;
+        tx.max_samples_reached = true;
+        size_t n = calProgressPacketToBytes(tx, buf, sizeof(buf));
+        CalProgressPacket rx{};
+        check(n > 0 && bytesToCalProgressPacket(buf, n, rx) && rx.max_samples_reached,
+              "buffer-full survives in BASELINE_GRID");
     }
 
     // --- Heading cal level gate fields --------------------------------------

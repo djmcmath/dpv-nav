@@ -25,6 +25,7 @@ PacketType identifyPacket(const char* buf, size_t len) {
     if (t[0] == 'U') return PacketType::OTA_BEGIN;
     if (t[0] == 'V') return PacketType::UPDATE_HINT;
     if (t[0] == 'O') return PacketType::CAL_ORIENT;
+    if (t[0] == 'A') return PacketType::CAL_RESPONDED;
     // Backward compat: packets without "t" are assumed NavPacket
     if (doc["hdg"].is<float>()) return PacketType::NAV;
     return PacketType::UNKNOWN;
@@ -454,8 +455,10 @@ size_t calProgressPacketToBytes(const CalProgressPacket& pkt, char* buf, size_t 
         doc["cx"] = pkt.cov_x;
         doc["cy"] = pkt.cov_y;
         doc["cz"] = pkt.cov_z;
-        if (pkt.max_samples_reached) doc["mx"] = true;
     }
+    // Any phase: baseline's buffer usually fills after the grid has locked
+    // (BASELINE_GRID), and the screen says "Buffer full" rather than "Done".
+    if (pkt.max_samples_reached) doc["mx"] = true;
 
     // GAP_FILL only: the server's per-cell target statuses, packed 2 bits per
     // cell into 15 bytes and hex-encoded (30 chars) rather than sent as a
@@ -770,6 +773,36 @@ bool bytesToCalCloudResultPacket(const char* buf, size_t len, CalCloudResultPack
 
     out.installable = doc["in"] | true;
     out.rejected    = doc["rj"] | false;
+    return true;
+}
+
+size_t calRespondedPacketToBytes(const CalRespondedPacket& pkt, char* buf, size_t bufLen) {
+    JsonDocument doc;
+    doc["t"]  = "A";
+    doc["ct"] = pkt.cal_type;
+    doc["ac"] = pkt.accepted;
+    doc["in"] = pkt.installed;
+    doc["tc"] = pkt.target_count;
+    if (pkt.error[0]) doc["er"] = pkt.error;
+
+    size_t n = serializeJson(doc, buf, bufLen - 1);
+    if (n == 0 || n >= bufLen - 1) return 0;
+    buf[n]     = '\n';
+    buf[n + 1] = '\0';
+    return n + 1;
+}
+
+bool bytesToCalRespondedPacket(const char* buf, size_t len, CalRespondedPacket& out) {
+    JsonDocument doc;
+    if (deserializeJson(doc, buf, len)) return false;
+
+    out.cal_type     = doc["ct"] | (uint8_t)0;
+    out.accepted     = doc["ac"] | false;
+    out.installed    = doc["in"] | false;
+    out.target_count = doc["tc"] | (int16_t)-1;
+    const char* err  = doc["er"] | "";
+    strncpy(out.error, err, sizeof(out.error) - 1);
+    out.error[sizeof(out.error) - 1] = '\0';
     return true;
 }
 

@@ -2106,9 +2106,10 @@ void showCloudCalFailed(CalStep step, CalFailKind kind, const char* message) {
     sig = calSig(sig, &kind, sizeof(kind));
     sig = calSigStr(sig, msg);
     if (claimCalWork(sig)) {
-        const char* head = kind == CalFailKind::REJECTED ? "Fit rejected"
-                         : kind == CalFailKind::REFUSED  ? "Can't start"
-                                                         : "Upload failed";
+        const char* head = kind == CalFailKind::REJECTED      ? "Fit rejected"
+                         : kind == CalFailKind::REFUSED       ? "Can't start"
+                         : kind == CalFailKind::NOT_INSTALLED ? "Not installed"
+                                                              : "Upload failed";
         drawWorkText(8, 44, head, 3, COLOR_RED);
         // 26 characters a line at size 2; the wire's 64-character error fits
         // in three. nav cuts a longer one at a sentence or word boundary.
@@ -2122,10 +2123,12 @@ void showCloudCalFailed(CalStep step, CalFailKind kind, const char* message) {
     static const CalText kTransport[] = { { "Next: ", COLOR_GRAY }, { "retry at tern.local", COLOR_WHITE } };
     static const CalText kRejected[]  = { { "Next: ", COLOR_GRAY }, { "collect again", COLOR_WHITE } };
     static const CalText kRefused[]   = { { "Nothing was collected", COLOR_GRAY } };
+    static const CalText kNotInst[]   = { { "Your old cal stays on", COLOR_GRAY } };
     switch (kind) {
-        case CalFailKind::REJECTED: drawCalFooter(kRejected, 2, KEY_BLANK, KEY_OK); break;
-        case CalFailKind::REFUSED:  drawCalFooter(kRefused, 1, KEY_BLANK, KEY_OK);  break;
-        default:                    drawCalFooter(kTransport, 2, KEY_BLANK, KEY_OK); break;
+        case CalFailKind::REJECTED:      drawCalFooter(kRejected, 2, KEY_BLANK, KEY_OK); break;
+        case CalFailKind::REFUSED:       drawCalFooter(kRefused, 1, KEY_BLANK, KEY_OK);  break;
+        case CalFailKind::NOT_INSTALLED: drawCalFooter(kNotInst, 1, KEY_BLANK, KEY_OK);  break;
+        default:                         drawCalFooter(kTransport, 2, KEY_BLANK, KEY_OK); break;
     }
 }
 
@@ -2189,7 +2192,8 @@ void showLogUpload(uint8_t done, uint8_t total, uint32_t secondsWaiting) {
 // the server didn't send it, shown as "--" rather than falling back to the
 // RMS). The server's recommendation text is not shown: the band says it,
 // and on heading it once quoted a second, different "max error".
-void showCloudCalResult(CalStep step, uint8_t quality, float value, int16_t coverageGaps) {
+void showCloudCalResult(CalStep step, uint8_t quality, float value, int16_t coverageGaps,
+                        bool saving) {
     if (!tftReady) return;
     const bool isHdg = (step == CalStep::HEADING);
     char num[12];
@@ -2202,7 +2206,7 @@ void showCloudCalResult(CalStep step, uint8_t quality, float value, int16_t cove
     if (quality == (uint8_t)CalCloudQuality::WARN)     { bandColor = COLOR_YELLOW; band = "OK"; }
     else if (quality == (uint8_t)CalCloudQuality::BAD) { bandColor = COLOR_RED;    band = "POOR"; }
 
-    drawCalHeader(step, "RESULT");
+    drawCalHeader(step, saving ? "SAVING" : "RESULT");
     // A tern.local retry-upload can deliver a new result while this is up.
     uint32_t sig = calSig(CalWork::RESULT);
     sig = calSig(sig, &step, sizeof(step));
@@ -2225,7 +2229,10 @@ void showCloudCalResult(CalStep step, uint8_t quality, float value, int16_t cove
     }
 
     static const CalKey kAccept = { "ACCEPT", KeyStyle::NORMAL };
-    if (quality == (uint8_t)CalCloudQuality::BAD) {
+    if (saving) {
+        static const CalText kSaving = { "Saving...", COLOR_GREEN };
+        drawCalFooter(&kSaving, 1, KEY_BLANK, KEY_BLANK);
+    } else if (quality == (uint8_t)CalCloudQuality::BAD) {
         static char again[16];
         snprintf(again, sizeof(again), "run %s again", kCalStepIds[(int)step]);
         const CalText parts[] = { { "Next: ", COLOR_GRAY }, { again, COLOR_RED } };
@@ -2234,6 +2241,52 @@ void showCloudCalResult(CalStep step, uint8_t quality, float value, int16_t cove
         static const CalText kStatus[] = { { "Press ACCEPT to install", COLOR_WHITE } };
         drawCalFooter(kStatus, 1, KEY_REJECT, kAccept);
     }
+}
+
+// After ACCEPT, once nav reports back. What comes next isn't known until
+// then: for a baseline it depends on the gap-fill map that came with it.
+void showCalInstalled(CalStep step, int16_t targetCount, const char* mapError) {
+    if (!tftReady) return;
+    const bool isBase = (step == CalStep::BASELINE);
+    const bool mapOk  = isBase && targetCount >= 0;
+    const char* err   = mapError ? mapError : "";
+    drawCalHeader(step, "SAVED");
+    uint32_t sig = calSig(calSig(CalWork::INSTALLED), &step, sizeof(step));
+    sig = calSig(sig, &targetCount, sizeof(targetCount));
+    sig = calSigStr(sig, err);
+    if (claimCalWork(sig)) {
+        drawWorkText(8, 44, "Installed", 3, COLOR_GREEN);
+        char line[28];
+        if (mapOk && targetCount > 0) {
+            snprintf(line, sizeof(line), "Gap-fill map: %d cell%s", targetCount,
+                     targetCount == 1 ? "" : "s");
+            drawWorkText(8, 84, line, 2, COLOR_WHITE);
+            drawWorkText(8, 104, "ready on the unit.", 2, COLOR_WHITE);
+        } else if (mapOk) {
+            drawWorkText(8, 84, "Coverage is complete:", 2, COLOR_WHITE);
+            drawWorkText(8, 104, "no gaps to fill.", 2, COLOR_WHITE);
+        } else if (isBase) {
+            drawWorkText(8, 84, "Gap-fill map not updated:", 2, COLOR_YELLOW);
+            tft.setTextSize(2);
+            tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
+            printWrapped(8, 104, err, 26, 20, 3);
+        } else if (step == CalStep::MOUNTED) {
+            drawWorkText(8, 84, "Mounted cal is on.", 2, COLOR_WHITE);
+        } else if (step == CalStep::HEADING) {
+            drawWorkText(8, 84, "Heading cal is on.", 2, COLOR_WHITE);
+        }
+    }
+
+    static const CalText kNextGaps[]  = { { "Next: ", COLOR_GRAY }, { "1a FILL GAPS", COLOR_WHITE } };
+    static const CalText kNextMount[] = { { "Next: ", COLOR_GRAY }, { "2 MOUNTED", COLOR_WHITE } };
+    static const CalText kNextSync[]  = { { "Next: ", COLOR_GRAY }, { "sync at tern.local", COLOR_WHITE } };
+    static const CalText kNextHdg[]   = { { "Next: ", COLOR_GRAY }, { "3 HEADING", COLOR_WHITE } };
+    static const CalText kAllDone[]   = { { "All 3 steps done", COLOR_GREEN } };
+    if (isBase && !mapOk)            drawCalFooter(kNextSync, 2, KEY_BLANK, KEY_OK);
+    else if (isBase && targetCount)  drawCalFooter(kNextGaps, 2, KEY_BLANK, KEY_OK);
+    else if (isBase)                 drawCalFooter(kNextMount, 2, KEY_BLANK, KEY_OK);
+    else if (step == CalStep::MOUNTED) drawCalFooter(kNextHdg, 2, KEY_BLANK, KEY_OK);
+    else                             drawCalFooter(kAllDone, 1, KEY_BLANK, KEY_OK);
 }
 
 // Gap-fill's upload result: nothing to accept on the unit. That fit covers

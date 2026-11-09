@@ -202,11 +202,14 @@ static uint32_t         gCurrentHoldCountdown = 0;
 // gCloudCalPhase overrides the normal link-timeout ("NO LINK") check for that
 // window rather than reporting a false dead link -- see linkAlive below.
 enum class CloudCalUiPhase : uint8_t {
-    NONE,     // not in cloud-cal UI
-    WAITING,  // upload/fit in progress on the nav device (blocking there)
-    OFFLINE,  // no WiFi -- upload was skipped
-    FAILED,   // upload/fit failed, or nav device never responded
-    RESULT,   // fit succeeded -- accept/reject
+    NONE,       // not in cloud-cal UI
+    WAITING,    // upload/fit in progress on the nav device (blocking there)
+    OFFLINE,    // no WiFi -- upload was skipped
+    FAILED,     // upload/fit failed, or nav device never responded
+    RESULT,     // fit succeeded -- accept/reject
+    SAVING,     // ACCEPT or REJECT sent; nav is handling it (blocking there)
+                // until its CAL_RESPONDED packet
+    INSTALLED,  // ACCEPT handled and installed: what's next
 };
 
 static CloudCalUiPhase   gCloudCalPhase          = CloudCalUiPhase::NONE;
@@ -223,6 +226,13 @@ static int16_t           gCloudCalCoverageGaps   = -1;  // baseline only; -1 = n
 static char              gCloudCalError[64]          = "";
 static display::CalFailKind gCloudCalFailKind        = display::CalFailKind::TRANSPORT;
 static char              gCloudCalId[40]             = "";
+// SAVING: which one was sent, and since when (CLOUD_CAL_WAIT_TIMEOUT_MS
+// covers nav's worst case of two blocking HTTPS calls on a baseline accept).
+static bool              gCloudCalSavingAccept       = false;
+static uint32_t          gCloudCalSavingStartMs      = 0;
+// INSTALLED: the baseline's gap-fill map, from CAL_RESPONDED. -1 = not
+// downloaded (gCloudCalError says why) or not a baseline.
+static int16_t           gCalInstalledTargets        = -1;
 
 // ---- Unified cal screens (docs/cal-screens-unified-plan.md) ----------------
 // The step every cal screen's header marks. Set when a cal starts (the start
@@ -762,9 +772,22 @@ void loop() {
             lastDisplayMs = now;
             display::setCalKeysOverlay(gCalHoldPct, gCalHintUntilMs != 0 && now < gCalHintUntilMs);
 
+            // Nav never reported back on an ACCEPT or REJECT: give up, as the
+            // display did before CAL_RESPONDED existed.
+            if (gCloudCalPhase == CloudCalUiPhase::SAVING &&
+                now - gCloudCalSavingStartMs >= CLOUD_CAL_WAIT_TIMEOUT_MS) {
+                Serial.println("[CLOUD_CAL] no CAL_RESPONDED -- back to the nav screen");
+                gCloudCalPhase = CloudCalUiPhase::NONE;
+                if (gCalDiscardUntilMs == 0) display::clear();
+            }
+
             // "Quit" / "Rejected" after a hold, then back to the nav screen.
+            // Rejected stays up until nav has reported back as well, since
+            // nav is blocked on the server until then.
+            const bool rejectSaving = gCloudCalPhase == CloudCalUiPhase::SAVING &&
+                                      !gCloudCalSavingAccept;
             if (gCalDiscardUntilMs != 0) {
-                if (now < gCalDiscardUntilMs) {
+                if (now < gCalDiscardUntilMs || rejectSaving) {
                     display::showCalDiscarded(gCalStep, gCalDiscardRejected);
                     return;
                 }
@@ -817,6 +840,13 @@ void loop() {
                         break;
                     case CloudCalUiPhase::FAILED:
                         display::showCloudCalFailed(gCalStep, gCloudCalFailKind, gCloudCalError);
+                        break;
+                    case CloudCalUiPhase::SAVING:   // ACCEPT; REJECT returned above
+                        display::showCloudCalResult(gCalStep, gCloudCalQuality, gCloudCalRmsPct,
+                                                    gCloudCalCoverageGaps, true);
+                        break;
+                    case CloudCalUiPhase::INSTALLED:
+                        display::showCalInstalled(gCalStep, gCalInstalledTargets, gCloudCalError);
                         break;
                     case CloudCalUiPhase::RESULT:
                         if (gCloudCalInstallable) {
@@ -1231,6 +1261,27 @@ static void processNavLine() {
                 gCloudCalId[sizeof(gCloudCalId) - 1] = '\0';
             }
             Serial.printf("[CLOUD_CAL] result stage=%u\n", pkt.stage);
+        }
+    } else if (ptype == PacketType::CAL_RESPONDED) {
+        CalRespondedPacket pkt{};
+        if (bytesToCalRespondedPacket(rxBuf, rxPos, pkt)) {
+            lastNavMs = millis();  // keep link-alive timer refreshed
+            Serial.printf("[CLOUD_CAL] responded: accepted=%d installed=%d targets=%d %s\n",
+                          pkt.accepted, pkt.installed, pkt.target_count, pkt.error);
+            // Late (the Saving timeout already gave up): nothing to update.
+            if (gCloudCalPhase == CloudCalUiPhase::SAVING) {
+                strncpy(gCloudCalError, pkt.error, sizeof(gCloudCalError) - 1);
+                gCloudCalError[sizeof(gCloudCalError) - 1] = '\0';
+                if (!gCloudCalSavingAccept) {
+                    gCloudCalPhase = CloudCalUiPhase::NONE;   // Rejected ends on its own timer
+                } else if (pkt.installed) {
+                    gCloudCalPhase       = CloudCalUiPhase::INSTALLED;
+                    gCalInstalledTargets = pkt.target_count;
+                } else {
+                    gCloudCalPhase    = CloudCalUiPhase::FAILED;
+                    gCloudCalFailKind = display::CalFailKind::NOT_INSTALLED;
+                }
+            }
         }
     } else if (ptype == PacketType::CLOUD_LINK_RESULT) {
         CloudLinkResultPacket pkt{};
@@ -1707,6 +1758,7 @@ static bool handleModalButtons() {
     // uploaded fit stays parked at accepted=null on the server, its correct
     // resting state until the website resolves it.
     if (gCloudCalPhase == CloudCalUiPhase::OFFLINE || gCloudCalPhase == CloudCalUiPhase::FAILED ||
+        gCloudCalPhase == CloudCalUiPhase::INSTALLED ||
         (gCloudCalPhase == CloudCalUiPhase::RESULT && !gCloudCalInstallable)) {
         if (calKeys(false).advance) {
             gCloudCalPhase = CloudCalUiPhase::NONE;
@@ -1718,22 +1770,22 @@ static bool handleModalButtons() {
     // purpose, and a tap only shows the hint.
     if (gCloudCalPhase == CloudCalUiPhase::RESULT) {
         const cal_keys::Result r = calKeys(true);
-        if (r.advance) {
-            sendCloudCalRespond(DisplayCmd::ACCEPT_CLOUD_CAL, gCloudCalId);
-            Serial.println("[CLOUD_CAL] ACCEPT");
-            gCloudCalPhase = CloudCalUiPhase::NONE;
-            display::clear();
-        } else if (r.discard) {
-            sendCloudCalRespond(DisplayCmd::REJECT_CLOUD_CAL, gCloudCalId);
-            Serial.println("[CLOUD_CAL] REJECT (BTN1 held)");
-            gCloudCalPhase = CloudCalUiPhase::NONE;
-            showCalDiscardedFor(true);
+        if (r.advance || r.discard) {
+            // Either way nav now blocks on the server (and on a baseline's
+            // gap-fill map): hold Saving or Rejected until CAL_RESPONDED.
+            gCloudCalSavingAccept  = r.advance;
+            gCloudCalSavingStartMs = millis();
+            gCloudCalPhase         = CloudCalUiPhase::SAVING;
+            sendCloudCalRespond(r.advance ? DisplayCmd::ACCEPT_CLOUD_CAL : DisplayCmd::REJECT_CLOUD_CAL,
+                                gCloudCalId);
+            Serial.println(r.advance ? "[CLOUD_CAL] ACCEPT" : "[CLOUD_CAL] REJECT (BTN1 held)");
+            if (r.discard) showCalDiscardedFor(true);
         }
         return true;
     }
-    // WAITING: no button action -- the nav device is mid-upload and won't see
-    // anything sent right now anyway (it's blocked on the network call).
-    if (gCloudCalPhase == CloudCalUiPhase::WAITING) {
+    // WAITING and SAVING: no button action -- the nav device is blocked on the
+    // network and won't see anything sent right now anyway.
+    if (gCloudCalPhase == CloudCalUiPhase::WAITING || gCloudCalPhase == CloudCalUiPhase::SAVING) {
         calKeys(false);
         return true;
     }

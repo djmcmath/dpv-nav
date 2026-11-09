@@ -122,9 +122,10 @@ String statusJson() {
 // Gap-fill target map
 // ---------------------------------------------------------------------------
 // Cached on flash so a gap-fill session can start at the water with no WiFi.
-// Refreshed only by checkForUpdates(), which is an explicit diver action --
-// there is no background poll, and a stale map is preferable to no map (the
-// server re-grades the merged result either way).
+// Refreshed by checkForUpdates() (tern.local) and by accepting a baseline on
+// the unit (refreshGapFillTargets() from nav_main's ACCEPT_CLOUD_CAL), which
+// deletes it instead when the download fails: a map for the previous baseline
+// would send gap-fill to the wrong cells. There is no background poll.
 
 static constexpr const char* CAL_TARGETS_FILE = "/cal_targets.json";
 
@@ -266,19 +267,18 @@ bool loadRollTargets(uint8_t outRollGrid60x4[60][MAG_CAL_ROLL_SECTORS]) {
 // hours later. `err` is already diver-readable text either way -- even the
 // benign "no graded baseline yet" 404 case (fetchCalTargets in
 // cloud_client.cpp) reads fine inline.
-static String refreshTargets() {
+bool refreshGapFillTargets(int& targetCount, bool& degraded, String& err) {
+    targetCount = 0;
+    degraded    = false;
     uint8_t grid[60];
-    bool degraded = false;
     uint8_t rollGrid[60][MAG_CAL_ROLL_SECTORS];
     bool hasRoll = false;
-    String err;
     if (!cloud::fetchCalTargets(grid, degraded, rollGrid, hasRoll, err)) {
         Serial.printf("[CAL_SYNC] Gap-fill targets not updated: %s\n", err.c_str());
-        return " Gap-fill targets not updated: " + err + ".";
+        return false;
     }
 
-    int targets = 0;
-    for (int i = 0; i < 60; i++) if (grid[i] == 1 || grid[i] == 2) targets++;
+    for (int i = 0; i < 60; i++) if (grid[i] == 1 || grid[i] == 2) targetCount++;
 
     String saveErr;
     if (!saveTargets(grid, degraded, rollGrid, hasRoll, saveErr)) {
@@ -287,16 +287,30 @@ static String refreshTargets() {
         size_t freeBytes = LittleFS.totalBytes() - LittleFS.usedBytes();
         Serial.printf("[CAL_SYNC] Could not write gap-fill targets to flash: %s (%u bytes free)\n",
                       saveErr.c_str(), (unsigned)freeBytes);
-        String msg = " Gap-fill targets fetched but could not be saved to flash: ";
-        msg += saveErr;
-        msg += " (";
-        msg += (unsigned)freeBytes;
-        msg += " bytes free).";
-        return msg;
+        err = "fetched but could not be saved to flash: " + saveErr + " (" +
+              String((unsigned)freeBytes) + " bytes free)";
+        return false;
     }
     Serial.printf("[CAL_SYNC] Gap-fill targets synced: %d cells need work%s\n",
-                  targets, degraded ? " (gaps only -- older cal)" : "");
+                  targetCount, degraded ? " (gaps only -- older cal)" : "");
+    return true;
+}
 
+void clearTargets() {
+    if (LittleFS.exists(CAL_TARGETS_FILE)) {
+        LittleFS.remove(CAL_TARGETS_FILE);
+        Serial.println("[CAL_SYNC] Gap-fill target map deleted (it no longer matches the baseline)");
+    }
+}
+
+// tern.local's text for the same download.
+static String refreshTargets() {
+    int targets = 0;
+    bool degraded = false;
+    String err;
+    if (!refreshGapFillTargets(targets, degraded, err)) {
+        return " Gap-fill targets not updated: " + err + ".";
+    }
     if (targets == 0) return " Coverage is complete -- no gap-fill needed.";
     String msg = " Gap-fill targets updated: ";
     msg += targets;

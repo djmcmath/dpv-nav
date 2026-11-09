@@ -2658,9 +2658,14 @@ void showCalGrid(const CalProgressPacket& pkt, bool finishing) {
     }
 
     // --- Readout row -----------------------------------------------------------
+    // Fixed widths, padded so a shorter value erases a longer one: the count
+    // gets 13 characters (x 4-159), the orientation 9 (x 166-273), and the
+    // roll widget starts at x 287.
+    char text[20];
     char cbuf[20];
-    if (isGapFill) snprintf(cbuf, sizeof(cbuf), "%d cells left  ", targetTotal - pkt.bins_green);
-    else           snprintf(cbuf, sizeof(cbuf), "%d/%d cells  ", pkt.bins_green, nBins);
+    if (isGapFill) snprintf(text, sizeof(text), "%d cells left", targetTotal - pkt.bins_green);
+    else           snprintf(text, sizeof(text), "%d/%d cells", pkt.bins_green, nBins);
+    snprintf(cbuf, sizeof(cbuf), "%-13s", text);
     if (strcmp(cbuf, sCells) != 0) {
         strncpy(sCells, cbuf, sizeof(sCells) - 1);
         drawWorkText(4, 162, cbuf, 2, COLOR_WHITE);
@@ -2672,13 +2677,13 @@ void showCalGrid(const CalProgressPacket& pkt, bool finishing) {
     // isn't there. The same algebraic reconstruction chose the highlighted
     // cell (util/mag_cal_orient.h), so the two can never disagree.
     char obuf[16];
+    text[0] = '\0';
     if (haveBin) {
         float hdg = fmodf(pkt.cur_hdg_deg, 360.0f);
         if (hdg < 0.0f) hdg += 360.0f;
-        snprintf(obuf, sizeof(obuf), "%03d\xF7 %+.0f\xF7  ", (int)hdg, (double)pkt.cur_pitch_deg);
-    } else {
-        snprintf(obuf, sizeof(obuf), "%-10s", "");
+        snprintf(text, sizeof(text), "%03d\xF7 %+.0f\xF7", (int)hdg, (double)pkt.cur_pitch_deg);
     }
+    snprintf(obuf, sizeof(obuf), "%-9s", text);
     if (strcmp(obuf, sOrient) != 0) {
         strncpy(sOrient, obuf, sizeof(sOrient) - 1);
         drawWorkText(166, 162, obuf, 2, COLOR_YELLOW);

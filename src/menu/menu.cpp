@@ -180,14 +180,15 @@ static void buildMenu() {
     // for now; an underwater opt-in is a backlog item.
     auto& cal = submenus[3];
     strncpy(cal.title, "Cal", MENU_LABEL_LEN);
-    addItem(cal, "Baseline",  Action::CAL_BASELINE);
-    // Directly under Baseline: gap-fill is the second half of that job, and
-    // the diver reaches for it right after the website tells them where the
-    // holes are.
-    addItem(cal, "Fill gaps", Action::CAL_GAPFILL);
-    addItem(cal, "Mounted",   Action::CAL_MOUNTED);
-    addItem(cal, "Hdg cal",   Action::CAL_HDG);
-    addItem(cal, "Speed cal", Action::CAL_SPEED);
+    // Numbered as the cal screens' step strip numbers them: three steps in
+    // order, with 1a the optional second half of step 1 (it patches the
+    // baseline, so it sits directly under it). Speed cal isn't one of the
+    // steps and stays unnumbered.
+    addItem(cal, "Baseline (1)",   Action::CAL_BASELINE);
+    addItem(cal, "Fill gaps (1a)", Action::CAL_GAPFILL);
+    addItem(cal, "Mounted (2)",    Action::CAL_MOUNTED);
+    addItem(cal, "Heading (3)",    Action::CAL_HDG);
+    addItem(cal, "Speed cal",      Action::CAL_SPEED);
     addItem(cal, "..",        Action::BACK);
 }
 
@@ -334,13 +335,12 @@ static void executeAction(Action act) {
             break;
         case Action::CAL_BASELINE:
             if (gSendCmd) gSendCmd(DisplayCmd::START_BASELINE_CAL);
-            // Force a clean screen for the new session. showBaselineRoughScan/
-            // showCalGrid only wipe their background when their own "static
-            // drawn" flag is false, which is only reset by clear()/reinit() --
-            // if a prior cal session this power cycle ended any way other than
-            // reaching completion (aborted, display recovering from a link
-            // drop mid-session), that flag is stale, and the new session's
-            // bars get drawn right over whatever was on screen before.
+            // Force a clean screen for the new session. The cal screens repaint
+            // only what changed since their last draw, and their caches are
+            // reset only by clear()/reinit() -- if a prior cal session this
+            // power cycle ended any way other than reaching completion (a
+            // display recovering from a link drop mid-session), they're stale,
+            // and the new session gets drawn right over whatever was on screen.
             display::clear();
             Serial.println("[MENU] CAL_BASELINE (START_BASELINE_CAL)");
             break;

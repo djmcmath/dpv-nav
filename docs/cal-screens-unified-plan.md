@@ -92,6 +92,10 @@ in-water layout), and the legacy `showCal()` for cal_mode 0/1.
   (`cal_sync.cpp`, `refreshTargets()`), and nothing ties it to the installed baseline. After
   a new baseline is accepted on the unit, Fill gaps either refuses for lack of a map or,
   worse, runs against the *previous* baseline's targets.
+- **ACCEPT tells the server "accepted" even when the install failed.** If copying the
+  pending file over the active one fails, nav still calls
+  `respondToCalibration(true)`, so the server makes it current while the unit keeps the
+  old cal.
 - **Accepting can flash NO LINK.** On ACCEPT the display goes straight back to the nav
   screen while nav blocks in `cloud::respondToCalibration()`, which can take up to
   `CLOUD_HTTP_TIMEOUT_MS` (15 s). The display's NO LINK timeout is 5 s.
@@ -218,9 +222,11 @@ Values: Baseline and Mounted print `rms_pct` as `%.0f%%`. Heading prints the lea
   - It's held through the upload and the ending screens.
   - A CalCloudResultPacket with no session behind it (a retry-upload from tern.local)
     sets the step from `cal_type`, with `installable == false` meaning FILL_GAPS.
-- **`gGapFillStarting`**: set by the CAL_GAPFILL menu action, cleared by the first
-  GAP_FILL CalProgressPacket. A FAILED result while it's set is a refusal, so the display
-  shows "Can't start", not "Upload failed".
+- **`gGapFillStarting`**: set when `display_main` sends START_GAPFILL_CAL (the menu sends
+  it from `menu.cpp` through `display_main`'s send callback, so that is the only place
+  that sees it). Cleared by the first GAP_FILL CalProgressPacket, by any
+  CalCloudResultPacket, or after 5 s. A FAILED result while it's set is a refusal, so the
+  display shows "Can't start", not "Upload failed".
 - **`gCalFinishPending`**, renamed from `gBaselineFinishPending` because Mounted uses it now
   too. While it's set, the collecting screen shows the status "Finishing..." in green with
   both keys dim. This replaces `showBaselineFinishing()`, so a refused finish falls back to
@@ -229,6 +235,7 @@ Values: Baseline and Mounted print `rms_pct` as `%.0f%%`. Heading prints the lea
   RESPONDED packet (below) or `CLOUD_CAL_WAIT_TIMEOUT_MS`.
   - It joins the `linkAlive` overrides, the same way WAITING does.
   - ACCEPT then shows Installed. REJECT shows Rejected, for at least 1.5 s.
+  - An ACCEPT that comes back `installed = false` shows "Not installed" with the reason.
   - On timeout it drops back to the nav screen, as ACCEPT does today.
 - **`gCalQuitPending`**: after QUIT_CAL, ignore CAL_PROGRESS and CAL_ORIENT packets until a
   NavPacket shows `system_state != CALIBRATION`, or for 3 s at most. Without this, a
@@ -250,14 +257,17 @@ Values: Baseline and Mounted print `rms_pct` as `%.0f%%`. Heading prints the lea
     it.
 - `lib/dpvlink/dpvlink.h`
   - Add `DisplayCmd::QUIT_CAL = 47`.
-  - Add `CalCloudStage::RESPONDED = 3`. Nav sends it on the existing CalCloudResultPacket
-    once an ACCEPT or REJECT is fully handled.
+  - Add `PacketType::CAL_RESPONDED` and `CalRespondedPacket`. Nav sends it once an ACCEPT
+    or REJECT is fully handled, on every path, including an ACCEPT or REJECT it ignored
+    because the id didn't match. (Decided 2026-11-09: its own packet type rather than a
+    new stage on CalCloudResultPacket, so no field is repurposed, and an old display
+    ignores it instead of reading it as a fit result.)
     - `cal_type`: the cal that was accepted or rejected.
-    - `quality`: 1 if accepted, 0 if rejected. That's a repurpose, so name a constant for
-      it.
-    - `coverage_gaps`: the downloaded target count for a baseline accept, −1 if the map
+    - `accepted`: what the display asked for.
+    - `installed`: true only when an ACCEPT's file copy worked.
+    - `target_count`: the downloaded target count for a baseline accept, −1 if the map
       wasn't downloaded or doesn't apply.
-    - `error`: the reason the map wasn't downloaded.
+    - `error`: why it wasn't installed, or why the map wasn't downloaded.
   - Round-trip it in `tools/dpvlink_test/`.
 - `src/util/cal_keys.h` (new, pure C++): the hold gesture.
   - Inputs: BTN1/BTN2 pressed, BTN1 press start, BTN1 fired, and now.
@@ -283,6 +293,9 @@ Values: Baseline and Mounted print `rms_pct` as `%.0f%%`. Heading prints the lea
     include 6. Keep the enum name, and add a comment that it now finishes any bin cal.
   - ACCEPT_CLOUD_CAL (~line 2626): after the copy and `loadCalibration()`, keep the
     result of `cloud::respondToCalibration()`.
+    - If the copy failed, don't tell the server it was accepted and don't touch the map.
+      Today ACCEPT responds `true` even when the copy fails, which leaves the server
+      and the unit disagreeing. Send RESPONDED with `installed = false` and the reason.
     - Baseline only (the active path is `storage::MAG_BASE_FILE`):
       - If the respond succeeded, download the gap-fill map.
       - If it failed, *don't* download: the server still has the previous baseline as
@@ -290,6 +303,8 @@ Values: Baseline and Mounted print `rms_pct` as `%.0f%%`. Heading prints the lea
       - If the download fails, delete it too.
     - Then send RESPONDED.
   - REJECT_CLOUD_CAL: send RESPONDED after the respond call.
+  - The "no matching pending result" branch of both sends RESPONDED too, with the
+    error, so the display never waits out the Saving timeout.
 - `src/net/cal_sync.h` / `cal_sync.cpp`: make the map download public, e.g.
   `bool refreshGapFillTargets(int& targetCount, String& err)`, and add `clearTargets()`.
   - `refreshTargets()` becomes a thin wrapper that turns the result into tern.local's
@@ -393,6 +408,10 @@ Values: Baseline and Mounted print `rms_pct` as `%.0f%%`. Heading prints the lea
 6. **Ship:** menu labels and `MENU_LABEL_LEN`, docs, mock sync, a version bump to
    `0.7.26-dev.N`, the hardware test, and a test-build publish.
 
+Work happens on `feature/cal-screens-unified`, merged to main at step 6. Builds reach the
+unit as OTA dev builds (`0.7.26-dev.N`); each publish is confirmed first. Bench checks
+come after step 3 and after each collecting screen, not all at the end.
+
 ## Hardware test
 
 Flash both boards from the same tree.
@@ -435,10 +454,10 @@ Flash both boards from the same tree.
 
 - **Flicker.** Every screen today is careful to redraw only what changed. The frame
   helpers have to keep that, which is why each has its own cache.
-- **Mixed versions.** A release always ships both boards from one tree (`version.h`), but
-  a bench flash of one board can split them. With a new display and an old nav, QUIT_CAL
-  and mounted FINISH are ignored: the display's quit and finish timeouts drop it back on
-  the cal screen. That's annoying but harmless.
+- **Mixed versions.** Not a real concern: OTA updates both boards in one pass, so only a
+  single-board USB bench flash can split them. With a new display and an old nav,
+  QUIT_CAL and mounted FINISH are ignored, and the display's quit and finish timeouts drop
+  it back on the cal screen. An old display ignores CAL_RESPONDED.
 - **Mounted takes longer at 36 cells.** FINISH is the way out. The backlog analysis may
   bring the number back down.
 - **REJECT now takes a 2 s hold** instead of two presses. This was decided; it's slower on
@@ -464,5 +483,7 @@ of calibration from the unit.
 
 ## Status
 
-Planned 2026-11-09. Not started. Both open decisions were settled 2026-11-09: the map
-downloads with the accept, and the menu reads "Baseline (1)" etc.
+Planned 2026-11-09. Both open decisions were settled 2026-11-09: the map downloads with
+the accept, and the menu reads "Baseline (1)" etc. Reviewed against main (b97ea43) the
+same day; RESPONDED became its own packet type. Implementation started 2026-11-09 on
+`feature/cal-screens-unified`.

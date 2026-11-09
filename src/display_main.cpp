@@ -275,7 +275,7 @@ static char            gWpPrevName[20]  = "";
 
 // ---- Button debounce -------------------------------------------------------
 static constexpr uint32_t DEBOUNCE_MS   = 50;
-static constexpr uint32_t LONG_PRESS_MS = 2000;
+// LONG_PRESS_MS lives in config.h: util/cal_keys.h needs it too.
 
 struct ButtonState {
     uint8_t  pin;

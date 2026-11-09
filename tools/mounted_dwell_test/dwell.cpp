@@ -228,33 +228,71 @@ int main() {
         check(r.committed == 2 * N, "between rows records nothing");
     }
 
-    // --- Completion ---------------------------------------------------------
+    // --- Gap measure ---------------------------------------------------------
+    // Fixed cell patterns, independent of MAG_CAL_SECTORS_MID: the gap rule is
+    // what keeps a tilted row from completing bunched on one side whenever the
+    // cell count is under 12.
     {
         uint8_t c[36] = {};
-        for (int s = 0; s < 12; s++) c[kRowLevel * 12 + s] = 18;
-        check(rowComplete(c, kRowLevel), "twelve level cells complete the level row");
-        check(!allComplete(c), "the level row alone is not a complete collection");
-        check(progressCount(c) == 12, "and counts 12 of 24");
-
         for (int s = 0; s < 6; s++) c[kRowUp * 12 + s] = 18;          // bunched: sectors 0..5
         check(rowMaxGapSectors(c, kRowUp) == 7, "six bunched cells leave a 210 deg gap");
-        check(!rowComplete(c, kRowUp), "six bunched cells do not complete a tilted row");
-        check(progressCount(c) == 12 + 5, "a bunched row counts one short of its six");
+        c[kRowUp * 12 + 8] = 18;                                      // 5 -> 8 -> 0: gaps of 3 and 4
+        check(rowMaxGapSectors(c, kRowUp) == 4, "5 -> 8 -> 0 leaves a 120 deg gap");
+        c[kRowUp * 12 + 10] = 18;                                     // 8 -> 10 -> 0: gap of 2
+        check(rowMaxGapSectors(c, kRowUp) == 3, "8 -> 10 -> 0 closes it to 90 deg");
 
         for (int s = 0; s < 12; s += 2) c[kRowDown * 12 + s] = 18;    // every other sector
         check(rowMaxGapSectors(c, kRowDown) == 2, "every other sector is a 60 deg gap");
-        check(rowComplete(c, kRowDown), "six spread cells complete a tilted row");
-        check(!allComplete(c), "still open while the other tilted row is bunched");
-
-        c[kRowUp * 12 + 8] = 18;                                      // 5 -> 8 -> 0: gaps of 3 and 4
-        check(!rowComplete(c, kRowUp), "a 120 deg gap is still too wide");
-        c[kRowUp * 12 + 10] = 18;                                     // 8 -> 10 -> 0: gap of 2
-        check(rowComplete(c, kRowUp), "closing it to 90 deg completes the row");
-        check(allComplete(c) && progressCount(c) == kNeedTotal, "all three rows complete reads 24 of 24");
+        for (int s = 1; s < 12; s += 2) c[kRowDown * 12 + s] = 18;
+        check(rowMaxGapSectors(c, kRowDown) == 1, "a full row has no gap");
 
         uint8_t one[36] = {};
         one[kRowUp * 12 + 4] = 18;
         check(rowMaxGapSectors(one, kRowUp) == 12, "a single cell has no gap to measure");
+        uint8_t none[36] = {};
+        check(rowMaxGapSectors(none, kRowUp) == 12, "an empty row has no gap to measure");
+    }
+
+    // --- Completion ---------------------------------------------------------
+    // In terms of MAG_CAL_SECTORS_MID, so changing it (the backlog's tilted-row
+    // analysis) needs no test rewrite. kSpread holds MID sectors spaced evenly
+    // round the row, which is a complete tilted row at any MID from 4 to 12.
+    constexpr int kMid = MAG_CAL_SECTORS_MID;
+    static_assert(kMid >= 4 && kMid <= 12, "the spread rows below assume 4..12 cells");
+    int kSpread[12];
+    for (int i = 0; i < kMid; i++) kSpread[i] = i * 12 / kMid;
+    {
+        check(kNeedTotal == MAG_CAL_SECTORS_LEVEL + 2 * kMid, "kNeedTotal is the level row plus both tilted rows");
+
+        uint8_t c[36] = {};
+        for (int s = 0; s < 12; s++) c[kRowLevel * 12 + s] = 18;
+        check(rowComplete(c, kRowLevel), "twelve level cells complete the level row");
+        check(!allComplete(c), "the level row alone is not a complete collection");
+        check(progressCount(c) == MAG_CAL_SECTORS_LEVEL, "and counts the level row only");
+
+        for (int i = 0; i < kMid - 1; i++) c[kRowDown * 12 + kSpread[i]] = 18;
+        check(!rowComplete(c, kRowDown), "one cell short of MID does not complete a tilted row");
+        check(progressCount(c) == MAG_CAL_SECTORS_LEVEL + kMid - 1, "and counts what is there");
+        c[kRowDown * 12 + kSpread[kMid - 1]] = 18;
+        check(rowComplete(c, kRowDown), "MID spread cells complete a tilted row");
+        check(!allComplete(c), "still open while the other tilted row is empty");
+
+        // MID cells bunched at one end of the row. When that leaves a gap over
+        // the limit (any MID under 10), the row stays open and counts one short;
+        // at 10 or more the bunch IS spread enough, and the row completes.
+        for (int s = 0; s < kMid; s++) c[kRowUp * 12 + s] = 18;
+        if (12 - kMid + 1 > MAG_CAL_DWELL_TILT_MAX_GAP_SECTORS) {
+            check(!rowComplete(c, kRowUp), "MID bunched cells do not complete a tilted row");
+            check(progressCount(c) == MAG_CAL_SECTORS_LEVEL + 2 * kMid - 1,
+                  "a bunched row counts one short of MID");
+            for (int s = kMid; s < 12; s++) c[kRowUp * 12 + s] = 18;
+        }
+        check(rowComplete(c, kRowUp), "the nose-up row completes");
+        check(allComplete(c) && progressCount(c) == kNeedTotal, "all three rows complete reads kNeedTotal");
+
+        uint8_t full[36];
+        for (int i = 0; i < 36; i++) full[i] = 18;
+        check(progressCount(full) == kNeedTotal, "a full grid never counts past kNeedTotal");
     }
 
     // --- A whole collection, end to end -------------------------------------
@@ -262,11 +300,14 @@ int main() {
         Rig r;
         for (int s = 0; s < 12; s++) { r.moveTo(0, 2, 15.0f + 30.0f * s); r.run(900); }
         check(!r.t.complete(), "level ring alone does not complete");
-        for (int s = 0; s < 12; s += 2) { r.moveTo(30, -4, 15.0f + 30.0f * s); r.run(900); }
-        for (int s = 1; s < 12; s += 2) { r.moveTo(-30, 4, 15.0f + 30.0f * s); r.run(900); }
-        check(r.t.complete(), "12 level + 6 + 6 spread dwells complete the collection");
-        check(r.committed == 24 * N, "with exactly 24 cells' worth of samples");
-        check(r.lastDwell == 24, "numbered 1 to 24");
+        for (int i = 0; i < kMid; i++) { r.moveTo(30, -4, 15.0f + 30.0f * kSpread[i]); r.run(900); }
+        check(!r.t.complete(), "level ring plus one tilted row does not complete");
+        for (int i = 0; i < kMid - 1; i++) { r.moveTo(-30, 4, 15.0f + 30.0f * kSpread[i]); r.run(900); }
+        check(!r.t.complete(), "one cell short does not complete");
+        r.moveTo(-30, 4, 15.0f + 30.0f * kSpread[kMid - 1]); r.run(900);
+        check(r.t.complete(), "the level ring and MID spread dwells per tilted row complete the collection");
+        check(r.committed == kNeedTotal * N, "with exactly kNeedTotal cells' worth of samples");
+        check(r.lastDwell == kNeedTotal, "numbered 1 to kNeedTotal");
     }
 
     // --- Motion bar ---------------------------------------------------------

@@ -606,9 +606,6 @@ static bool magFit2DSolve() {
 // Once a bin reaches the green threshold, further samples are rejected for that bin.
 // This prevents oversampling of easy orientations and produces a more balanced fit.
 
-// Maximum total samples we ever store across all bins
-static constexpr int BIN_CAL_MAX_SAMPLES = 60 * MAG_CAL_BIN_GREEN_THRESHOLD * 2;  // 2160
-
 // Accel and gyro are stored as scaled int16, not float: 24 bytes a sample
 // against 34, which is 21 KB less of the heap this buffer has starved before
 // (see magBinCalFreeSamples). The steps are 0.12 mg and 0.057 deg/s, both
@@ -895,7 +892,7 @@ bool magBinCalBegin(BinCalMode mode, const uint8_t* targets60,
     g_boot.reset();
     g_hasBaselineLast = false;
 
-    g_binSamples = (BinCalSample*)malloc(BIN_CAL_MAX_SAMPLES * sizeof(BinCalSample));
+    g_binSamples = (BinCalSample*)malloc(MAG_CAL_BIN_MAX_SAMPLES * sizeof(BinCalSample));
     if (!g_binSamples) {
         Serial.println("[BIN_CAL] ERROR: malloc failed for sample buffer");
         return false;
@@ -913,7 +910,7 @@ bool magBinCalBegin(BinCalMode mode, const uint8_t* targets60,
         int remaining = 0, total = 0;
         magBinCalGapFillProgress(remaining, total);
         Serial.printf("[BIN_CAL] Started %s cal (%s), %d bins, %d targeted cells, max %d samples\n",
-                      modeName, phaseName, g_binCalBinCount, total, BIN_CAL_MAX_SAMPLES);
+                      modeName, phaseName, g_binCalBinCount, total, MAG_CAL_BIN_MAX_SAMPLES);
         if (total == 0) {
             // Targets synced, but the server says nothing needs work. Still a
             // valid session (the diver may know better than a stale map), just
@@ -922,7 +919,7 @@ bool magBinCalBegin(BinCalMode mode, const uint8_t* targets60,
         }
     } else {
         Serial.printf("[BIN_CAL] Started %s cal (%s), %d bins, max %d samples\n",
-                      modeName, phaseName, g_binCalBinCount, BIN_CAL_MAX_SAMPLES);
+                      modeName, phaseName, g_binCalBinCount, MAG_CAL_BIN_MAX_SAMPLES);
     }
     return true;
 }
@@ -980,7 +977,7 @@ static bool baselineTick(const Vec3i16& rawMagSensor, const Vec3f& accelCal, con
         g_baselineLast.z == s.z) {
         return false;
     }
-    if (g_binSampleCount >= BIN_CAL_MAX_SAMPLES) {
+    if (g_binSampleCount >= MAG_CAL_BIN_MAX_SAMPLES) {
         // Buffer's full and the diver hasn't pressed BTN2 -- auto-finish
         // rather than silently discarding samples forever. Without this,
         // the sample count just stops climbing with no indication why.
@@ -1117,7 +1114,7 @@ bool magBinCalTick(float pitch_deg, float heading_deg, const Vec3i16& rawMagSens
             }
         }
 
-        if (g_binSampleCount >= BIN_CAL_MAX_SAMPLES) return false;
+        if (g_binSampleCount >= MAG_CAL_BIN_MAX_SAMPLES) return false;
 
         BinCalSample s = makeBinCalSample(rawMagSensor, accelCal, gyroCal, 0);
         s.dev_bin  = (int8_t)gbin;
@@ -1162,7 +1159,7 @@ bool magBinCalTick(float pitch_deg, float heading_deg, const Vec3i16& rawMagSens
     // end, but a full buffer must fail closed rather than write past it.
     const bool commit = (action == mounted_dwell::Action::COMMIT);
     const int  slot   = commit ? MAG_CAL_BIN_GREEN_THRESHOLD - 1 : g_mountedDwell.captured() - 1;
-    if (g_binSampleCount + MAG_CAL_BIN_GREEN_THRESHOLD > BIN_CAL_MAX_SAMPLES) return false;
+    if (g_binSampleCount + MAG_CAL_BIN_GREEN_THRESHOLD > MAG_CAL_BIN_MAX_SAMPLES) return false;
     g_binSamples[g_binSampleCount + slot] =
         makeBinCalSample(rawMagSensor, accelCal, gyroCal, (uint8_t)g_mountedDwell.dwellNumber());
     if (commit) {
@@ -1337,9 +1334,10 @@ void magBinCalGetProgress(CalProgressPacket& pkt) {
             green++;
         }
     }
-    // Mounted counts toward what the diver has to fill (24 cells), not the 36
-    // on the grid, and never reads full while a tilted row is still bunched
-    // on one side. The display's denominator is mounted_dwell::kNeedTotal.
+    // Mounted counts toward what the diver has to fill (kNeedTotal cells, all
+    // 36 since 2026-11-09), and never reads full while a tilted row is still
+    // bunched on one side. The display's denominator is
+    // mounted_dwell::kNeedTotal.
     if (binCalIsMounted()) green = (uint8_t)mounted_dwell::progressCount(g_binCounts);
     // Zero-fill remaining slots (for baseline → 60, mounted → 36, rest = 0)
     for (int i = g_binCalBinCount; i < 60; i++) {
@@ -1435,7 +1433,7 @@ void magBinCalFreeSamples() {
         free(g_binSamples);
         g_binSamples = nullptr;
         Serial.printf("[BIN_CAL] Freed sample buffer (%u bytes); heap_free=%u largest=%u\n",
-                      (unsigned)(BIN_CAL_MAX_SAMPLES * sizeof(BinCalSample)),
+                      (unsigned)(MAG_CAL_BIN_MAX_SAMPLES * sizeof(BinCalSample)),
                       (unsigned)ESP.getFreeHeap(),
                       (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     }

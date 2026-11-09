@@ -30,7 +30,7 @@ static void check(bool ok, const char* what) {
 }
 
 static constexpr float kLsbPerUt  = 68.42f;  // LIS3MDL +-4 gauss; the replay's default
-static constexpr int   kMaxStored = 2160;    // imu.cpp BIN_CAL_MAX_SAMPLES
+static constexpr int   kMaxStored = 2160;    // config.h MAG_CAL_BIN_MAX_SAMPLES
 
 struct Row { int16_t m[3]; float a[3]; };
 

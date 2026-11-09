@@ -80,17 +80,17 @@ Silent loss. The diver gets no error, just bad data later.
   water a while, stop logging?" All three signals are already on the nav board (`depth::`,
   GPS fix quality in `NavPacket`, DR position). Not designed yet.
 
-- [ ] **The cal OFFLINE screen promises nothing is lost, then nothing retries**
+- [ ] **The cal OFFLINE screen promises nothing is lost, then nothing retries** *(half done)*
 
-  `showCloudCalOffline` (~`display.cpp:1362`), shown when there's no WiFi at cal completion,
-  says "Raw samples are saved — nothing is lost" and stops there. There is no auto-retry
-  when WiFi comes back and no pointer to tern.local, where the per-file "Upload to cloud"
-  action actually lives. A diver who believes the screen never uploads the cal.
+  `showCloudCalOffline`, shown when there's no WiFi at cal completion, used to say "Raw
+  samples are saved — nothing is lost" and stop there. Since the unified cal screens
+  (0.7.26) it says the samples are on the unit and "Next: upload at tern.local", where the
+  per-file "Upload to cloud" action lives. **Still open:** there's no auto-retry when WiFi
+  comes back.
 
   *Where:* the retry path already exists — `runCalUploadAndNotify()` in `nav_main.cpp`
-  behind `POST /api/cal/retry-upload`. Two independent fixes: put the tern.local pointer on
-  the screen, and retry orphaned cal CSVs on network join the way `log_sync` already does
-  for dive logs.
+  behind `POST /api/cal/retry-upload`. Retry orphaned cal CSVs on network join the way
+  `log_sync` already does for dive logs.
 
 - [ ] **Thermal compensation has never been tested on the cold side**
 
@@ -267,9 +267,10 @@ Features and UX with a design already thought through.
 - [ ] **Mounted cal: do the tilted rows earn their time?**
 
   Every mounted cal so far has filled the whole +30 and −30 rows, not just the 6 spread
-  cells per tilted row the firmware needs today (`MAG_CAL_SECTORS_MID`, `kNeedTotal` = 24),
-  and the unified cal screens (2026-11-09) raise auto-finish to all 36 cells to keep
-  encouraging that. Nobody has checked whether the extra cells change the result.
+  cells per tilted row the firmware needed until 0.7.26, and the unified cal screens
+  raised auto-finish to all 36 cells (`MAG_CAL_SECTORS_MID` = 12, `kNeedTotal` = 36) to
+  keep encouraging that, with FINISH available at any time. Nobody has checked whether the
+  extra cells change the result.
 
   What the server does with them: the mounted correction is fitted from the **level row
   only** (≥ `MIN_MOUNTED_LEVEL_SAMPLES` = 30 still, level samples, no azimuth gap over
@@ -281,8 +282,9 @@ Features and UX with a design already thought through.
 
   *Analysis:* refit past mounted CSVs with the tilted rows thinned (all 12, the 6-spread
   rule, two dwells per row, none) and compare b_z, its standard error, and the heading
-  residuals at tilt. If thinning changes nothing, drop auto-finish back to 24 or lower in
-  `mounted_dwell.h` and tell divers they can stop early. The analysis runs in dive-map;
+  residuals at tilt. If thinning changes nothing, drop `MAG_CAL_SECTORS_MID` in
+  `config.h` back to 6 or lower (the dwell tests are written in terms of it) and tell
+  divers they can stop early. The analysis runs in dive-map;
   the rule it decides lives here.
 
 - [ ] **Calibration walkthrough in the user guide**
@@ -293,9 +295,9 @@ Features and UX with a design already thought through.
   "done" looks like, and what each result means.
 
   *Images:* `tools/cal_screen_mock/` renders every screen (`node
-  tools/cal_screen_mock/render.js` → `png/`). Those are the 2026-11-09 design mockups, so
-  bring `screens.js` in line with the shipped `display.cpp` and re-render before they go
-  into the guide. Depends on the cal screen redesign shipping first.
+  tools/cal_screen_mock/render.js` → `png/`). `screens.js` was brought in line with
+  `display.cpp` when the redesign was built (0.7.26), so they're ready to use; re-check
+  against the shipped build first. Unblocked once 0.7.26 is out.
 
 ---
 

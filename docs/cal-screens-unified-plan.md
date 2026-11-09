@@ -485,5 +485,27 @@ of calibration from the unit.
 
 Planned 2026-11-09. Both open decisions were settled 2026-11-09: the map downloads with
 the accept, and the menu reads "Baseline (1)" etc. Reviewed against main (b97ea43) the
-same day; RESPONDED became its own packet type. Implementation started 2026-11-09 on
-`feature/cal-screens-unified`.
+same day; RESPONDED became its own packet type.
+
+**Built 2026-11-09 on `feature/cal-screens-unified`** (steps 1–6, docs and mock
+included; dive-map's `fit.py` comment is on its own `feature/cal-screens-unified`
+branch). Host tests and both board builds pass. **Not yet bench-tested:** the hardware
+test above is owed, on a `0.7.26-dev.N` OTA build. The bench checks after step 3 and
+after each collecting screen were folded into that one session, to save OTA rounds.
+
+Where the build differs from the plan:
+- `cal_keys.h` also reports BTN2, and any press made with both buttons down does
+  nothing, so a two-button tap can't send FINISH or MARK on its way to a reinit.
+- `drawHorizon()` keeps one size: both screens use 80 px, so there was nothing to
+  parameterise.
+- Header counters follow the mock: SAVING while nav handles an ACCEPT, SAVED on
+  Installed, nothing on Quit and Rejected.
+- `CalFailKind::NOT_INSTALLED` ("Not installed", "Your old cal stays on") for an ACCEPT
+  nav couldn't install.
+- An Installed baseline with a complete map says "Coverage is complete: no gaps to
+  fill." and the Next line is 2 MOUNTED.
+- The grid readout's orientation sits at x 166 (the mock had 150/160), so "N cells
+  left" can't run into it.
+- The MARKED screen's last point says "Next: upload".
+- Nav sends `installable` on every result stage, and false on a gap-fill refusal, so
+  the display names the step from the packet alone.

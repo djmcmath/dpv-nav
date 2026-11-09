@@ -2,8 +2,11 @@
 
 > **Shipped:** Baseline, Mounted, and Heading (12-pt) calibration all fit in the cloud
 > now. Collect on the unit with WiFi connected, and the nav device uploads the raw
-> samples, gets a fitted result + quality verdict back within seconds, and shows an
-> accept/reject screen right there on the display — no laptop step required. See
+> samples, gets a fitted result + quality verdict back within seconds, and shows the
+> result right there on the display (ACCEPT on BTN2, hold BTN1 for 2 s to REJECT) —
+> no laptop step required. Every cal screen shares one layout: the step strip
+> `1 1a 2 3` and a counter across the top, one status line, and two softkeys
+> (BTN1 left, BTN2 right); see the user guide's Calibration section. See
 > [cloud-calibration-plan.md](./cloud-calibration-plan.md) and divemap's
 > [heading-cal-cloud-plan.md](../../dive-map/docs/architecture/heading-cal-cloud-plan.md)
 > for the implementation history. The manual laptop workflow (export CSV, run the
@@ -64,7 +67,7 @@ DPV-Nav calibrates four sensors/subsystems: magnetometer, gyroscope, acceleromet
 ```
 For mag: try two-stage chain (mag_base.json + mag_mount.json)
           → fall back to legacy mag_cal.json
-          → fall back to identity (no correction); diver runs CAL > Baseline (+ Mounted) later
+          → fall back to identity (no correction); diver runs CAL > Baseline (1) (+ Mounted (2)) later
 For gyro: load gyro_cal.json or run 10s stationary bias cal
 For accel: load accel_cal.json or run 6-point orientation cal
 For hdg: load hdg_fourier.json — silently skip if absent (optional)
@@ -79,15 +82,17 @@ The preferred calibration workflow uses two stages, each producing a JSON file t
 
 | Stage | Menu item | File | When to do |
 |-------|-----------|------|-----------|
-| Baseline | CAL > Baseline | `/mag_base.json` | First time, or after hardware change. Device off the DPV. Covers full sphere. |
-| Mounted | CAL > Mounted | `/mag_mount.json` | After baseline, with device installed on DPV. Corrects for DPV magnetic signature. |
+| Baseline | CAL > Baseline (1) | `/mag_base.json` | First time, or after hardware change. Device off the DPV. Covers full sphere. |
+| Mounted | CAL > Mounted (2) | `/mag_mount.json` | After baseline, with device installed on DPV. Corrects for DPV magnetic signature. |
 
 Mounted (and Baseline's `Fill gaps` patch pass) collect raw samples using a
 **bin-aware** approach: the screen shows a heading × elevation grid, and cells turn
 green as they are filled, completing automatically once all required
-cells are green. Baseline shows the same kind of grid once it has worked out
-roughly where north is, a few seconds in, but completes only when the diver presses
-BTN2 — see **Running Baseline Calibration** below. Either way, the sample CSV is
+cells are green, or when the diver presses FINISH (BTN2). Baseline shows the same
+kind of grid once it has worked out roughly where north is, a few seconds in, but
+completes only on FINISH or a full sample buffer (2160), never on a full grid — see
+**Running Baseline Calibration** below. Holding BTN1 for 2 s on any collecting
+screen quits with nothing saved or uploaded. Either way, the sample CSV is
 saved to LittleFS once collection ends.
 
 ### Running Baseline Calibration
@@ -105,30 +110,30 @@ saved to LittleFS once collection ends.
 > [baseline-live-grid-plan.md](./baseline-live-grid-plan.md).
 
 1. **Remove device from DPV** and take it somewhere with low magnetic interference.
-2. Open menu (BTN1) → **CAL > Baseline**.
+2. Open menu (BTN1) → **CAL > Baseline (1)**.
 3. The display starts on axis-range bars with **Finding north...**. Tumble the device through all orientations — roll, pitch, yaw, and diagonals. A spin about one axis alone never locks: it can't tell where the centre of the field is. Once the fit locks, the display switches to the gap-fill grid and roll widget, with every cell a target. Steer into red and yellow cells. If it never switches, the site's field strength may be outside the lock gate (`MAG_CAL_EXPECTED_FIELD_UT` in `config.h`, 50.1 µT, ±10%); the session still collects and uploads exactly as before.
-4. When you judge coverage good enough, press **BTN2**. The display shows a brief "finishing" screen while the nav device writes `/mag_baseline_samples.csv` to LittleFS.
-5. **If the unit has WiFi connected:** the nav device uploads the CSV, the server fits it and grades coverage, and the result is staged (not yet active). The display shows an accept/reject screen with the quality band and RMS. Accept to install it immediately (hot-reloads on the spot); reject to discard it and keep whatever was active before. The full coverage heatmap and any thin/empty regions are visible afterward on the Dive Map website under Calibration History.
-6. **If the unit has no WiFi:** the display shows an offline notice and no fit happens automatically. The CSV is still saved to LittleFS, so you can fall back to the manual path — download `/mag_baseline_samples.csv` (web interface or LittleFS tools) and run `python tools/mag_calibration.py mag_baseline_samples.csv`, then upload the generated `mag_base.json` to LittleFS yourself.
+4. When you judge coverage good enough, press **FINISH** (BTN2). The status line reads **Finishing...** while the nav device writes `/mag_baseline_samples.csv` to LittleFS. It also finishes by itself when the sample buffer fills at 2160 (the header counter counts toward it; the status line warns from 90%).
+5. **If the unit has WiFi connected:** the nav device uploads the CSV, the server fits it and grades coverage, and the result is staged (not yet active). The display shows the RMS in the band's colour with GOOD / OK / POOR. **ACCEPT** (BTN2) installs it immediately (hot-reloads on the spot) and downloads the new baseline's gap-fill target map; the **Installed** screen then says how many cells need work and what's next. Hold BTN1 for 2 s to **REJECT** it and keep whatever was active before. The full coverage heatmap and any thin/empty regions are visible afterward on the Dive Map website under Calibration History.
+6. **If the unit has no WiFi:** the display shows **No WiFi** and no fit happens automatically. You can upload the saved CSV later from `tern.local`. The CSV is still saved to LittleFS, so you can fall back to the manual path — download `/mag_baseline_samples.csv` (web interface or LittleFS tools) and run `python tools/mag_calibration.py mag_baseline_samples.csv`, then upload the generated `mag_base.json` to LittleFS yourself.
 
-**Filling coverage gaps:** see [Filling Coverage Gaps](#filling-coverage-gaps) below — thin or empty regions the website flags can be patched with **CAL > Fill gaps** without redoing the whole tumble.
+**Filling coverage gaps:** see [Filling Coverage Gaps](#filling-coverage-gaps) below — thin or empty regions the website flags can be patched with **CAL > Fill gaps (1a)** without redoing the whole tumble.
 
 ### Running Mounted Calibration
 
 Mounted records **one dwell per cell**: a cell fills only after the scooter has sat still, inside that row's attitude, for about half a second. Swinging through a cell records nothing. The server's fit takes "down" from the accelerometer, so a sample taken while the scooter is being moved carries a false tilt and the fit has to throw it away — which is what happened to most of every collection before this (firmware up to 0.7.19 took the first 18 samples to land in a cell). Background: dive-map's [mounted-cal-dwell-plan.md](../../dive-map/docs/architecture/mounted-cal-dwell-plan.md).
 
 1. **Mount device on DPV** in its normal installed position (all motors, batteries, and other magnetic sources present and at operational distance).
-2. Open menu (BTN1) → **CAL > Mounted**.
-3. The screen shows a 3 × 12 grid on top and, below it, an attitude indicator on the left with a **MOTION** bar, a **HOLD** bar, a heading/pitch/roll readout and one instruction line on the right.
+2. Open menu (BTN1) → **CAL > Mounted (2)**.
+3. The screen shows a 3 × 12 grid on top and, below it, an attitude indicator on the left with a **MOTION** bar, a **HOLD** bar and a heading/pitch/roll readout on the right. The status line under them says what to do next. Every empty cell is red.
    - **Attitude indicator.** The white line is the horizon. Put it inside the brackets and it turns them green: that is the attitude this row wants. Level row: within 10° of level in both pitch and roll. Tilted rows: nose up or down 20–40°, within 15° of roll.
-   - **MOTION bar.** Hold until it is empty. The word beside it says what is moving: `turning` (gyro), `pushed` or `shaking` (accelerometer). If it will not empty with the scooter resting on its stand, that sensor's calibration is off, not your hands.
+   - **MOTION bar.** Hold until it is empty. The word inside it says what is moving: `turning` (gyro), `pushed` or `shaking` (accelerometer). If it will not empty with the scooter resting on its stand, that sensor's calibration is off, not your hands.
    - **HOLD bar.** Fills while the unit settles and then records. When it is full the cell turns green and the line reads `Got it - turn`.
    - `Turn a bit more` means you are within 3° of the line between two cells; a dwell will not start there.
 4. **Level row first, on the stand: all 12 headings.** Turn about 30°, let go, wait for the cell to go green, repeat.
-5. **Then each tilted row: 6 headings, spread around the circle** (every other one is ideal; no gap wider than 90°). The count top right is out of the 24 cells needed.
-6. When the count reaches 24/24 the nav device writes `/mag_mounted_samples.csv` to LittleFS.
-7. **If the unit has WiFi connected:** same cloud round trip as Baseline — CSV uploads automatically, the server fits it, and the display shows an accept/reject screen with quality band and RMS. Accept to install and hot-reload immediately. If the server cannot fit the samples the screen says **Fit rejected** with its reason; the upload itself worked, so collect again rather than retrying.
-8. **If the unit has no WiFi:** offline notice is shown; CSV is still saved. Fall back to the manual path: export `/mag_mounted_samples.csv` and run
+5. **Then each tilted row: all 12 headings.** The count top right is out of all 36 cells. (It was 24, with 6 spread cells per tilted row, until 2026-11. Whether the tilted rows earn their time is an open question in the backlog; until it's answered, fill them.)
+6. When the count reaches 36/36, or you press **FINISH** (BTN2, available once one cell is in), the nav device writes `/mag_mounted_samples.csv` to LittleFS. Too few cells to fit is the server's call, and it says so.
+7. **If the unit has WiFi connected:** same cloud round trip as Baseline — CSV uploads automatically, the server fits it, and the display shows the result with its RMS and band. ACCEPT installs and hot-reloads immediately. If the server cannot fit the samples the screen says **Fit rejected** with its reason; the upload itself worked, so collect again rather than retrying.
+8. **If the unit has no WiFi:** **No WiFi** is shown; CSV is still saved, and you can upload it later from `tern.local`. Fall back to the manual path: export `/mag_mounted_samples.csv` and run
    `python tools/mag_calibration.py --mode mounted --base mag_base.json mag_mounted_samples.csv`,
    then upload the generated `mag_mount.json` to LittleFS **under exactly that name** (`/mag_mount.json`). Do not pass `--output` with a different name unless you rename it on upload — the firmware only reads `/mag_mount.json` and silently ignores anything else (this only applies to the manual fallback path; the cloud path always writes the correct filename). See the heading troubleshooting notes for why this bites.
 
@@ -165,16 +170,21 @@ than starting over. The two work differently — mag's gap-fill is on-device, hd
 a web form — because their gaps are detected differently (a 2-D orientation grid vs.
 a 1-D ring of headings).
 
-### Baseline: CAL > Fill gaps
+### Baseline: CAL > Fill gaps (1a)
 
 A *second* baseline pass that patches only the orientation cells the Dive Map website
 flagged as thin or empty on your installed baseline calibration — not a full redo.
 
-**Preconditions** (both refused on-screen if missing, rather than run degraded):
+**Preconditions** (both refused on-screen with **Can't start** if missing, rather
+than run degraded):
 - A baseline calibration must already be installed.
-- A target map must have been synced first: on `tern.local`, under **Calibration
-  Cloud Sync**, press **Check for updates** while connected to WiFi (cached on the
-  device as `/cal_targets.json`). This is a **web page button on the unit's own
+- A target map for it, cached on the device as `/cal_targets.json`. Accepting a
+  baseline on the unit downloads its map straight away; if that download fails, or
+  the server didn't take the accept, the old map is deleted rather than left
+  pointing at the previous baseline's cells. Otherwise (a baseline accepted or
+  merged on the website, or the Installed screen said the map wasn't updated): on
+  `tern.local`, under **Calibration Cloud Sync**, press **Check for updates** while
+  connected to WiFi. This is a **web page button on the unit's own
   `tern.local` page**, not a device menu item — there is no `CAL > Check for
   updates` on the unit itself; the on-device refusal message says as much.
   **Every** "Check for updates" click refreshes the target map, not just the
@@ -188,18 +198,19 @@ flagged as thin or empty on your installed baseline calibration — not a full r
   cable — fixed so the actual failure reason is always visible on the page.
 
 **Procedure:**
-1. Open menu (BTN1) → **CAL > Fill gaps**.
+1. Open menu (BTN1) → **CAL > Fill gaps (1a)**.
 2. The grid is the baseline grid's, binned through your installed baseline
    calibration instead of an in-session fit, and with only the flagged cells as
    targets. Orientation is computed algebraically per sample, without the Mahony
    filter. Rotate toward the flagged cells; the grid fills in as you go.
-3. Collection auto-completes once every targeted cell is satisfied. BTN2 also
-   finishes early, since a targeted cell can be physically unreachable depending on
-   how the device is mounted.
+3. Collection auto-completes once every targeted cell is satisfied. FINISH (BTN2)
+   also ends it early, since a targeted cell can be physically unreachable depending
+   on how the device is mounted. The header counter is finished targets out of all
+   targets.
 4. The patch uploads to the cloud as a baseline-mode collection and is fit from
    *just* the patched cells — small on purpose. This fit is never directly
-   installable (the on-device result screen is informational only, no accept/reject
-   toggle) — it only becomes useful once merged with your existing baseline.
+   installable (the on-device **Uploaded** screen is informational only, with just
+   an OK) — it only becomes useful once merged with your existing baseline.
 5. On the Dive Map website, open **Calibration History** for the device. Your most
    recent baseline row shows a **"New collection available"** badge. Expand it to
    see what the patch covers (a small coverage-grid thumbnail, which gaps it fills,
@@ -319,8 +330,8 @@ you explicitly ask it to: on `tern.local`, under **Calibration Cloud Sync**, pre
 **Check for updates**. This applies to both the Baseline gap-fill merge and the hdg
 manual-entry gap-fill described above — a calibration you accepted on the web is not
 "live" on the unit until you also do this step. (A calibration accepted *on the
-device itself*, via the normal accept/reject screen right after collection, needs no
-such step — it's already local.)
+device itself*, via the result screen right after collection, needs no such step —
+it's already local, and a baseline brings its gap-fill map with it.)
 
 ## Gyroscope Calibration
 
@@ -386,31 +397,36 @@ command, press Enter):
 
 **When to do it:** After completing baseline + mounted mag cal. Run in a magnetically clean environment (living room on a wooden floor — not in a garage with rebar in concrete). The device must already have a working magnetometer calibration.
 
-**Trigger:** Menu → **CAL > Hdg cal**
+**Trigger:** Menu → **CAL > Heading (3)**
 
 ### Procedure
 
 **Part 1 — On-device data collection:**
 
-1. Open menu (BTN1) → **CAL > Hdg cal**. The menu closes and the heading cal screen appears.
-2. The screen shows **Step 1/12: Target 000°** and the live AHRS heading in large text.
-   Below them: a horizon, a status line, a hold bar and the unit's pitch/roll.
+1. Open menu (BTN1) → **CAL > Heading (3)**. The menu closes and the heading cal screen appears.
+2. The screen shows **TARGET 000°** large, and under "Align to external compass",
+   the unit's own uncorrected reading as **INDICATED HDG**, smaller and gray: the
+   diver aligns to the compass, and must not try to make the two match. Below them:
+   a horizon, a hold bar, the unit's pitch/roll and the running average error. The
+   header counter is marks done out of 12.
 3. Align the DPV to 0° (North), **level** (the way it rides) and still. The status
-   line reads **NOT LEVEL** (red) until pitch and roll are both within
+   line reads **Not level** (red) until pitch and roll are both within
    `HDG_CAL_LEVEL_TOL_DEG` (3°) — the horizon's brackets turn green inside it —
-   then **HOLD STILL** (yellow) while the hold bar fills (`HDG_CAL_LEVEL_SETTLE_MS`,
+   then **Hold still** (yellow) while the hold bar fills (`HDG_CAL_LEVEL_SETTLE_MS`,
    1.5 s, which also lets the heading settle after the turn), then
-   **BTN2: MARK** (green). Tilting or moving restarts the hold.
-4. Press **BTN2** to capture that heading. It does nothing until the status reads
-   BTN2: MARK. The screen advances to **Step 2/12: Target 030°**.
+   **Ready - press MARK** (green), and the MARK key turns green. Tilting or moving
+   restarts the hold.
+4. Press **MARK** (BTN2) to capture that heading. It does nothing until the key is
+   green. **MARKED** shows briefly with this point's error, then the next target,
+   030°.
 
    *Why level matters:* the correction is a function of heading only, so it can't
    tell an attitude change from a heading error. A point marked tilted is fitted
    as heading error at that heading. Each point records the attitude it was marked
    at (see the CSV format below), and a test build with `HDG_CAL_LEVEL_GATE = false`
-   (config.h) marks regardless, showing **GATE OFF** in the header, for deliberately
-   off-level runs.
-5. Repeat for all 12 steps (every 30°: 0°, 30°, 60°, … 330°). Each BTN2 press captures the current indicated heading and records `(target, indicated)` on the nav device.
+   (config.h) marks regardless, showing **GATE OFF - test build** in the status
+   line, for deliberately off-level runs.
+5. Repeat for all 12 steps (every 30°: 0°, 30°, 60°, … 330°). Each MARK captures the current indicated heading and records `(target, indicated)` on the nav device.
 6. After Step 12, the nav device saves `/hdg_samples.csv` and immediately hands off to
    the same cloud upload/accept-reject flow Baseline and Mounted use (there is no
    longer a separate "export CSV, run the tool, upload" screen here):
@@ -418,16 +434,16 @@ command, press Enter):
      fits it (auto-selecting 1–4 harmonics) and checks for sector gaps (see
      [Filling Coverage Gaps](#filling-coverage-gaps) below), and the display shows
      a result screen with one number, the **likely worst error** in degrees,
-     coloured and graded GOOD (< 5°) / OK (5–8°) / POOR (≥ 8°), above two big
-     ACCEPT / REJECT buttons. The number is a leave-one-out estimate: each
+     coloured and graded GOOD (< 5°) / OK (5–8°) / POOR (≥ 8°), with ACCEPT on
+     BTN2 and REJECT on a 2 s BTN1 hold. The number is a leave-one-out estimate: each
      point's error against a curve fitted without it, so it is what to expect
      at a heading the cal didn't see, not just how well the curve threads its
      own 12 points. Accept to install `hdg_fourier.json` immediately and
      hot-reload; reject to discard and keep whatever heading correction was active
      before.
-   - **If the unit has no WiFi:** the display shows an offline notice. `/hdg_samples.csv`
+   - **If the unit has no WiFi:** the display shows **No WiFi**. `/hdg_samples.csv`
      is still saved to LittleFS either way, so the manual fallback below still works.
-7. Press **BTN2** to exit the result screen and return to normal navigation.
+7. Press **OK** (BTN2) on the **Installed** screen to return to normal navigation.
 
 **Part 2 — Offline fit and upload (fallback only, when the unit has no WiFi at cal time):**
 
@@ -441,7 +457,7 @@ command, press Enter):
 
 This offline tool has no sector-gap check of its own — it fits whatever CSV you give
 it. If you took this fallback path and want gap detection too, you can still upload
-the CSV later once you have WiFi (via the same on-device Hdg cal flow, or by getting
+the CSV later once you have WiFi (via the same on-device heading cal flow, or by getting
 the raw CSV into a fresh cloud upload), or just watch for an obviously bad sector in
 the residual printout and hand-add points there before fitting.
 
@@ -476,7 +492,7 @@ headingDeg = headingRawDeg + correction(headingRawDeg)
 
 ### Recalibrating
 
-Run **CAL > Hdg cal** again — the fresh 12-point collection uploads and fits in the
+Run **CAL > Heading (3)** again — the fresh 12-point collection uploads and fits in the
 cloud automatically (WiFi permitting) and replaces `hdg_fourier.json` on accept, same
 as the first time.
 

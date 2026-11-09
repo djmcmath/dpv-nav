@@ -41,16 +41,17 @@ static constexpr uint32_t CAL_COMPLETE_HOLD_MS = 3000;  // show "DONE" for 3 s t
 static uint32_t calCompleteShownMs = 0;
 static bool calCompleteHolding = false;
 
-// Baseline BTN2 gives no visible change until nav's completion packet arrives
+// FINISH gives no visible change until nav's completion packet arrives
 // (which can take a while for a big run -- nav does a synchronous CSV dump
 // before it even sends that packet). Without this, the screen just redraws
 // the same bars/prompt, indistinguishable from "not pressed yet", so the
-// diver presses again. Set immediately on press; cleared once the real
-// completion packet lands (entering calCompleteHolding) or after a timeout
-// in case the command was dropped over serial.
-static bool gBaselineFinishPending = false;
-static uint32_t gBaselineFinishPendingMs = 0;
-static constexpr uint32_t BASELINE_FINISH_PENDING_TIMEOUT_MS = 8000;
+// diver presses again. Set immediately on press, which puts "Finishing..." on
+// the collecting screen and dims its keys; cleared once the real completion
+// packet lands (entering calCompleteHolding) or after a timeout in case the
+// command was dropped over serial, or nav refused it.
+static bool gCalFinishPending = false;
+static uint32_t gCalFinishPendingMs = 0;
+static constexpr uint32_t CAL_FINISH_PENDING_TIMEOUT_MS = 8000;
 
 // ---- Link transmit buffer --------------------------------------------------
 // 96, not 64: ACCEPT_CLOUD_CAL/REJECT_CLOUD_CAL carry a 36-char UUID ("cid")
@@ -152,7 +153,7 @@ static float gHdgCalErrSum   = 0.0f;
 static int   gHdgCalErrCount = 0;
 
 // BTN2 gives no visible feedback until the next render tick happens to redraw
-// the incremented step -- same class of gap gBaselineFinishPending closes for
+// the incremented step -- same class of gap gCalFinishPending closes for
 // baseline cal. 0 = not showing; otherwise the millis() deadline to advance.
 static uint32_t gHdgCalAckUntilMs = 0;
 static constexpr uint32_t HDG_CAL_ACK_HOLD_MS = 450;
@@ -244,6 +245,12 @@ static cal_keys::Tracker gCalKeys;
 static uint8_t  gCalHoldPct     = 0;
 static uint32_t gCalHintUntilMs = 0;   // 0 = no hint
 static constexpr uint32_t CAL_HINT_MS = 1500;
+
+// After QUIT_CAL: ignore CAL_PROGRESS and CAL_ORIENT until a NavPacket says
+// nav has left CALIBRATION, or CAL_QUIT_GUARD_MS at most.
+static bool     gCalQuitPending   = false;
+static uint32_t gCalQuitPendingMs = 0;
+static constexpr uint32_t CAL_QUIT_GUARD_MS = 3000;
 
 // "Quit" / "Rejected", shown for CAL_DISCARD_SHOW_MS after a hold. 0 = not up.
 static uint32_t gCalDiscardUntilMs  = 0;
@@ -357,15 +364,11 @@ static void renderWaypointUi();
 // end up staring at a blank grid wondering whether the cal worked.
 static void renderCalProgress(const CalProgressPacket& pkt) {
     if (pkt.phase == (uint8_t)CalPhase::ROUGH_SCAN) {
-        display::showBaselineRoughScan(pkt);   // baseline before the bootstrap locks
-    } else if (pkt.phase == (uint8_t)CalPhase::BASELINE_GRID) {
-        display::showCalGrid(pkt, "BASELINE CAL");  // baseline after it locks
-    } else if (pkt.phase == (uint8_t)CalPhase::GAP_FILL) {
-        display::showCalGrid(pkt, "FILL GAPS");
+        display::showBaselineRoughScan(pkt, gCalFinishPending);  // baseline before the bootstrap locks
     } else if (pkt.cal_type == (uint8_t)CalType::MOUNTED) {
-        display::showMountedCal(pkt);          // mounted: dwell capture
+        display::showMountedCal(pkt, gCalFinishPending);         // mounted: dwell capture
     } else {
-        display::showCalGrid(pkt, "BASELINE CAL");
+        display::showCalGrid(pkt, gCalFinishPending);  // baseline after it locks, and gap-fill
     }
 }
 
@@ -654,10 +657,10 @@ void loop() {
             // heading samples -- hand off to the same wait/result UI
             // baseline/mounted's bin-grid completion already uses, rather
             // than a separate local "done" screen. See
-            // docs/architecture/heading-cal-cloud-plan.md.
+            // docs/architecture/heading-cal-cloud-plan.md. No clear(): the
+            // frame stays and only what changed redraws.
             gCloudCalPhase       = CloudCalUiPhase::WAITING;
             gCloudCalWaitStartMs = millis();
-            display::clear();
         }
         // else: the next periodic render naturally draws the new step's prompt
     }
@@ -717,7 +720,7 @@ void loop() {
     // run flashes "NO LINK" for a few seconds even though nothing is wrong.
     bool awaitingCloudCal  = (gCloudCalPhase != CloudCalUiPhase::NONE);
     bool awaitingCloudLink = (gCloudLinkPhase != CloudLinkUiPhase::NONE);
-    // gBaselineFinishPending covers the gap between BTN2 requesting
+    // gCalFinishPending covers the gap between BTN2 requesting
     // FINISH_BASELINE_COLLECTION and nav's completion packet actually
     // arriving -- nav may already be mid CSV-dump by the time it gets to
     // sending that packet. Same reasoning as calCompleteHolding below.
@@ -733,7 +736,7 @@ void loop() {
     // after which a genuinely wedged nav device still reports NO LINK.
     bool uploadingLogs = navValid && (lastNav.flags2 & FLAG2_UPLOADING) &&
                          (now - lastNavMs < LOG_UPLOAD_TIMEOUT_MS);
-    bool linkAlive = calCompleteHolding || gBaselineFinishPending ||
+    bool linkAlive = calCompleteHolding || gCalFinishPending ||
                      awaitingCloudCal || gCalDiscardUntilMs != 0 ||
                      awaitingCloudLink || awaitingWifi ||
                      uploadingLogs ||
@@ -769,17 +772,12 @@ void loop() {
                 display::clear();
             }
 
-            // Baseline: BTN2 was pressed, waiting for nav to confirm completion.
-            // Times out (command likely dropped) back to the normal rough-scan
-            // screen so the diver can just press BTN2 again.
-            if (gBaselineFinishPending) {
-                if (now - gBaselineFinishPendingMs >= BASELINE_FINISH_PENDING_TIMEOUT_MS) {
-                    gBaselineFinishPending = false;
-                    Serial.println("[BIN_CAL] Finish-baseline request timed out, retry available");
-                } else {
-                    display::showBaselineFinishing();
-                    return;
-                }
+            // FINISH was pressed, waiting for nav to confirm completion. The
+            // collecting screen shows it; this times it out (command dropped,
+            // or nav refused) so the diver can just press FINISH again.
+            if (gCalFinishPending && now - gCalFinishPendingMs >= CAL_FINISH_PENDING_TIMEOUT_MS) {
+                gCalFinishPending = false;
+                Serial.println("[BIN_CAL] Finish request timed out, retry available");
             }
 
             // Bin cal complete: hold DONE screen for CAL_COMPLETE_HOLD_MS then return.
@@ -791,9 +789,9 @@ void loop() {
                     calProgressValid   = false;
                     // The nav device uploads the CSV next (blocking there) --
                     // show the waiting screen until a CalCloudResultPacket lands.
+                    // No clear(): the frame stays and only what changed redraws.
                     gCloudCalPhase       = CloudCalUiPhase::WAITING;
                     gCloudCalWaitStartMs = now;
-                    display::clear();
                 }
                 return;
             }
@@ -1104,6 +1102,8 @@ static void processNavLine() {
                     Serial.println("[CURRENT] measurement ready");
                 }
             }
+            // Nav has left the cal that was quit: its packets can't be in flight now.
+            if (ns != SystemState::CALIBRATION) gCalQuitPending = false;
             // If nav device returns to READY after bin cal, clear our cal state
             if (ns != SystemState::CALIBRATION && calProgressValid) {
                 if (!calCompleteHolding) {
@@ -1119,7 +1119,12 @@ static void processNavLine() {
         }
 #endif
     } else if (ptype == PacketType::CAL_PROGRESS) {
-        if (bytesToCalProgressPacket(rxBuf, rxPos, lastCalProgress)) {
+        if (gCalQuitPending && millis() - gCalQuitPendingMs >= CAL_QUIT_GUARD_MS) {
+            gCalQuitPending = false;
+        }
+        if (gCalQuitPending) {
+            // A packet from the session just quit, already on the wire.
+        } else if (bytesToCalProgressPacket(rxBuf, rxPos, lastCalProgress)) {
             // First packet of a session: wipe the screen and the cal screens'
             // "static layout already drawn" flags. A session that was
             // abandoned (rather than completed) never cleared them, so the
@@ -1140,7 +1145,7 @@ static void processNavLine() {
             if (lastCalProgress.complete && !calCompleteHolding) {
                 calCompleteHolding  = true;
                 calCompleteShownMs  = millis();
-                gBaselineFinishPending = false;
+                gCalFinishPending = false;
                 Serial.println("[CAL_GRID] Complete — holding DONE screen");
             }
         }
@@ -1157,7 +1162,7 @@ static void processNavLine() {
         // calCompleteHolding -- "the grid data is fresh" and "the session
         // finished" are both statements only the full packet can make.
         CalOrientPacket opkt{};
-        if (calProgressValid && bytesToCalOrientPacket(rxBuf, rxPos, opkt)) {
+        if (calProgressValid && !gCalQuitPending && bytesToCalOrientPacket(rxBuf, rxPos, opkt)) {
             lastCalProgress.current_bin   = opkt.current_bin;
             lastCalProgress.cur_pitch_deg = opkt.cur_pitch_deg;
             lastCalProgress.cur_hdg_deg   = opkt.cur_hdg_deg;
@@ -1467,6 +1472,24 @@ static void showCalDiscardedFor(bool rejected) {
     gCalHintUntilMs     = 0;
 }
 
+// BTN1 held on a collecting screen: nav ends the cal with nothing saved or
+// uploaded. A progress packet already on the wire would bring the cal screen
+// back for a moment, so they're ignored until nav reports it's left
+// CALIBRATION (gCalQuitPending).
+static void quitCal() {
+    sendCmd(DisplayCmd::QUIT_CAL);
+    Serial.println("[CAL] QUIT (BTN1 held)");
+    if (calProgressValid) {
+        calProgressValid  = false;
+        gCalQuitPending   = true;
+        gCalQuitPendingMs = millis();
+    }
+    gCalFinishPending   = false;
+    gHdgFourierCalPhase = HdgFourierCalPhase::NONE;
+    gHdgCalAckUntilMs   = 0;
+    showCalDiscardedFor(false);
+}
+
 // Full-screen modes that own the buttons. Returns true if one of them handled
 // (or deliberately ignored) this pass, in which case the menu must not see it.
 static bool handleModalButtons() {
@@ -1493,52 +1516,57 @@ static bool handleModalButtons() {
         return true;
     }
 
-    // --- Baseline / gap-fill: BTN2 declares collection done, ends the session ---
-    // Gap-fill needs this as much as baseline does: a targeted cell can simply
-    // be unreachable in the water (a ceiling, a wall, a scooter you can't
-    // invert), and without a manual finish the session would never end. It also
-    // auto-completes when every target is satisfied -- this is the escape
-    // hatch, not the only exit.
-    if (calProgressValid &&
-        (lastCalProgress.phase == (uint8_t)CalPhase::ROUGH_SCAN ||
-         lastCalProgress.phase == (uint8_t)CalPhase::BASELINE_GRID ||
-         lastCalProgress.phase == (uint8_t)CalPhase::GAP_FILL)) {
-        if (gBaselineFinishPending) {
-            // Already requested -- ignore repeat presses until nav confirms
-            // (complete=true) or the pending screen times out.
+    // --- Collecting screens: every bin cal, mounted included, and heading ---
+    // BTN2 = FINISH (MARK on heading), hold BTN1 = QUIT, a tap = the hint.
+    // Mounted was missing from this until 2026-11: its presses fell through
+    // to the menu, which its screen kept hidden (menu invariant 4, CLAUDE.md).
+    // FINISH matters on every step: a cell can simply be unreachable (a
+    // ceiling, a wall, a scooter you can't invert), and baseline has no
+    // completion of its own short of a full buffer.
+    if (calProgressValid) {
+        // "Done - saving" (keys blank) and "Finishing..." (keys dim): nothing
+        // to press until nav confirms or the pending state times out.
+        if (calCompleteHolding || gCalFinishPending) {
+            calKeys(false);
             return true;
         }
-        if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
-            btn2.fired = true;
+        const cal_keys::Result r = calKeys(true);
+        if (r.discard) {
+            quitCal();
+        } else if (r.advance && display::calCanFinish(lastCalProgress)) {
             sendCmd(DisplayCmd::FINISH_BASELINE_COLLECTION);
-            // nav may still ignore this (too few samples); the pending screen
-            // times out below if no completion packet ever arrives.
-            gBaselineFinishPending   = true;
-            gBaselineFinishPendingMs = millis();
-            display::clear();
-            Serial.println("[BIN_CAL] BTN2: requested finish baseline collection");
+            // nav may still refuse it; the pending state times out in loop()
+            // if no completion packet ever arrives.
+            gCalFinishPending   = true;
+            gCalFinishPendingMs = millis();
+            Serial.println("[BIN_CAL] BTN2: requested finish");
         }
         return true;
     }
 
-    // --- Fourier heading calibration -----------------------------------------
     if (gHdgFourierCalPhase == HdgFourierCalPhase::COLLECTING) {
-        // While the "MARKED" ack is showing, ignore BTN2 rather than queue it --
-        // the step/finalize advance happens in loop()'s ack-expiry check, not here.
+        // While the "MARKED" ack is showing (keys dim), ignore BTN2 rather
+        // than queue it -- the step/finalize advance happens in loop()'s
+        // ack-expiry check, not here.
         if (gHdgCalAckUntilMs != 0) {
+            calKeys(false);
             return true;
         }
-        // BTN2 short press: send CAPTURE_HDG_POINT with current target; nav device
-        // records its live gCurrentHeadingRawDeg alongside the target. Then show
-        // an immediate "MARKED" ack (held for HDG_CAL_ACK_HOLD_MS) instead of
+        const cal_keys::Result r = calKeys(true);
+        if (r.discard) {
+            quitCal();
+            return true;
+        }
+        // MARK: send CAPTURE_HDG_POINT with current target; nav device records
+        // its live gCurrentHeadingRawDeg alongside the target. Then show an
+        // immediate "MARKED" ack (held for HDG_CAL_ACK_HOLD_MS) instead of
         // silently incrementing the step and waiting for the next render tick --
-        // same gap gBaselineFinishPending closes for baseline cal.
-        if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
-            btn2.fired = true;
+        // same gap gCalFinishPending closes for the bin cals.
+        if (r.advance) {
             // Level gate (util/level_gate.h): mark only a level, still, settled
-            // unit. The prompt already says why not (NOT LEVEL / HOLD STILL),
-            // so a refused press just does nothing. INACTIVE = a nav build too
-            // old to run the gate, which must not lock the cal up.
+            // unit. The key is dim and the status says why not, so a refused
+            // press just does nothing. INACTIVE = a nav build too old to run
+            // the gate, which must not lock the cal up.
             const uint8_t gate = navValid ? lastNav.level_state : (uint8_t)LevelGateState::INACTIVE;
             if (HDG_CAL_LEVEL_GATE && gate != (uint8_t)LevelGateState::READY &&
                 gate != (uint8_t)LevelGateState::INACTIVE) {
@@ -1557,8 +1585,9 @@ static bool handleModalButtons() {
             gHdgCalErrCount++;
             float avg = gHdgCalErrSum / gHdgCalErrCount;
 
-            display::showHdgFourierCalAck(gHdgFourierCalStep + 1, kHdgCalNPoints,
-                                          target, indicated, err, avg);
+            const int marks = gHdgFourierCalStep + 1;
+            display::showHdgFourierCalAck(marks, kHdgCalNPoints, target, indicated, err, avg,
+                                          marks < kHdgCalNPoints ? kHdgCalTargets[marks] : -1.0f);
             gHdgCalAckUntilMs = millis() + HDG_CAL_ACK_HOLD_MS;
         }
         return true;

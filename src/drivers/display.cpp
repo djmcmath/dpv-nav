@@ -115,20 +115,7 @@ void display::setRawHeading(bool raw) { gRawHeading = raw; }
 // Boot status line Y cursor
 static int bootLineY = 0;
 
-// Cal grid: track whether static layout (title, labels) has been drawn for
-// the current cal session.  Reset by clear() so each new session starts fresh.
-static bool g_calGridStaticDrawn = false;
-
-// Baseline ROUGH_SCAN screen: same idea, separate flag since it's a different
-// static layout from showCalGrid. Baseline stays in ROUGH_SCAN for its whole
-// session now (see display_main.cpp's FINISH_BASELINE_COLLECTION handler).
-static bool g_roughScanStaticDrawn = false;
-
-// Mounted dwell-capture screen: same idea, and it also invalidates that
-// screen's per-element caches (see showMountedCal).
-static bool g_mountedCalStaticDrawn = false;
-
-// Cloud-link waiting screen: same idea as g_calGridStaticDrawn -- the static
+// Cloud-link waiting screen: the static
 // header/instructions/code are drawn once, and each subsequent call (this
 // screen is redrawn at 4 Hz while the elapsed-seconds counter ticks) only
 // repaints the small counter region. Reset by clear() so each new session
@@ -136,13 +123,6 @@ static bool g_mountedCalStaticDrawn = false;
 // code once CODE_READY arrives changes the static content itself).
 static bool g_cloudLinkWaitingStaticDrawn = false;
 static char g_cloudLinkWaitingLastCode[16] = "";
-
-// Hdg Fourier cal prompt: same idea again -- header/labels/footer are drawn
-// once per step, and only the live HDG number + avg-error line are redrawn
-// when they actually change. Reset by clear() so a fresh session (or the
-// MARKED ack screen, which overwrites the whole display) forces a full
-// redraw on the next prompt call.
-static bool g_hdgCalPromptStaticDrawn = false;
 
 // The cal frame's per-band caches (header, status, keys, work area); see
 // "The calibration frame" below. Reset by clear() and reinit().
@@ -250,13 +230,9 @@ void showLogo() {
 
 void clear() {
     invalidateNavCache();
-    g_calGridStaticDrawn = false;  // next showCalGrid call redraws static elements
-    g_roughScanStaticDrawn = false;
-    g_mountedCalStaticDrawn = false;
     g_cloudLinkWaitingStaticDrawn = false;
     g_cloudLinkWaitingLastCode[0] = '\0';
-    g_hdgCalPromptStaticDrawn = false;
-    resetCalFrame();
+    resetCalFrame();   // every cal screen redraws in full
     tft.fillScreen(COLOR_BLACK);
     delay(50);
     bootLineY = 0;
@@ -268,12 +244,9 @@ void reinit() {
     tft.setSPISpeed(SPI_CLOCK_HZ);
     delay(50);
     invalidateNavCache();
-    g_calGridStaticDrawn = false;  // display is blank after reinit; force full redraw
-    g_roughScanStaticDrawn = false;
-    g_mountedCalStaticDrawn = false;
+    // The display is blank after reinit; force a full redraw.
     g_cloudLinkWaitingStaticDrawn = false;
     g_cloudLinkWaitingLastCode[0] = '\0';
-    g_hdgCalPromptStaticDrawn = false;
     resetCalFrame();
     Serial.println("[DISP] reinit complete");
 }
@@ -1782,31 +1755,143 @@ static void drawWorkText(int x, int y, const char* s, uint8_t size, uint16_t col
     tft.print(s);
 }
 
+// --- Bars -----------------------------------------------------------------------
+// A gray-outlined bar filled from the left, with an optional label inside it.
+// Repaints only the columns that changed, then the label over them
+// (transparent, since part of it can sit on the fill); a new colour or label
+// repaints it whole. px counts interior columns (w - 2 at full).
+struct CalBarCache { int px = -1; uint16_t color = 0; char label[10] = ""; uint16_t labelColor = 0; };
+
+static void drawCalBar(CalBarCache& c, int x, int y, int w, int h, int px, uint16_t color,
+                       const char* label = "", uint16_t labelColor = COLOR_WHITE) {
+    const int inner = w - 2;
+    if (px < 0) px = 0;
+    if (px > inner) px = inner;
+    const bool whole = c.px < 0 || color != c.color || labelColor != c.labelColor ||
+                       strcmp(label, c.label) != 0;
+    if (!whole && px == c.px) return;
+    if (whole) {
+        if (c.px < 0) tft.drawRect(x, y, w, h, COLOR_GRAY);
+        if (px > 0) tft.fillRect(x + 1, y + 1, px, h - 2, color);
+        tft.fillRect(x + 1 + px, y + 1, inner - px, h - 2, COLOR_BLACK);
+    } else if (px > c.px) {
+        tft.fillRect(x + 1 + c.px, y + 1, px - c.px, h - 2, color);
+    } else {
+        tft.fillRect(x + 1 + px, y + 1, c.px - px, h - 2, COLOR_BLACK);
+    }
+    if (label[0]) {
+        tft.setTextSize(2);
+        tft.setTextColor(labelColor);
+        tft.setCursor(x + 6, y + (h - 16) / 2);
+        tft.print(label);
+    }
+    c.px = px;
+    c.color = color;
+    c.labelColor = labelColor;
+    strncpy(c.label, label, sizeof(c.label) - 1);
+    c.label[sizeof(c.label) - 1] = '\0';
+}
+
+// --- Grids (Baseline, Fill gaps, Mounted) ---------------------------------------
+// 12 heading columns of 24 px from x 26; rows of CAL_GRID_ROW_H (Baseline and
+// Fill gaps) or MC_ROW_H (Mounted). Each cell keeps a 1 px black gutter, so
+// the current cell's 2 px border and the position dot can be painted over it
+// and wiped by repainting the cells.
+static constexpr int CAL_GRID_X     = 26;
+static constexpr int CAL_GRID_Y     = 36;
+static constexpr int CAL_GRID_COL_W = 24;
+static constexpr int CAL_GRID_ROW_H = 24;
+
+// N, E, S and W over the four columns that start on them (the other eight
+// are 30 deg bins no compass point names), and the row labels on the left.
+static void drawGridTicks(const char* const* rowLabels, int rows, int rowH) {
+    tft.setTextSize(1);
+    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
+    const char* const cardinals[4] = { "N", "E", "S", "W" };
+    for (int k = 0; k < 4; k++) {
+        tft.setCursor(CAL_GRID_X + k * 3 * CAL_GRID_COL_W + 10, 27);
+        tft.print(cardinals[k]);
+    }
+    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
+    for (int r = 0; r < rows; r++) {
+        tft.setCursor(2, CAL_GRID_Y + r * rowH + rowH / 2 - 4);
+        tft.print(rowLabels[r]);
+    }
+}
+
+// One cell, gutter included. count > 0 prints it in the cell (size 1).
+static void drawGridCell(int bin, int rowH, uint16_t color, int count) {
+    const int cx = CAL_GRID_X + (bin % 12) * CAL_GRID_COL_W;
+    const int cy = CAL_GRID_Y + (bin / 12) * rowH;
+    tft.drawRect(cx, cy, CAL_GRID_COL_W, rowH, COLOR_BLACK);
+    tft.fillRect(cx + 1, cy + 1, CAL_GRID_COL_W - 2, rowH - 2, color);
+    if (count > 0) {
+        tft.setTextSize(1);
+        tft.setTextColor(COLOR_BLACK, color);
+        tft.setCursor(cx + 4, cy + rowH / 2 - 4);
+        tft.print(count);
+    }
+}
+
+static void drawGridHighlight(int bin, int rowH, uint16_t color) {
+    const int cx = CAL_GRID_X + (bin % 12) * CAL_GRID_COL_W;
+    const int cy = CAL_GRID_Y + (bin / 12) * rowH;
+    tft.drawRect(cx, cy, CAL_GRID_COL_W, rowH, color);
+    tft.drawRect(cx + 1, cy + 1, CAL_GRID_COL_W - 2, rowH - 2, color);
+}
+
+// The live sub-cell position: a black ring under a white dot, since any single
+// colour vanishes into one of the cell colours or the white border.
+static void drawGridDot(int dx, int dy) {
+    tft.fillCircle(dx, dy, 4, COLOR_BLACK);
+    tft.fillCircle(dx, dy, 3, COLOR_WHITE);
+}
+
+// --- Collecting screens' shared status and keys -----------------------------------
+// Whether FINISH can end this collection yet: the floors nav applies in
+// magBinCalFinishBaseline(), so a FINISH the screen offers is one nav takes.
+bool calCanFinish(const CalProgressPacket& pkt) {
+    if (pkt.cal_type == (uint8_t)CalType::MOUNTED) return pkt.sample_count > 0;
+    const int need = pkt.phase == (uint8_t)CalPhase::GAP_FILL ? MAG_CAL_GAPFILL_MIN_SAMPLES
+                                                              : MAG_CAL_ROUGH_SCAN_MIN_SAMPLES;
+    return pkt.sample_count >= need;
+}
+
+// The step's own instruction while collecting; "Finishing..." once FINISH is
+// pressed and nav hasn't confirmed; "Done - saving" for the hold after it has.
+static void drawCollectingFooter(const CalProgressPacket& pkt, bool finishing,
+                                 const CalText& instruction) {
+    static const CalKey kQuitDim   = { "hold: QUIT", KeyStyle::DIM };
+    static const CalKey kFinish    = { "FINISH", KeyStyle::NORMAL };
+    static const CalKey kFinishDim = { "FINISH", KeyStyle::DIM };
+    if (pkt.complete) {
+        const CalText done = { pkt.max_samples_reached ? "Buffer full - saving" : "Done - saving",
+                               COLOR_GREEN };
+        drawCalFooter(&done, 1, KEY_BLANK, KEY_BLANK);
+    } else if (finishing) {
+        static const CalText kFinishing = { "Finishing...", COLOR_GREEN };
+        drawCalFooter(&kFinishing, 1, kQuitDim, kFinishDim);
+    } else {
+        drawCalFooter(&instruction, 1, KEY_QUIT, calCanFinish(pkt) ? kFinish : kFinishDim);
+    }
+}
+
 // ---------------------------------------------------------------------------
-// Fourier heading calibration: prompt screen
+// 3 Heading: the 12-point prompt, and the MARKED beat after each mark
 //
-// Static layout (header/labels/separators/footer instruction) is drawn once
-// per step behind g_hdgCalPromptStaticDrawn, same idiom as g_calGridStaticDrawn
-// above -- only the live HDG number and the avg-error line are redrawn when
-// they actually change, which is what kills the old per-tick full-screen
-// flicker (every call used to start with an unconditional fillScreen()).
+// Work area, under the frame's header (counter = marks done of 12):
+//   y  28  "Align to external compass"                     gray, size 2
+//   y  48  TARGET (label at y 55)                           white, size 4, right
+//   y  82  INDICATED HDG (label at y 86)                    gray, size 3, right
+//   y 104  horizon, 80 px, left: the level gate's attitude at 6x
+//          HOLD bar (170, 106); "P+0.8 R-0.4" at (92, 133); "Avg err" at (92, 159)
+// The status line carries the level gate's verdict, and the MARK key goes
+// green when it's ready.
 //
-// Layout (320×240):
-//   y=  2  "HDG CAL  Step N/12"        cyan,   size 2  (static)
-//   y= 20  separator                   cyan
-//   y= 28  "TGT"  "XXX°" target        gray size 3 / white size 6 (static)
-//   y= 80  separator                   cyan
-//   y= 88  "HDG"  "XXX°" indicated     gray size 3 / white size 6 (live)
-//   y=140  separator                   cyan
-//   y=142  horizon, 96x96, left        level gate's attitude, 6x exaggerated (live)
-//   y=146  gate status, right          size 3: NOT LEVEL red / HOLD STILL yellow /
-//                                      BTN2: MARK green (live)
-//   y=176  hold bar, right             fills through HDG_CAL_LEVEL_SETTLE_MS (live)
-//   y=196  "P+1.2 R-0.4"               gray, size 2 (live)
-//   y=218  "Avg err ±X°" / "Avg err --" yellow, size 2 (live, on capture)
-//
-// Each row's label sits LEFT of its number, not above it, so the label can be
-// large and nothing the live number redraws can reach it.
+// The target is the big number. The unit's own reading is smaller, gray and
+// labelled INDICATED HDG, because the diver aligns the scooter to an external
+// compass; a diver who tries to make the two numbers match is fitting the
+// heading cal to itself.
 //
 // Degree sign is "\xF7", not "\xB0" -- and plus-minus is "\xF0", not "\xB1".
 // The GFX classic font is CP437 (degree = 0xF8, plus-minus = 0xF1) and, with
@@ -1814,218 +1899,135 @@ static void drawWorkText(int x, int y, const char* s, uint8_t size, uint16_t col
 // land on shade blocks -- the checkerboard that read as a fourth digit.
 // Holds for every screen in this file.
 // ---------------------------------------------------------------------------
-static int s_hdgCalLastStep     = -1;
-static int s_hdgCalLastIndInt   = INT32_MIN;
-static bool s_hdgCalLastAvgValid = false;
-static int s_hdgCalLastAvgInt   = INT32_MIN;
 
-// Level gate panel. The horizon is drawn by drawHorizon() further down (the
-// mounted cal's renderer), into its 96 px canvas.
+// Drawn by the mounted cal's renderer further down, into its 80 px canvas.
 static void drawHorizon(int16_t x0, int16_t y0, float pitchErrDeg, float rollDeg,
                         float tolDeg, float gain, bool inWindow);
 static constexpr int   HDGCAL_AI_X    = 4;
-static constexpr int   HDGCAL_AI_Y    = 142;
+static constexpr int   HDGCAL_AI_Y    = 104;
 // px per degree. +-3 deg must read from the far end of the scooter: at the
 // mounted screen's 2x it would be a 12 px band.
 static constexpr float HDGCAL_AI_GAIN = 6.0f;
-static constexpr int   HDGCAL_PANEL_X = 108;
-static constexpr int   HDGCAL_BAR_W   = 204;
-static constexpr int   HDGCAL_BAR_H   = 12;
-static int     s_hdgCalLastHorizSig = INT32_MIN;
-static uint8_t s_hdgCalLastGate     = 0xFF;
-static int     s_hdgCalLastHoldPx   = -1;
-static int     s_hdgCalLastAttSig   = INT32_MIN;
-
-static constexpr int HDGCAL_ROW_TGT_Y = 28;
-static constexpr int HDGCAL_ROW_HDG_Y = 88;
-static constexpr int HDGCAL_NUM_X     = 160;   // 4 chars × 36 px = 144 → ends at 304
-
-static void drawHdgCalRowLabel(int y, const char* label) {
-    tft.setTextSize(3);
-    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
-    tft.setCursor(4, y + 10);   // size-3 glyph (21 px) centred on the size-6 one (42 px)
-    tft.print(label);
-}
-
-// Shared by the TGT (static, step entry) and HDG (live, every tick) rows.
-// Always exactly 4 opaque-background glyphs, so it erases itself -- no
-// full-width fillRect, which would wipe the row label beside it.
-static void drawHdgCalBigNumber(int y, float deg) {
-    int d = ((int)lroundf(deg) % 360 + 360) % 360;
-    char buf[8];
-    snprintf(buf, sizeof(buf), "%03d" "\xF7", d);
-    tft.setTextSize(6);
-    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
-    tft.setCursor(HDGCAL_NUM_X, y);
-    tft.print(buf);
-}
+static constexpr int   HDGCAL_PANEL_X = 92;
+// The right-hand bars on Heading and Mounted.
+static constexpr int   CAL_BAR_X = 170;
+static constexpr int   CAL_BAR_W = 146;
+static constexpr int   CAL_BAR_H = 18;
 
 void showHdgFourierCalPrompt(int step, int total, float targetDeg, float indicatedDeg,
                               float avgErrDeg, int errCount, uint8_t levelState,
                               uint8_t holdPct, float pitchDeg, float rollDeg) {
     if (!tftReady) return;
+    static int         sStep      = -1;
+    static int         sIndInt    = INT32_MIN;
+    static int         sHorizSig  = INT32_MIN;
+    static int         sAttSig    = INT32_MIN;
+    static int         sAvgInt    = INT32_MIN;   // INT32_MIN + 1 = "--"
+    static CalBarCache sHold;
 
-    bool stepChanged = (step != s_hdgCalLastStep);
-    if (stepChanged || !g_hdgCalPromptStaticDrawn) {
-        s_hdgCalLastStep = step;
-        invalidateNavCache();
-        tft.fillScreen(COLOR_BLACK);
-
-        tft.setTextSize(2);
-        tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
-        tft.setCursor(4, 2);
-        char hdr[24];
-        snprintf(hdr, sizeof(hdr), "HDG CAL  Step %d/%d", step + 1, total);
-        tft.print(hdr);
-        tft.drawFastHLine(0, 20, SCREEN_WIDTH, COLOR_CYAN);
-
-        drawHdgCalRowLabel(HDGCAL_ROW_TGT_Y, "TGT");
-        drawHdgCalBigNumber(HDGCAL_ROW_TGT_Y, targetDeg);
-
-        tft.drawFastHLine(0, 80, SCREEN_WIDTH, COLOR_CYAN);
-
-        drawHdgCalRowLabel(HDGCAL_ROW_HDG_Y, "HDG");
-        // live number drawn unconditionally below, every call
-
-        tft.drawFastHLine(0, 140, SCREEN_WIDTH, COLOR_CYAN);
-
-        if (!HDG_CAL_LEVEL_GATE) {
-            // Test build: the gate is shown but not enforced. Say so, so a
-            // run marked off-level is never mistaken for a normal one.
-            tft.setTextSize(1);
-            tft.setTextColor(COLOR_RED, COLOR_BLACK);
-            tft.setCursor(262, 6);
-            tft.print("GATE OFF");
-        }
-        tft.drawRect(HDGCAL_PANEL_X, 176, HDGCAL_BAR_W, HDGCAL_BAR_H, COLOR_GRAY);
-
-        g_hdgCalPromptStaticDrawn = true;
-        s_hdgCalLastIndInt    = INT32_MIN;  // force the live rows below to redraw
-        s_hdgCalLastAvgValid  = false;
-        s_hdgCalLastHorizSig  = INT32_MIN;
-        s_hdgCalLastGate      = 0xFF;
-        s_hdgCalLastHoldPx    = -1;
-        s_hdgCalLastAttSig    = INT32_MIN;
+    char counter[8];
+    snprintf(counter, sizeof(counter), "%d/%d", step, total);
+    drawCalHeader(CalStep::HEADING, counter);
+    if (claimCalWork(calSig(CalWork::HDG_PROMPT))) {
+        drawWorkText(4, 28, "Align to external compass", 2, COLOR_GRAY);
+        drawWorkText(4, 55, "TARGET", 2, COLOR_GRAY);
+        drawWorkText(4, 86, "INDICATED HDG", 2, COLOR_GRAY);
+        drawWorkText(HDGCAL_PANEL_X, 107, "HOLD", 2, COLOR_GRAY);
+        sStep = -1;  sIndInt = INT32_MIN;  sHorizSig = INT32_MIN;
+        sAttSig = INT32_MIN;  sAvgInt = INT32_MIN;  sHold = CalBarCache{};
     }
 
-    // --- Level gate ---------------------------------------------------------
-    // INACTIVE means a nav build too old to run the gate: nothing to show, and
-    // the display does not gate BTN2 either (display_main.cpp).
+    char buf[24];
+    if (step != sStep) {
+        sStep = step;
+        const int d = ((int)lroundf(targetDeg) % 360 + 360) % 360;
+        snprintf(buf, sizeof(buf), "%03d" "\xF7", d);
+        drawWorkText(SCREEN_WIDTH - 4 - textW(buf, 4), 48, buf, 4, COLOR_WHITE);
+    }
+    const int indInt = ((int)lroundf(indicatedDeg) % 360 + 360) % 360;
+    if (indInt != sIndInt) {
+        sIndInt = indInt;
+        snprintf(buf, sizeof(buf), "%03d" "\xF7", indInt);
+        drawWorkText(SCREEN_WIDTH - 4 - textW(buf, 3), 82, buf, 3, COLOR_GRAY);
+    }
+
+    // INACTIVE: a nav build too old to run the gate. Nothing to show, and the
+    // display doesn't gate MARK either (display_main.cpp).
     const bool gateLive = levelState != (uint8_t)LevelGateState::INACTIVE;
     if (gateLive) {
         const int horizSig = ((int)lroundf(pitchDeg * 4.0f) & 0x3FF) |
                              (((int)lroundf(rollDeg * 4.0f) & 0x3FF) << 10);
-        if (horizSig != s_hdgCalLastHorizSig) {
-            s_hdgCalLastHorizSig = horizSig;
+        if (horizSig != sHorizSig) {
+            sHorizSig = horizSig;
             drawHorizon(HDGCAL_AI_X, HDGCAL_AI_Y, pitchDeg, rollDeg, HDG_CAL_LEVEL_TOL_DEG,
                         HDGCAL_AI_GAIN, level_gate::isLevel(pitchDeg, rollDeg));
         }
         const int attSig = ((int)lroundf(pitchDeg * 10.0f) & 0xFFFF) |
                            (((int)lroundf(rollDeg * 10.0f) & 0xFFFF) << 16);
-        if (attSig != s_hdgCalLastAttSig) {
-            s_hdgCalLastAttSig = attSig;
-            char abuf[24];
-            snprintf(abuf, sizeof(abuf), "P%+.1f R%+.1f  ", (double)pitchDeg, (double)rollDeg);
-            tft.setTextSize(2);
-            tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
-            tft.setCursor(HDGCAL_PANEL_X, 196);
-            tft.print(abuf);
+        if (attSig != sAttSig) {
+            sAttSig = attSig;
+            snprintf(buf, sizeof(buf), "P%+.1f R%+.1f  ", (double)pitchDeg, (double)rollDeg);
+            drawWorkText(HDGCAL_PANEL_X, 133, buf, 2, COLOR_GRAY);
         }
     }
+    drawCalBar(sHold, CAL_BAR_X, 106, CAL_BAR_W, CAL_BAR_H,
+               gateLive ? (int)holdPct * (CAL_BAR_W - 2) / 100 : 0, COLOR_GREEN);
 
-    if (levelState != s_hdgCalLastGate) {
-        s_hdgCalLastGate = levelState;
-        const char* msg = "BTN2: MARK";
-        uint16_t color = COLOR_GREEN;
+    // Average error: changes only when a point is marked.
+    const int avgInt = errCount > 0 ? (int)lroundf(avgErrDeg) : INT32_MIN + 1;
+    if (avgInt != sAvgInt) {
+        sAvgInt = avgInt;
+        if (errCount > 0) snprintf(buf, sizeof(buf), "Avg err %+d" "\xF7" "  ", avgInt);
+        else              snprintf(buf, sizeof(buf), "Avg err --   ");
+        drawWorkText(HDGCAL_PANEL_X, 159, buf, 2, COLOR_YELLOW);
+    }
+
+    CalText status = { "Press MARK when aligned", COLOR_WHITE };   // no gate data
+    KeyStyle mark = KeyStyle::GO;
+    if (!HDG_CAL_LEVEL_GATE) {
+        // Test build: the gate is shown but not enforced. Say so, so a run
+        // marked off-level is never mistaken for a normal one.
+        status = { "GATE OFF - test build", COLOR_RED };
+    } else {
         switch ((LevelGateState)levelState) {
-            case LevelGateState::NOT_LEVEL: msg = "NOT LEVEL";  color = COLOR_RED;    break;
+            case LevelGateState::NOT_LEVEL: status = { "Not level", COLOR_RED };   mark = KeyStyle::DIM; break;
             case LevelGateState::MOVING:
-            case LevelGateState::SETTLING:  msg = "HOLD STILL"; color = COLOR_YELLOW; break;
-            case LevelGateState::READY:     break;
-            default:                        color = COLOR_GRAY;  break;   // no gate data
+            case LevelGateState::SETTLING:  status = { "Hold still", COLOR_YELLOW }; mark = KeyStyle::DIM; break;
+            case LevelGateState::READY:     status = { "Ready - press MARK", COLOR_GREEN }; break;
+            default:                        break;
         }
-        tft.fillRect(HDGCAL_PANEL_X, 146, SCREEN_WIDTH - HDGCAL_PANEL_X, 24, COLOR_BLACK);
-        tft.setTextSize(3);
-        tft.setTextColor(color, COLOR_BLACK);
-        tft.setCursor(HDGCAL_PANEL_X, 146);
-        tft.print(msg);
     }
-
-    const int holdPx = gateLive ? (int)holdPct * (HDGCAL_BAR_W - 2) / 100 : 0;
-    if (holdPx != s_hdgCalLastHoldPx) {
-        s_hdgCalLastHoldPx = holdPx;
-        tft.fillRect(HDGCAL_PANEL_X + 1, 177, holdPx, HDGCAL_BAR_H - 2, COLOR_GREEN);
-        tft.fillRect(HDGCAL_PANEL_X + 1 + holdPx, 177, HDGCAL_BAR_W - 2 - holdPx,
-                     HDGCAL_BAR_H - 2, COLOR_BLACK);
-    }
-
-    // Live HDG number -- redrawn only when the displayed (rounded) value
-    // actually changes, instead of every 250 ms render tick regardless.
-    int indInt = (int)lroundf(indicatedDeg);
-    if (indInt != s_hdgCalLastIndInt) {
-        s_hdgCalLastIndInt = indInt;
-        drawHdgCalBigNumber(HDGCAL_ROW_HDG_Y, indicatedDeg);
-    }
-
-    // Avg error -- only changes when a new point is captured, not per tick.
-    bool avgValid = (errCount > 0);
-    int avgInt = avgValid ? (int)lroundf(avgErrDeg) : 0;
-    if (avgValid != s_hdgCalLastAvgValid || (avgValid && avgInt != s_hdgCalLastAvgInt)) {
-        s_hdgCalLastAvgValid = avgValid;
-        s_hdgCalLastAvgInt   = avgInt;
-        tft.fillRect(HDGCAL_PANEL_X, 218, SCREEN_WIDTH - HDGCAL_PANEL_X, 16, COLOR_BLACK);
-        tft.setTextSize(2);
-        tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
-        tft.setCursor(HDGCAL_PANEL_X, 218);
-        char ebuf[24];
-        if (avgValid) {
-            snprintf(ebuf, sizeof(ebuf), "Avg err %+d" "\xF7", avgInt);
-        } else {
-            snprintf(ebuf, sizeof(ebuf), "Avg err --");
-        }
-        tft.print(ebuf);
-    }
+    drawCalFooter(&status, 1, KEY_QUIT, { "MARK", mark });
 }
 
-// ---------------------------------------------------------------------------
-// Fourier heading calibration: brief "MARKED" acknowledgment after BTN2.
-//
-// handleModalButtons() in display_main.cpp draws this immediately on press
-// (not waiting for the next render tick) and holds it for a fixed beat before
-// advancing the step -- BTN2 otherwise gives no visible feedback at all until
-// the next prompt happens to redraw, the same gap gBaselineFinishPending was
-// added to close for baseline cal. Drawn once; nothing on it changes while
-// it's held, so no incremental-redraw logic is needed here.
-// ---------------------------------------------------------------------------
-void showHdgFourierCalAck(int step, int total, float targetDeg, float indicatedDeg,
-                           float errDeg, float avgErrDeg) {
+// MARKED: drawn the moment MARK is pressed (from display_main's button
+// handler, not the next render) and held for HDG_CAL_ACK_HOLD_MS, because the
+// prompt alone gives no feedback until it happens to redraw. The counter has
+// already advanced. nextTargetDeg < 0 = that was the last point.
+void showHdgFourierCalAck(int marksDone, int total, float targetDeg, float indicatedDeg,
+                           float errDeg, float avgErrDeg, float nextTargetDeg) {
     if (!tftReady) return;
-    invalidateNavCache();
-    tft.fillScreen(COLOR_BLACK);
-
-    tft.setTextSize(4);
-    tft.setTextColor(COLOR_GREEN, COLOR_BLACK);
-    const char* marked = "MARKED";
-    int charW = 4 * 6;
-    int x = (SCREEN_WIDTH - (int)strlen(marked) * charW) / 2;
-    tft.setCursor(x, 40);
-    tft.print(marked);
-
-    char line[32];
-    tft.setTextSize(2);
-    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
-    tft.setCursor(20, 100);
-    snprintf(line, sizeof(line), "Step %d/%d", step, total);
-    tft.print(line);
-
-    tft.setCursor(20, 130);
-    snprintf(line, sizeof(line), "Tgt %03.0f" "\xF7" "  Hdg %03.0f" "\xF7", targetDeg, indicatedDeg);
-    tft.print(line);
-
-    tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
-    tft.setCursor(20, 160);
-    snprintf(line, sizeof(line), "err %+.0f" "\xF7" "  avg %+.0f" "\xF7", errDeg, avgErrDeg);
-    tft.print(line);
+    char counter[8];
+    snprintf(counter, sizeof(counter), "%d/%d", marksDone, total);
+    drawCalHeader(CalStep::HEADING, counter);
+    if (claimCalWork(calSig(calSig(CalWork::HDG_MARKED), &marksDone, sizeof(marksDone)))) {
+        const char* marked = "MARKED";
+        drawWorkText((SCREEN_WIDTH - textW(marked, 5)) / 2, 44, marked, 5, COLOR_GREEN);
+        char line[32];
+        snprintf(line, sizeof(line), "TGT %03.0f" "\xF7" "  IND %03.0f" "\xF7",
+                 (double)targetDeg, (double)indicatedDeg);
+        drawWorkText((SCREEN_WIDTH - textW(line, 2)) / 2, 108, line, 2, COLOR_WHITE);
+        snprintf(line, sizeof(line), "err %+.0f" "\xF7" "  avg %+.0f" "\xF7",
+                 (double)errDeg, (double)avgErrDeg);
+        drawWorkText((SCREEN_WIDTH - textW(line, 2)) / 2, 134, line, 2, COLOR_YELLOW);
+    }
+    static char next[8];
+    if (nextTargetDeg < 0.0f) snprintf(next, sizeof(next), "upload");
+    else                      snprintf(next, sizeof(next), "%03.0f" "\xF7", (double)nextTargetDeg);
+    const CalText parts[] = { { "Next: ", COLOR_GRAY }, { next, COLOR_WHITE } };
+    static const CalKey kQuitDim = { "hold: QUIT", KeyStyle::DIM };
+    static const CalKey kMarkDim = { "MARK", KeyStyle::DIM };
+    drawCalFooter(parts, 2, kQuitDim, kMarkDim);
 }
 
 // ---------------------------------------------------------------------------
@@ -2416,379 +2418,240 @@ void showCloudLinkDone() {
 }
 
 // ---------------------------------------------------------------------------
-// Bin-coverage calibration grid — gap-fill, and baseline once its in-session
-// bootstrap has locked (CalPhase::BASELINE_GRID; before that baseline shows
-// showBaselineRoughScan()). Mounted has its own, showMountedCal().
-// Layout (320×240):
-//   y=0..19   — title row
-//   y=20..35  — heading labels (N NE E SE S SW W NW N NE E SE)
-//   y=36..195 — bin grid (elevation rows × heading columns, color-coded)
-//   y=196..215 — elevation labels on left edge
-//   y=216..239 — status row ("X/60 bins green" or "DONE — Saving CSV...")
+// 1 Baseline (once its in-session bootstrap has locked, CalPhase::BASELINE_GRID;
+// before that it shows showBaselineRoughScan()) and 1a Fill gaps: the 5 x 12
+// coverage grid. Mounted has its own, showMountedCal().
+//
+// Work area, under the frame's header:
+//   y  27      N E S W ticks; row labels +60 ... -60 on the left (size 1)
+//   y  36-155  grid, 24 px rows; current cell in a 2 px white border, and a
+//              dot at the live (heading, pitch) inside it
+//   y 162      "38/60 cells" (Baseline) or "5 cells left" (Fill gaps), white;
+//              "284° +41°" yellow; the roll widget at (287, 157)
+//
+// Gap-fill shares this screen deliberately rather than getting its own. Its
+// whole promise is that the cell it highlights is the cell the website
+// flagged, and the fastest way to break that is two grid renderers with
+// subtly different geometry. One function, one cell layout, one ordering.
 // ---------------------------------------------------------------------------
-void showCalGrid(const CalProgressPacket& pkt, const char* title) {
-    // Gap-fill shares this screen deliberately rather than getting its own.
-    // Its whole promise is that the cell it highlights is the cell the website
-    // flagged, and the fastest way to break that is two grid renderers with
-    // subtly different geometry. One function, one cell layout, one ordering.
-    const bool isGapFill = (pkt.phase == (uint8_t)CalPhase::GAP_FILL);
+static constexpr int GRID_ROWS = 5;
+
+// The roll widget: the cell under the highlight's roll coverage, a square
+// split by its diagonals into upright (top), right side, upside down (bottom)
+// and left side -- mag_orient::rollSector()'s order -- each coloured like a
+// cell, with a white outline on the live roll sector. Persistent, not a mode
+// swap with the grid (rejected in the gap-fill orientation UX plan as
+// confusing): it sits here, always current, as the diver moves between cells.
+static void drawRollWidget(const CalProgressPacket& pkt) {
+    const int WX = 287, WY = 157, E = 25;   // 26 px square
+    const int cx = WX + E / 2, cy = WY + E / 2;
+    for (int k = 0; k < MAG_CAL_ROLL_SECTORS; k++) {
+        uint16_t color;
+        if (pkt.current_bin < 0) {
+            color = COLOR_OPEN_CELL;   // no live orientation: unknown, not "all satisfied"
+        } else {
+            switch (pkt.current_bin_roll_targeted[k]) {
+                case 0:  color = COLOR_GREEN;  break;   // satisfied
+                case 1:  color = COLOR_YELLOW; break;   // some, under cap
+                default: color = COLOR_RED;    break;   // none yet
+            }
+        }
+        switch (k) {
+            case 0:  tft.fillTriangle(WX, WY, WX + E, WY, cx, cy, color); break;
+            case 1:  tft.fillTriangle(WX + E, WY, WX + E, WY + E, cx, cy, color); break;
+            case 2:  tft.fillTriangle(WX + E, WY + E, WX, WY + E, cx, cy, color); break;
+            default: tft.fillTriangle(WX, WY + E, WX, WY, cx, cy, color); break;
+        }
+    }
+    // Skipped when current_roll_sector is -1 (unmappable). Near-vertical roll
+    // IS reported, not withheld: reconstructRoll()'s degenerate guard never
+    // fires in practice and returns 0.0 = upright there, which with only
+    // cos(elevation) of gravity across the tracked axis is largely sensor
+    // noise. See docs/calibration-guide.md's "aim for the edge of the band".
+    if (pkt.current_roll_sector >= 0 && pkt.current_roll_sector < MAG_CAL_ROLL_SECTORS) {
+        int x0, y0, x1, y1;
+        switch (pkt.current_roll_sector) {
+            case 0:  x0 = WX;     y0 = WY;     x1 = WX + E; y1 = WY;     break;
+            case 1:  x0 = WX + E; y0 = WY;     x1 = WX + E; y1 = WY + E; break;
+            case 2:  x0 = WX + E; y0 = WY + E; x1 = WX;     y1 = WY + E; break;
+            default: x0 = WX;     y0 = WY + E; x1 = WX;     y1 = WY;     break;
+        }
+        tft.drawLine(x0, y0, x1, y1, COLOR_WHITE);
+        tft.drawLine(x0, y0, cx, cy, COLOR_WHITE);
+        tft.drawLine(x1, y1, cx, cy, COLOR_WHITE);
+    }
+}
+
+void showCalGrid(const CalProgressPacket& pkt, bool finishing) {
+    if (!tftReady) return;
+    const bool isGapFill      = (pkt.phase == (uint8_t)CalPhase::GAP_FILL);
     // The baseline live grid: every cell is a target, judged by the same
-    // roll-aware "finished" verdict as gap-fill. Both are live grids, sharing
-    // the orientation readout and the roll widget.
-    const bool isBaselineGrid = (pkt.phase == (uint8_t)CalPhase::BASELINE_GRID);
-    const bool isLiveGrid = isGapFill || isBaselineGrid;
-    g_roughScanStaticDrawn = false;  // the bars screen is gone; redraw it if it returns
-    const int HDG_COLS   = 12;
-    const int ELEV_ROWS  = 5;
-    const int GRID_X     = 28;
-    const int GRID_Y     = 36;
-    const int COL_W      = 24;
-    const int ROW_H      = 30;
-    const int GRID_H     = ROW_H * ELEV_ROWS;
-    const int STATUS_Y   = GRID_Y + GRID_H + 8;
+    // roll-aware "finished" verdict as gap-fill.
+    const bool isBaselineGrid = !isGapFill;
+    const int  nBins = pkt.bins_total < 60 ? pkt.bins_total : 60;
 
-    // --- Static layout: draw only once per cal session to avoid full-screen flicker.
-    // clear() resets g_calGridStaticDrawn so the next session redraws from scratch.
-    if (!g_calGridStaticDrawn) {
-        tft.fillScreen(COLOR_BLACK);
+    static uint32_t sGridSig = 0;
+    static char     sCells[20] = "";
+    static char     sOrient[16] = "";
+    static uint32_t sRollSig = 0;
 
-        // Title
-        tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
-        tft.setTextSize(2);
-        tft.setCursor(4, 2);
-        tft.print(title);
+    // In gap-fill the job is the target list, not the grid: pkt.bins_total is
+    // 60 there because it sizes the wire array and the cell loop, so the
+    // display counts targets itself from the map it already has.
+    int targetTotal = 0;
+    if (isGapFill && pkt.has_targets) {
+        for (int i = 0; i < nBins; i++) {
+            if (pkt.targets[i] == 1 || pkt.targets[i] == 2) targetTotal++;
+        }
+    }
 
-        // Heading labels: only the 4 columns that land exactly on a cardinal
-        // heading are labeled (col*30° == 0/90/180/270 at cols 0/3/6/9). The
-        // other 8 columns are 30°-wide bins that don't correspond to any
-        // standard compass point, so they're left blank rather than mislabeled
-        // (an 8-point compass rose doesn't divide evenly into 12 columns —
-        // labeling all of them previously produced duplicate, incorrect names).
-        // The white current-bin highlight provides orientation between cardinals.
-        //
+    // Counter: what ends the step. Baseline ends when the sample buffer
+    // fills (or on FINISH), never on a full grid; gap-fill when every target
+    // is finished.
+    char counter[12];
+    if (isGapFill) snprintf(counter, sizeof(counter), "%d/%d", pkt.bins_green, targetTotal);
+    else           snprintf(counter, sizeof(counter), "%u/%d", (unsigned)pkt.sample_count,
+                            MAG_CAL_BIN_MAX_SAMPLES);
+    drawCalHeader(isGapFill ? CalStep::FILL_GAPS : CalStep::BASELINE, counter);
+    if (claimCalWork(calSig(CalWork::GRID))) {
         // These labels are magnetic and only as good as the bias behind them:
         // the installed baseline for gap-fill, the in-session sphere fit for
         // the baseline grid (within a few degrees of the real fit; see
         // docs/baseline-live-grid-plan.md).
-        const char* hdgLabels[12] = { "N","","","E","","","S","","","W","","" };
-        tft.setTextSize(1);
-        tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
-        for (int c = 0; c < HDG_COLS; c++) {
-            tft.setCursor(GRID_X + c * COL_W + 2, 22);
-            tft.print(hdgLabels[c]);
-        }
-
-        // Elevation labels (left column)
-        const char* elevLabels[5] = { "+60", "+30", "  0", "-30", "-60" };
-        tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
-        for (int r = 0; r < ELEV_ROWS; r++) {
-            tft.setCursor(0, GRID_Y + r * ROW_H + ROW_H / 2 - 4);
-            tft.print(elevLabels[r]);
-        }
-
-        g_calGridStaticDrawn = true;
+        static const char* const kRows[GRID_ROWS] = { "+60", "+30", "  0", "-30", "-60" };
+        drawGridTicks(kRows, GRID_ROWS, CAL_GRID_ROW_H);
+        sGridSig = 0;  sCells[0] = '\0';  sOrient[0] = '\0';  sRollSig = 0;
     }
 
-    // --- Bin cells ---
-    // Each cell is drawn with a FULL fillRect(cx, cy, COL_W, ROW_H) covering the
-    // entire cell rectangle including its border pixels.  This means every frame
-    // the previous white highlight border is automatically overwritten by the cell
-    // color — no prev-bin tracking needed.  The current-bin white border is then
-    // drawn on top after all cells are filled.
-    for (int r = 0; r < ELEV_ROWS; r++) {
-        for (int c = 0; c < HDG_COLS; c++) {
-            int binIdx = r * HDG_COLS + c;
-            uint8_t cnt = (binIdx < pkt.bins_total) ? pkt.bin_counts[binIdx] : 0;
-
-            uint16_t color;
-            // Count at which a cell stops wanting samples. Only still read on
-            // the gap-fill fallback path below (old nav build, no finished
-            // map); everywhere else `color` carries the verdict.
-            uint8_t  doneAt = MAG_CAL_BIN_GREEN_THRESHOLD;
-            if (isGapFill) {
-                // Colour by the job, not by raw density. An untargeted cell is
-                // not "empty and bad", it's "not your problem" -- painting it
-                // red would send the diver chasing cells the server is happy
-                // with, which is how the over-weighted bins this whole feature
-                // exists to fix get made.
-                const uint8_t st = pkt.has_targets ? pkt.targets[binIdx] : 0;
-                const bool targeted = (st == 1 || st == 2);  // thin or empty
-                doneAt = targeted ? MAG_CAL_GAPFILL_TARGET_CAP
-                                  : MAG_CAL_GAPFILL_UNTARGETED_CAP;
-                // "Finished" is the device's binRollSatisfied() verdict, not a
-                // sample count: a cell hits MAG_CAL_GAPFILL_TARGET_CAP on 15
-                // upright samples alone, but is not finished until the other
-                // three roll sectors have their 5 each. Counting instead
-                // painted a cell green exactly when its roll coverage was
-                // missing, and disagreed with the "N/M cells" line right below
-                // it -- which is what made the count look broken. Falls back to
-                // the old rule only against a nav build too old to send the map.
-                const bool done = pkt.has_cell_satisfied ? pkt.cell_satisfied[binIdx]
-                                                         : (cnt >= doneAt);
-                if (!targeted)              color = 0x1082;       // very dark gray
-                else if (done)              color = COLOR_GREEN;
-                else if (cnt > 0)           color = COLOR_YELLOW;
-                else                        color = COLOR_RED;
-            } else if (isBaselineGrid) {
-                const bool done = pkt.has_cell_satisfied ? pkt.cell_satisfied[binIdx]
-                                                         : (cnt >= MAG_CAL_BIN_GREEN_THRESHOLD);
-                if (done)                   color = COLOR_GREEN;
-                else if (cnt > 0)           color = COLOR_YELLOW;
-                else                        color = COLOR_RED;
-            } else {
-                if (cnt >= MAG_CAL_BIN_GREEN_THRESHOLD)       color = COLOR_GREEN;
-                else if (cnt >= MAG_CAL_BIN_YELLOW_THRESHOLD) color = COLOR_YELLOW;
-                else if (cnt > 0)                              color = COLOR_RED;
-                else                                           color = 0x1082;  // very dark gray
-            }
-
-            int cx = GRID_X + c * COL_W;
-            int cy = GRID_Y + r * ROW_H;
-            tft.fillRect(cx, cy, COL_W, ROW_H, color);  // full cell — erases old border
-
-            // Sample count in cells still wanting samples (drawn inside cell,
-            // away from border). Suppressed on the dark untargeted cells in
-            // gap-fill: a number there reads as a task, and it isn't one.
-            if (isGapFill && color == 0x1082) {
-                // nothing to draw
-            } else if (cnt > 0 && color != COLOR_GREEN) {
-                tft.setTextSize(1);
-                tft.setTextColor(COLOR_BLACK, color);
-                tft.setCursor(cx + 4, cy + ROW_H / 2 - 4);
-                tft.print(cnt);
-            }
+    // --- Cells ---------------------------------------------------------------
+    uint16_t colors[60];
+    for (int i = 0; i < nBins; i++) {
+        const uint8_t cnt = pkt.bin_counts[i];
+        if (isGapFill) {
+            // Colour by the job, not by raw density. An untargeted cell is not
+            // "empty and bad", it's "not your problem" -- painting it red would
+            // send the diver chasing cells the server is happy with, which is
+            // how the over-weighted bins this whole feature exists to fix get
+            // made.
+            const uint8_t st = pkt.has_targets ? pkt.targets[i] : 0;
+            const bool targeted = (st == 1 || st == 2);   // thin or empty
+            // "Finished" is the device's binRollSatisfied() verdict, not a
+            // sample count: a cell hits MAG_CAL_GAPFILL_TARGET_CAP on 15
+            // upright samples alone but isn't finished until the other three
+            // roll sectors have their 5 each. Falls back to the count only
+            // against a nav build too old to send the map.
+            const bool done = pkt.has_cell_satisfied ? pkt.cell_satisfied[i]
+                                                     : cnt >= MAG_CAL_GAPFILL_TARGET_CAP;
+            colors[i] = !targeted ? COLOR_OPEN_CELL
+                      : done      ? COLOR_GREEN
+                      : cnt > 0   ? COLOR_YELLOW
+                                  : COLOR_RED;
+        } else {
+            const bool done = pkt.has_cell_satisfied ? pkt.cell_satisfied[i]
+                                                     : cnt >= MAG_CAL_BIN_GREEN_THRESHOLD;
+            colors[i] = done ? COLOR_GREEN : cnt > 0 ? COLOR_YELLOW : COLOR_RED;
         }
     }
 
-    // --- Current-orientation highlight: white border on active bin ---
-    // Drawn after all cells so it's always on top.  The next frame's cell fillRect
-    // for this bin will overwrite this border when/if the device moves.
-    if (pkt.current_bin >= 0 && pkt.current_bin < pkt.bins_total) {
-        int r = pkt.current_bin / HDG_COLS;
-        int c = pkt.current_bin % HDG_COLS;
-        tft.drawRect(GRID_X + c * COL_W, GRID_Y + r * ROW_H, COL_W, ROW_H, COLOR_WHITE);
-    }
-
-    // --- Live sub-cell position dot -----------------------------------------
-    // The cell border alone quantizes the diver's attitude to 30 deg before
-    // they ever see it: a deliberate turn shows as nothing at all until it
-    // crosses a boundary, and then as a jump to the next cell. There is no
-    // continuous error signal to steer on, which is what makes the grid
-    // something to wave at until cells fill rather than something to aim.
-    // The dot says where inside the cell the device actually is.
-    //
-    // Drawn last, on top of the cells and the border. Every frame repaints all
-    // cells first, so the previous dot is already gone -- the same
-    // no-prev-state trick the highlight border uses.
-    if (pkt.current_bin >= 0 && pkt.current_bin < pkt.bins_total) {
-        // Elevation band edges, top row first. MUST match
-        // mag_orient::elevBand(). The level band is 60 deg
-        // tall and the rest are 30, so position within a row is NOT a fixed
-        // fraction of pitch -- that asymmetry is why this is a table and not
-        // arithmetic.
+    // The dot: where inside the cell the unit is pointing. The border alone
+    // quantizes attitude to 30 deg before the diver sees it, which gives them
+    // nothing continuous to steer on. Elevation band edges, top row first,
+    // MUST match mag_orient::elevBand(); the level band is 60 deg tall and the
+    // rest 30, which is why this is a table and not arithmetic.
+    const bool haveBin = pkt.current_bin >= 0 && pkt.current_bin < nBins;
+    int dx = 0, dy = 0;
+    if (haveBin) {
         static const float edges[6] = { 90.0f, MAG_CAL_ELEV_H2, MAG_CAL_ELEV_H1,
                                         MAG_CAL_ELEV_L1, MAG_CAL_ELEV_L2, -90.0f };
-
         float hdg = fmodf(pkt.cur_hdg_deg, 360.0f);
         if (hdg < 0.0f) hdg += 360.0f;
         float pitch = pkt.cur_pitch_deg;
         if (pitch >  90.0f) pitch =  90.0f;
         if (pitch < -90.0f) pitch = -90.0f;
-
         int dr = 0;
-        while (dr < ELEV_ROWS - 1 && pitch < edges[dr + 1]) dr++;
+        while (dr < GRID_ROWS - 1 && pitch < edges[dr + 1]) dr++;
         const float span = edges[dr] - edges[dr + 1];
         float frac = (span > 0.0f) ? (edges[dr] - pitch) / span : 0.5f;
         if (frac < 0.0f) frac = 0.0f;
         if (frac > 1.0f) frac = 1.0f;
-
-        const int kDotR = 3;
-        int dx = GRID_X + (int)(hdg / 360.0f * (float)(HDG_COLS * COL_W));
-        int dy = GRID_Y + (int)(((float)dr + frac) * (float)ROW_H);
-        // Clamp so the whole dot stays inside the grid at the 360->0 wrap and
-        // at the poles, where the true position sits exactly on the edge.
-        if (dx < GRID_X + kDotR)                            dx = GRID_X + kDotR;
-        if (dx > GRID_X + HDG_COLS * COL_W - kDotR - 1)     dx = GRID_X + HDG_COLS * COL_W - kDotR - 1;
-        if (dy < GRID_Y + kDotR)                            dy = GRID_Y + kDotR;
-        if (dy > GRID_Y + GRID_H - kDotR - 1)               dy = GRID_Y + GRID_H - kDotR - 1;
-
-        // Black ring under a white dot. The cell behind it can be green,
-        // yellow, red, dark gray or the white highlight border, and any
-        // single-colour marker vanishes into one of them.
-        tft.fillCircle(dx, dy, kDotR + 1, COLOR_BLACK);
-        tft.fillCircle(dx, dy, kDotR,     COLOR_WHITE);
+        const int gridW = 12 * CAL_GRID_COL_W, gridH = GRID_ROWS * CAL_GRID_ROW_H;
+        dx = CAL_GRID_X + (int)(hdg / 360.0f * (float)gridW);
+        dy = CAL_GRID_Y + (int)(((float)dr + frac) * (float)CAL_GRID_ROW_H);
+        // Keep the whole dot inside the grid at the 360->0 wrap and the poles.
+        if (dx < CAL_GRID_X + 3)             dx = CAL_GRID_X + 3;
+        if (dx > CAL_GRID_X + gridW - 4)     dx = CAL_GRID_X + gridW - 4;
+        if (dy < CAL_GRID_Y + 3)             dy = CAL_GRID_Y + 3;
+        if (dy > CAL_GRID_Y + gridH - 4)     dy = CAL_GRID_Y + gridH - 4;
     }
 
-    // --- Status + orientation row (clear then redraw each frame) ---
-    tft.fillRect(0, STATUS_Y - 2, 320, 46, COLOR_BLACK);  // clear both status lines
+    // Repaint the grid only when something on it changed. Every cell is
+    // repainted then, gutter included, which wipes the old border and dot.
+    uint32_t gridSig = calSig(2166136261u, colors, nBins * sizeof(colors[0]));
+    gridSig = calSig(gridSig, pkt.bin_counts, nBins);
+    const int pos[3] = { haveBin ? pkt.current_bin : -1, dx, dy };
+    gridSig = calSig(gridSig, pos, sizeof(pos));
+    if (gridSig != sGridSig) {
+        sGridSig = gridSig;
+        for (int i = 0; i < nBins; i++) {
+            // Counts in cells still wanting samples. Not in gap-fill's dark
+            // untargeted cells: a number there reads as a task, and it isn't.
+            const bool showCount = colors[i] != COLOR_GREEN && colors[i] != COLOR_OPEN_CELL;
+            drawGridCell(i, CAL_GRID_ROW_H, colors[i], showCount ? pkt.bin_counts[i] : 0);
+        }
+        if (haveBin) {
+            drawGridHighlight(pkt.current_bin, CAL_GRID_ROW_H, COLOR_WHITE);
+            drawGridDot(dx, dy);
+        }
+    }
 
-    if (pkt.complete) {
-        tft.setTextSize(2);
-        tft.setTextColor(COLOR_GREEN, COLOR_BLACK);
-        tft.setCursor(4, STATUS_Y);
-        tft.print("DONE - Saving CSV...");
+    // --- Readout row -----------------------------------------------------------
+    char cbuf[20];
+    if (isGapFill) snprintf(cbuf, sizeof(cbuf), "%d cells left  ", targetTotal - pkt.bins_green);
+    else           snprintf(cbuf, sizeof(cbuf), "%d/%d cells  ", pkt.bins_green, nBins);
+    if (strcmp(cbuf, sCells) != 0) {
+        strncpy(sCells, cbuf, sizeof(sCells) - 1);
+        drawWorkText(4, 162, cbuf, 2, COLOR_WHITE);
+    }
+    // Numeric, not an 8-point compass name: the grid is 12 columns of 30 deg
+    // and "NE" spans parts of two, so it can't answer the one question this
+    // readout exists for -- which column am I in. Truncated with (int),
+    // matching hdgSector()'s floor; a rounded 360 would name a column that
+    // isn't there. The same algebraic reconstruction chose the highlighted
+    // cell (util/mag_cal_orient.h), so the two can never disagree.
+    char obuf[16];
+    if (haveBin) {
+        float hdg = fmodf(pkt.cur_hdg_deg, 360.0f);
+        if (hdg < 0.0f) hdg += 360.0f;
+        snprintf(obuf, sizeof(obuf), "%03d\xF7 %+.0f\xF7  ", (int)hdg, (double)pkt.cur_pitch_deg);
     } else {
-        // Line 1: progress. In gap-fill the denominator is the TARGET LIST, not
-        // the grid -- pkt.bins_total is 60 there because it sizes the wire
-        // array and the cell loop, so the display counts targets itself from
-        // the map it already has. "3/48 bins" during a session whose whole job
-        // is eleven cells would be actively misleading.
-        tft.setTextSize(2);
-        char sbuf[20];
-        if (isGapFill) {
-            int targetTotal = 0;
-            if (pkt.has_targets) {
-                for (int i = 0; i < pkt.bins_total && i < 60; i++) {
-                    if (pkt.targets[i] == 1 || pkt.targets[i] == 2) targetTotal++;
-                }
-            }
-            snprintf(sbuf, sizeof(sbuf), "%d/%d cells", pkt.bins_green, targetTotal);
-        } else if (isBaselineGrid) {
-            snprintf(sbuf, sizeof(sbuf), "%d/%d cells", pkt.bins_green, pkt.bins_total);
-        } else {
-            // completion is row-weighted so may finish before all bins green
-            snprintf(sbuf, sizeof(sbuf), "%d/%d bins", pkt.bins_green, pkt.bins_total);
-        }
-        tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
-        tft.setCursor(4, STATUS_Y);
-        tft.print(sbuf);
-
-        // Line 2: fit quality when available, orientation otherwise.
-        // Once fit_valid, the heading error estimate is more actionable than
-        // the raw orientation readout (which the bin grid already shows visually).
-        if (isLiveGrid) {
-            // Orientation, always -- in a live grid the diver is steering
-            // toward a specific cell, so where they're pointing beats a fit
-            // statistic.
-            // This pitch/heading pair comes from the same algebraic
-            // reconstruction that chose the highlighted cell (see
-            // util/mag_cal_orient.h), not from the AHRS, so the readout and the
-            // highlight can never disagree.
-            float hdg   = pkt.cur_hdg_deg;
-            float pitch = pkt.cur_pitch_deg;
-            if (hdg < 0.0f) hdg += 360.0f;
-            if (hdg >= 360.0f) hdg -= 360.0f;
-            // Numeric, not an 8-point compass name. The grid is 12 columns of
-            // 30 deg and an 8-point rose does not divide into it, so "NE"
-            // spans parts of two columns and cannot answer the one question
-            // this readout exists for: which column am I in. Truncated with
-            // (int), matching hdgSector()'s floor -- a rounded 360 would name
-            // a column that isn't there.
-            char gbuf[16];
-            snprintf(gbuf, sizeof(gbuf), "%03d\xF7 %+.0f\xF7", (int)hdg, pitch);
-            tft.setTextSize(2);
-            tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
-            tft.setCursor(4, STATUS_Y + 20);
-            tft.print(gbuf);
-
-            // --- Persistent roll widget: always-visible breakdown of the
-            // roll-sector coverage for whichever cell current_bin is
-            // pointing at (CalProgressPacket::current_bin_roll_counts/
-            // _targeted, populated only in gap-fill -- see config.h's
-            // "Roll coverage" block). A small square split into 4 triangles
-            // by its diagonals -- top=upright, right=right-side,
-            // bottom=upside-down, left=left-side, matching
-            // mag_orient::rollSector()'s ordering -- each colored the same
-            // green/yellow/red convention as a grid cell, with a white
-            // outline on whichever triangle matches the device's LIVE roll
-            // (current_roll_sector). Filled whole every frame, same
-            // no-flicker trick the grid cells above use, so there's no
-            // separate "last drawn sector" to track. Deliberately not a
-            // mode swap with the main grid -- rejected in the gap-fill
-            // orientation UX plan as visually confusing -- it just sits
-            // here, always current, as the diver moves between cells.
-            {
-                const int WS  = 44;                // widget square side, px
-                const int WX  = 320 - WS - 8;       // right-aligned, 8px margin
-                const int WY  = STATUS_Y;
-                const int cxm = WX + WS / 2;
-                const int cym = WY + WS / 2;
-                const uint16_t kUnknownColor = 0x1082;  // very dark gray, matches untargeted cells
-
-                for (int k = 0; k < MAG_CAL_ROLL_SECTORS; k++) {
-                    uint16_t color;
-                    if (pkt.current_bin < 0) {
-                        // No live orientation to report -- unknown, not a
-                        // false "all satisfied" green.
-                        color = kUnknownColor;
-                    } else {
-                        switch (pkt.current_bin_roll_targeted[k]) {
-                            case 0:  color = COLOR_GREEN;  break;  // satisfied
-                            case 1:  color = COLOR_YELLOW; break;  // some, under cap
-                            default: color = COLOR_RED;    break;  // none yet
-                        }
-                    }
-                    switch (k) {
-                        case 0:  tft.fillTriangle(WX, WY, WX + WS, WY, cxm, cym, color); break;              // upright: top
-                        case 1:  tft.fillTriangle(WX + WS, WY, WX + WS, WY + WS, cxm, cym, color); break;    // right-side: right
-                        case 2:  tft.fillTriangle(WX + WS, WY + WS, WX, WY + WS, cxm, cym, color); break;    // upside-down: bottom
-                        default: tft.fillTriangle(WX, WY + WS, WX, WY, cxm, cym, color); break;              // left-side: left
-                    }
-                }
-
-                // Live-roll outline on the triangle matching the device's
-                // current attitude -- skipped when current_roll_sector is -1,
-                // which means "not in a live grid, or the cell is unmappable".
-                //
-                // NOT, despite what this comment used to say, "pointing
-                // straight up/down": reconstructRoll()'s degenerate guard is
-                // 1e-6 g and so never fires in practice, and it returns 0.0
-                // there, which is roll sector 0 = UPRIGHT. Near-vertical roll
-                // is therefore reported, not withheld -- and with only
-                // cos(elevation) of gravity left across the tracked axis
-                // (0.035 g at 88 deg) that report is largely sensor noise. See
-                // docs/calibration-guide.md's "aim for the edge of the band".
-                if (pkt.current_roll_sector >= 0 && pkt.current_roll_sector < MAG_CAL_ROLL_SECTORS) {
-                    int ox0, oy0, ox1, oy1;
-                    switch (pkt.current_roll_sector) {
-                        case 0:  ox0 = WX;      oy0 = WY;      ox1 = WX + WS; oy1 = WY;      break;
-                        case 1:  ox0 = WX + WS; oy0 = WY;      ox1 = WX + WS; oy1 = WY + WS; break;
-                        case 2:  ox0 = WX + WS; oy0 = WY + WS; ox1 = WX;      oy1 = WY + WS; break;
-                        default: ox0 = WX;      oy0 = WY + WS; ox1 = WX;      oy1 = WY;      break;
-                    }
-                    tft.drawLine(ox0, oy0, ox1, oy1, COLOR_WHITE);
-                    tft.drawLine(ox0, oy0, cxm, cym, COLOR_WHITE);
-                    tft.drawLine(ox1, oy1, cxm, cym, COLOR_WHITE);
-                }
-            }
-        } else if (pkt.fit_valid) {
-            // Colour-code by estimated heading error
-            uint16_t fcol = (pkt.fit_hdg_err_deg < 3.0f) ? COLOR_GREEN
-                          : (pkt.fit_hdg_err_deg < 7.0f) ? COLOR_YELLOW
-                          : COLOR_RED;
-            char fbuf[20];
-            snprintf(fbuf, sizeof(fbuf), "Fit:\xF0%.1f\xF7", pkt.fit_hdg_err_deg);
-            tft.setTextSize(2);
-            tft.setTextColor(fcol, COLOR_BLACK);
-            tft.setCursor(4, STATUS_Y + 20);
-            tft.print(fbuf);
-            // Stability suffix: blank = converging, "~" = nearly stable, "OK" = stable
-            if (pkt.fit_delta < 0.5f) {
-                tft.setTextColor(COLOR_GREEN, COLOR_BLACK);
-                tft.print(" OK");
-            } else if (pkt.fit_delta < 2.0f) {
-                tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
-                tft.print("  ~");
-            }
-        } else {
-            // Orientation readout until enough samples for a valid fit.
-            float hdg   = pkt.cur_hdg_deg;
-            float pitch = pkt.cur_pitch_deg;
-            if (hdg < 0.0f) hdg += 360.0f;
-            if (hdg >= 360.0f) hdg -= 360.0f;
-            // Numeric for the same reason as the gap-fill readout above.
-            char obuf[16];
-            snprintf(obuf, sizeof(obuf), "%03d\xF7 %+.0f\xF7", (int)hdg, pitch);
-            tft.setTextSize(2);
-            tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
-            tft.setCursor(4, STATUS_Y + 20);
-            tft.print(obuf);
-        }
+        snprintf(obuf, sizeof(obuf), "%-10s", "");
     }
+    if (strcmp(obuf, sOrient) != 0) {
+        strncpy(sOrient, obuf, sizeof(sOrient) - 1);
+        drawWorkText(166, 162, obuf, 2, COLOR_YELLOW);
+    }
+    uint32_t rollSig = calSig(2166136261u, pkt.current_bin_roll_targeted,
+                              sizeof(pkt.current_bin_roll_targeted));
+    const int rollPos[2] = { pkt.current_bin < 0 ? -1 : 0, pkt.current_roll_sector };
+    rollSig = calSig(rollSig, rollPos, sizeof(rollPos));
+    if (rollSig != sRollSig) {
+        sRollSig = rollSig;
+        drawRollWidget(pkt);
+    }
+
+    // --- Status and keys ---------------------------------------------------------
+    // Baseline's last 10% before the buffer fills and ends it.
+    static char nearFullText[24];
+    snprintf(nearFullText, sizeof(nearFullText), "Auto-finish at %d", MAG_CAL_BIN_MAX_SAMPLES);
+    const CalText fill     = { "Fill red & yellow cells", COLOR_YELLOW };
+    const CalText nearFull = { nearFullText, COLOR_YELLOW };
+    const bool isNearFull = isBaselineGrid &&
+                            (int)pkt.sample_count * 10 >= MAG_CAL_BIN_MAX_SAMPLES * 9;
+    drawCollectingFooter(pkt, finishing, isNearFull ? nearFull : fill);
 }
 
 // ---------------------------------------------------------------------------
-// Mounted cal: the dwell-capture screen. See src/util/mounted_dwell.h for the
+// 2 Mounted: the dwell-capture screen. See src/util/mounted_dwell.h for the
 // rule it is showing, and divemap's mounted-cal-dwell-plan.md for why.
 //
 // The collector records a cell only once the unit has sat still inside that
@@ -2796,35 +2659,32 @@ void showCalGrid(const CalProgressPacket& pkt, const char* title) {
 // they are from that: an attitude indicator for "is it level / tilted enough",
 // a motion bar for "is it still", and a hold bar for "is it recording".
 //
-// Layout (320x240):
-//   y=0..19     title, and cells filled out of the 24 needed
-//   y=22..29    heading labels
-//   y=34..111   3 x 12 grid, 26 px rows
-//   y=120..215  attitude indicator (left); motion bar, hold bar, readout and
-//               one instruction line (right)
+// Work area, under the frame's header (counter = cells filled of 36):
+//   y  27      N E S W ticks; row labels +30, 0, -30 on the left
+//   y  36-95   3 x 12 grid, 20 px rows. Every empty cell is red; the current
+//              cell is outlined white inside the window, yellow outside it
+//   y 100-179  attitude indicator, 80 px, left
+//              MOTION (92, 102), bar (170, 101) with the cause inside it
+//              HOLD   (92, 126), bar (170, 125)
+//              heading, pitch, roll at (92, 152)
 //
-// Everything below the title is redrawn only when its own inputs change, and
-// the indicator is composed off-screen and blitted, because this is repainted
-// every loop pass and a horizon that flickers is harder to level than no
-// horizon at all.
+// Everything is redrawn only when its own inputs change, and the indicator is
+// composed off-screen and blitted, because this is repainted every loop pass
+// and a horizon that flickers is harder to level than no horizon at all.
 // ---------------------------------------------------------------------------
-static constexpr int MC_GRID_X = 28;
-static constexpr int MC_GRID_Y = 34;
-static constexpr int MC_COL_W  = 24;
-static constexpr int MC_ROW_H  = 26;
-static constexpr int MC_AI_X   = 4;     // attitude indicator, top-left
-static constexpr int MC_AI_Y   = 120;
-static constexpr int MC_AI_S   = 96;    // square; 1 px per degree of pitch
-static constexpr int MC_PANEL_X = 108;
-static constexpr int MC_BAR_W   = 204;
-static constexpr int MC_BAR_H   = 12;
-static constexpr uint16_t MC_COLOR_OPEN   = 0x1082;  // very dark gray, as showCalGrid
+static constexpr int MC_ROW_H   = 20;
+static constexpr int MC_AI_X    = 4;     // attitude indicator, top-left
+static constexpr int MC_AI_Y    = 100;
+static constexpr int MC_AI_S    = 80;    // square; Mounted and Heading both
+static constexpr int MC_PANEL_X = 92;
 static constexpr uint16_t MC_COLOR_SKY    = 0x2AD4;
 static constexpr uint16_t MC_COLOR_GROUND = 0x7A83;
 
 static GFXcanvas16* g_mcHorizon = nullptr;
+static_assert(MC_AI_X + MC_AI_S < MC_PANEL_X, "mounted cal horizon overlaps its panel");
+static_assert(MC_AI_Y + MC_AI_S <= CAL_WORK_Y + CAL_WORK_H, "mounted cal horizon leaves the work area");
 static_assert(HDGCAL_AI_X + MC_AI_S < HDGCAL_PANEL_X, "heading cal horizon overlaps its panel");
-static_assert(HDGCAL_AI_Y + MC_AI_S <= SCREEN_HEIGHT, "heading cal horizon runs off the screen");
+static_assert(HDGCAL_AI_Y + MC_AI_S <= CAL_WORK_Y + CAL_WORK_H, "heading cal horizon leaves the work area");
 
 // Horizon tilts with roll and slides with pitch, as an aircraft's does: nose
 // up shows more sky, right side down drops the horizon's right end (the sign
@@ -2872,17 +2732,16 @@ static void drawHorizon(int16_t x0, int16_t y0, float pitchErrDeg, float rollDeg
     const int tol = (int)(tolDeg * gain);
     for (int side = 0; side < 2; side++) {
         const int xOuter = side ? MC_AI_S - 4 : 3;
-        const int xInner = side ? MC_AI_S - 16 : 15;
-        const int x0 = xOuter < xInner ? xOuter : xInner;
+        const int xArm   = side ? MC_AI_S - 14 : 3;   // the bracket's arms run 11 px inward
         for (int t = 0; t < 3; t++) {   // 3 px thick
             c.drawFastVLine(xOuter + (side ? -t : t), mid - tol, 2 * tol + 1, mark);
-            c.drawFastHLine(x0, mid - tol + t, 13, mark);
-            c.drawFastHLine(x0, mid + tol - t, 13, mark);
+            c.drawFastHLine(xArm, mid - tol + t, 11, mark);
+            c.drawFastHLine(xArm, mid + tol - t, 11, mark);
         }
     }
     // Fixed centre mark: where the unit's nose is pointing.
-    c.drawFastHLine(mid - 14, mid, 9, COLOR_BLACK);
-    c.drawFastHLine(mid + 6,  mid, 9, COLOR_BLACK);
+    c.drawFastHLine(mid - 12, mid, 8, COLOR_BLACK);
+    c.drawFastHLine(mid + 5,  mid, 8, COLOR_BLACK);
     c.fillCircle(mid, mid, 2, COLOR_BLACK);
     c.drawRect(0, 0, MC_AI_S, MC_AI_S, COLOR_GRAY);
 
@@ -2896,10 +2755,9 @@ static void drawMountedHorizon(float pitchDeg, float rollDeg, int row, bool inWi
                 tolDeg, MC_AI_GAIN, inWindow);
 }
 
-// One line saying what to do next. At text size 2 the panel holds 17 chars.
+// One line saying what to do next, for the status line.
 static const char* mountedCalInstruction(const CalProgressPacket& pkt, int row, uint16_t& colorOut) {
     colorOut = COLOR_YELLOW;
-    if (pkt.complete) { colorOut = COLOR_GREEN; return "DONE - saving"; }
     switch ((CalDwellState)pkt.capture_state) {
         case CalDwellState::EDGE:      return "Turn a bit more";
         case CalDwellState::MOVING:    return "Hold still";
@@ -2921,51 +2779,25 @@ static const char* mountedCalInstruction(const CalProgressPacket& pkt, int row, 
     }
 }
 
-void showMountedCal(const CalProgressPacket& pkt) {
+void showMountedCal(const CalProgressPacket& pkt, bool finishing) {
     if (!tftReady) return;
 
-    // What was last drawn, per element. -1 / empty never matches real input.
-    static uint32_t sGridSig  = 0xFFFFFFFFu;
-    static int      sCount    = -1;
-    static int      sHorizSig = INT32_MIN;
-    static int      sMotionPx = -1;
-    static int      sMotionTerm = -2;
-    static int      sHoldPx   = -1;
-    static char     sReadout[20] = "";
-    static char     sStatus[20]  = "";
-    static uint16_t sStatusColor = 0;
+    // What was last drawn, per element.
+    static uint32_t    sGridSig  = 0;
+    static int         sHorizSig = INT32_MIN;
+    static CalBarCache sMotion, sHold;
+    static char        sReadout[20] = "";
 
-    if (!g_mountedCalStaticDrawn) {
-        invalidateNavCache();
-        tft.fillScreen(COLOR_BLACK);
-        tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
-        tft.setTextSize(2);
-        tft.setCursor(4, 2);
-        tft.print("MOUNTED CAL");
-
-        tft.setTextSize(1);
-        tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
-        const char* hdgLabels[4] = { "N", "E", "S", "W" };
-        for (int k = 0; k < 4; k++) {
-            tft.setCursor(MC_GRID_X + k * 3 * MC_COL_W + 2, 22);
-            tft.print(hdgLabels[k]);
-        }
-        tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
-        const char* rowLabels[3] = { "+30", "  0", "-30" };
-        for (int r = 0; r < 3; r++) {
-            tft.setCursor(0, MC_GRID_Y + r * MC_ROW_H + MC_ROW_H / 2 - 4);
-            tft.print(rowLabels[r]);
-        }
-        tft.setCursor(MC_PANEL_X, 120);
-        tft.print("MOTION");
-        tft.setCursor(MC_PANEL_X, 150);
-        tft.print("HOLD");
-        tft.drawRect(MC_PANEL_X - 1, 131, MC_BAR_W + 2, MC_BAR_H + 2, COLOR_GRAY);
-        tft.drawRect(MC_PANEL_X - 1, 161, MC_BAR_W + 2, MC_BAR_H + 2, COLOR_GRAY);
-
-        sGridSig = 0xFFFFFFFFu;  sCount = -1;  sHorizSig = INT32_MIN;
-        sMotionPx = -1;  sMotionTerm = -2;  sHoldPx = -1;  sReadout[0] = '\0';  sStatus[0] = '\0';
-        g_mountedCalStaticDrawn = true;
+    char counter[8];
+    snprintf(counter, sizeof(counter), "%d/%d", pkt.bins_green, mounted_dwell::kNeedTotal);
+    drawCalHeader(CalStep::MOUNTED, counter);
+    if (claimCalWork(calSig(CalWork::MOUNTED))) {
+        static const char* const kRows[3] = { "+30", "  0", "-30" };
+        drawGridTicks(kRows, 3, MC_ROW_H);
+        drawWorkText(MC_PANEL_X, 102, "MOTION", 2, COLOR_GRAY);
+        drawWorkText(MC_PANEL_X, 126, "HOLD", 2, COLOR_GRAY);
+        sGridSig = 0;  sHorizSig = INT32_MIN;  sMotion = CalBarCache{};  sHold = CalBarCache{};
+        sReadout[0] = '\0';
     }
 
     float hdg = fmodf(pkt.cur_hdg_deg, 360.0f);
@@ -2975,54 +2807,36 @@ void showMountedCal(const CalProgressPacket& pkt) {
     const int   row   = mounted_dwell::nearestRow(pitch);
     const bool  inWindow = pkt.capture_state != (uint8_t)CalDwellState::OUT_OF_WINDOW;
 
-    // --- Count: cells filled toward the 24 needed ---------------------------
-    if (pkt.bins_green != sCount) {
-        sCount = pkt.bins_green;
-        char cbuf[8];
-        snprintf(cbuf, sizeof(cbuf), "%2d/%d", sCount, mounted_dwell::kNeedTotal);
-        tft.setTextSize(2);
-        tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
-        tft.setCursor(SCREEN_WIDTH - 4 - 5 * 12, 2);
-        tft.print(cbuf);
-    }
-
     // --- Grid, highlight and position dot -----------------------------------
     // The rows are 30 deg apart and each is drawn 30 deg tall, so the dot's
     // height is plain pitch: +45 at the top of the grid, -45 at the bottom.
-    const int gridW = mounted_dwell::kSectors * MC_COL_W;
+    const int gridW = mounted_dwell::kSectors * CAL_GRID_COL_W;
     const int gridH = mounted_dwell::kRows * MC_ROW_H;
-    const int kDotR = 3;
-    int dx = MC_GRID_X + (int)(hdg / 360.0f * (float)gridW);
-    int dy = MC_GRID_Y + (int)((45.0f - pitch) / 90.0f * (float)gridH);
-    if (dx < MC_GRID_X + kDotR)             dx = MC_GRID_X + kDotR;
-    if (dx > MC_GRID_X + gridW - kDotR - 1) dx = MC_GRID_X + gridW - kDotR - 1;
-    if (dy < MC_GRID_Y + kDotR)             dy = MC_GRID_Y + kDotR;
-    if (dy > MC_GRID_Y + gridH - kDotR - 1) dy = MC_GRID_Y + gridH - kDotR - 1;
+    int dx = CAL_GRID_X + (int)(hdg / 360.0f * (float)gridW);
+    int dy = CAL_GRID_Y + (int)((45.0f - pitch) / 90.0f * (float)gridH);
+    if (dx < CAL_GRID_X + 3)         dx = CAL_GRID_X + 3;
+    if (dx > CAL_GRID_X + gridW - 4) dx = CAL_GRID_X + gridW - 4;
+    if (dy < CAL_GRID_Y + 3)         dy = CAL_GRID_Y + 3;
+    if (dy > CAL_GRID_Y + gridH - 4) dy = CAL_GRID_Y + gridH - 4;
 
     uint32_t gridSig = (uint32_t)dx | ((uint32_t)dy << 9) |
                        ((uint32_t)(pkt.current_bin & 0x3F) << 17) |
-                       ((uint32_t)pkt.capture_state << 23);
+                       ((uint32_t)(inWindow ? 1 : 0) << 23);
     for (int i = 0; i < mounted_dwell::kCells; i++) {
         if (pkt.bin_counts[i]) gridSig = gridSig * 31u + (uint32_t)i + 1u;
     }
     if (gridSig != sGridSig) {
         sGridSig = gridSig;
+        // Every cell the diver still has to fill is red, not just "open".
         for (int i = 0; i < mounted_dwell::kCells; i++) {
-            const int cx = MC_GRID_X + (i % mounted_dwell::kSectors) * MC_COL_W;
-            const int cy = MC_GRID_Y + (i / mounted_dwell::kSectors) * MC_ROW_H;
-            tft.drawRect(cx, cy, MC_COL_W, MC_ROW_H, COLOR_BLACK);
-            tft.fillRect(cx + 1, cy + 1, MC_COL_W - 2, MC_ROW_H - 2,
-                         pkt.bin_counts[i] ? COLOR_GREEN : MC_COLOR_OPEN);
+            drawGridCell(i, MC_ROW_H, pkt.bin_counts[i] ? COLOR_GREEN : COLOR_RED, 0);
         }
         if (pkt.current_bin >= 0 && pkt.current_bin < mounted_dwell::kCells) {
-            const int cx = MC_GRID_X + (pkt.current_bin % mounted_dwell::kSectors) * MC_COL_W;
-            const int cy = MC_GRID_Y + (pkt.current_bin / mounted_dwell::kSectors) * MC_ROW_H;
             // White once the attitude is inside the row's window, yellow while
             // it is only the nearest row: a cell cannot fill from out here.
-            tft.drawRect(cx, cy, MC_COL_W, MC_ROW_H, inWindow ? COLOR_WHITE : COLOR_YELLOW);
+            drawGridHighlight(pkt.current_bin, MC_ROW_H, inWindow ? COLOR_WHITE : COLOR_YELLOW);
         }
-        tft.fillCircle(dx, dy, kDotR + 1, COLOR_BLACK);
-        tft.fillCircle(dx, dy, kDotR,     COLOR_WHITE);
+        drawGridDot(dx, dy);
     }
 
     // --- Attitude indicator -------------------------------------------------
@@ -3035,42 +2849,26 @@ void showMountedCal(const CalProgressPacket& pkt) {
     }
 
     // --- Motion bar: empty at the stillness limit, full at 5x it ------------
+    // The cause sits inside the bar. If it won't empty with the scooter on a
+    // stool, this names the sensor whose calibration is off: "turning" is
+    // the gyro, the other two the accelerometer.
+    const int barIn = CAL_BAR_W - 2;
     int motionPx = 0;
     if (pkt.motion > CAL_MOTION_AT_LIMIT) {
-        motionPx = (int)(pkt.motion - CAL_MOTION_AT_LIMIT) * MC_BAR_W / (255 - CAL_MOTION_AT_LIMIT);
+        motionPx = (int)(pkt.motion - CAL_MOTION_AT_LIMIT) * barIn / (255 - CAL_MOTION_AT_LIMIT);
         if (motionPx < 2) motionPx = 2;   // over the limit must be visible
     }
-    if (motionPx != sMotionPx) {
-        sMotionPx = motionPx;
-        tft.fillRect(MC_PANEL_X, 132, motionPx, MC_BAR_H, COLOR_RED);
-        tft.fillRect(MC_PANEL_X + motionPx, 132, MC_BAR_W - motionPx, MC_BAR_H, COLOR_BLACK);
-    }
-    // Which test is over its limit, beside the label. If the bar will not
-    // empty with the scooter sitting on a stool, this names the sensor whose
-    // calibration is off: "turning" is the gyro, the other two the accel.
-    const int motionTerm = motionPx > 0 ? (int)pkt.motion_term : -1;
-    if (motionTerm != sMotionTerm) {
-        sMotionTerm = motionTerm;
-        const char* why = motionTerm < 0 ? "still"
-                        : motionTerm == (int)CalMotionTerm::GYRO      ? "turning"
-                        : motionTerm == (int)CalMotionTerm::ACCEL_MAG ? "pushed"
-                                                                      : "shaking";
-        char padded[10];
-        snprintf(padded, sizeof(padded), "%-8s", why);
-        tft.setTextSize(1);
-        tft.setTextColor(motionTerm < 0 ? COLOR_GREEN : COLOR_RED, COLOR_BLACK);
-        tft.setCursor(MC_PANEL_X + 48, 120);
-        tft.print(padded);
-    }
+    const char* why = motionPx == 0 ? "still"
+                    : pkt.motion_term == (uint8_t)CalMotionTerm::GYRO      ? "turning"
+                    : pkt.motion_term == (uint8_t)CalMotionTerm::ACCEL_MAG ? "pushed"
+                                                                           : "shaking";
+    drawCalBar(sMotion, CAL_BAR_X, 101, CAL_BAR_W, CAL_BAR_H, motionPx, COLOR_RED, why,
+               motionPx == 0 ? COLOR_GREEN : COLOR_WHITE);
 
     // --- Hold bar: settle, then capture -------------------------------------
     const int pct = pkt.dwell_pct > 100 ? 100 : pkt.dwell_pct;
-    const int holdPx = pct * MC_BAR_W / 100;
-    if (holdPx != sHoldPx) {
-        sHoldPx = holdPx;
-        tft.fillRect(MC_PANEL_X, 162, holdPx, MC_BAR_H, pct >= 100 ? COLOR_GREEN : COLOR_CYAN);
-        tft.fillRect(MC_PANEL_X + holdPx, 162, MC_BAR_W - holdPx, MC_BAR_H, COLOR_BLACK);
-    }
+    drawCalBar(sHold, CAL_BAR_X, 125, CAL_BAR_W, CAL_BAR_H, pct * barIn / 100,
+               pct >= 100 ? COLOR_GREEN : COLOR_CYAN);
 
     // --- Readout: heading, pitch, roll --------------------------------------
     // Heading truncated with (int), matching the sector arithmetic; a rounded
@@ -3083,168 +2881,55 @@ void showMountedCal(const CalProgressPacket& pkt) {
         sReadout[sizeof(sReadout) - 1] = '\0';
         char padded[18];
         snprintf(padded, sizeof(padded), "%-17s", rbuf);   // a 3-digit roll is one wider
-        tft.setTextSize(2);
-        tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
-        tft.setCursor(MC_PANEL_X, 182);
-        tft.print(padded);
+        drawWorkText(MC_PANEL_X, 152, padded, 2, COLOR_WHITE);
     }
 
-    // --- Instruction --------------------------------------------------------
+    // --- Status and keys ----------------------------------------------------
     uint16_t statusColor;
     const char* status = mountedCalInstruction(pkt, row, statusColor);
-    if (strcmp(status, sStatus) != 0 || statusColor != sStatusColor) {
-        strncpy(sStatus, status, sizeof(sStatus) - 1);
-        sStatus[sizeof(sStatus) - 1] = '\0';
-        sStatusColor = statusColor;
-        char padded[18];
-        snprintf(padded, sizeof(padded), "%-17s", status);   // overwrite the old line
-        tft.setTextSize(2);
-        tft.setTextColor(statusColor, COLOR_BLACK);
-        tft.setCursor(MC_PANEL_X, 206);
-        tft.print(padded);
-    }
+    drawCollectingFooter(pkt, finishing, { status, statusColor });
 }
 
 // ---------------------------------------------------------------------------
-// Baseline's only screen, for its entire collection session (see
-// divemap/docs/architecture/baseline-cal-coverage-feedback-plan.md; the
-// two-pass ROUGH_SCAN->COLLECT design docs/baseline-cal-two-pass.md
-// describes is retired). No grid: AHRS heading isn't trustworthy yet
-// (magnetometer uncalibrated), so there's nothing spatial worth promising.
-// Just raw per-axis spread, sample count, and the live fit-quality readout
-// (same incremental fitter showCalGrid uses — it doesn't depend on a bias
-// estimate at all, so it's meaningful even here). The diver ends the session
-// themselves (BTN2 -> FINISH_BASELINE_COLLECTION); the CSV uploads for real
-// grading server-side.
-// Layout (320×240):
-//   y=0..19    — title row
-//   y=22..30   — instruction line
-//   y=40..112  — 3 axis-coverage bars (X/Y/Z)
-//   y=125..145 — sample count
-//   y=150..190 — live fit quality (reuses showCalGrid's color/format)
-//   y=205..225 — "BTN2: done" prompt (dim + sample count needed, if under floor;
-//                "uploading..." once complete)
+// 1 Baseline, before its in-session bootstrap locks (CalPhase::ROUGH_SCAN):
+// per-axis raw-range bars. A few seconds of tumbling, normally, and then
+// showCalGrid() takes over. If the lock never comes (a wrong
+// MAG_CAL_EXPECTED_FIELD_UT for this site, or spinning about one axis only)
+// this stays up, and the session still uploads for grading as before.
+//
+// Work area, under the frame's header (counter = samples of 2160, which
+// carries straight over to the grid at lock):
+//   y  34, 62, 90  X, Y and Z bars, 292 x 22 from x 24
+//   y 126          "Finding north..."; under it, that the grid will follow
+//
+// The 2-D "Fit:" readout that used to sit here is gone: it settles 20-30 deg
+// wrong on good data and would read like a grade for the grid.
 // ---------------------------------------------------------------------------
-void showBaselineRoughScan(const CalProgressPacket& pkt) {
-    const int BAR_X = 40, BAR_W = 260, BAR_H = 16;
-    // When the bootstrap locks, this screen hands over to showCalGrid mid-
-    // session; make sure the grid draws its static layout over these bars.
-    g_calGridStaticDrawn = false;
+void showBaselineRoughScan(const CalProgressPacket& pkt, bool finishing) {
+    if (!tftReady) return;
+    static CalBarCache sBar[3];
 
-    if (!g_roughScanStaticDrawn) {
-        tft.fillScreen(COLOR_BLACK);
-
-        tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
-        tft.setTextSize(2);
-        tft.setCursor(4, 2);
-        tft.print("BASELINE CAL");
-
-        tft.setTextSize(1);
-        tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
-        tft.setCursor(4, 24);
-        tft.print("Tumble through all orientations");
-
-        const char* axisLabels[3] = { "X", "Y", "Z" };
-        const int barY[3] = { 42, 68, 94 };
-        tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
-        for (int i = 0; i < 3; i++) {
-            tft.setCursor(4, barY[i] + BAR_H / 2 - 4);
-            tft.print(axisLabels[i]);
-            tft.drawRect(BAR_X, barY[i], BAR_W, BAR_H, COLOR_GRAY);
-        }
-
-        g_roughScanStaticDrawn = true;
+    char counter[12];
+    snprintf(counter, sizeof(counter), "%u/%d", (unsigned)pkt.sample_count, MAG_CAL_BIN_MAX_SAMPLES);
+    drawCalHeader(CalStep::BASELINE, counter);
+    if (claimCalWork(calSig(CalWork::BARS))) {
+        static const char* const kAxes[3] = { "X", "Y", "Z" };
+        for (int i = 0; i < 3; i++) drawWorkText(4, 34 + i * 28 + 4, kAxes[i], 2, COLOR_GRAY);
+        drawWorkText(4, 126, "Finding north...", 2, COLOR_WHITE);
+        drawWorkText(4, 150, "The grid appears", 2, COLOR_GRAY);
+        drawWorkText(4, 166, "once it locks.", 2, COLOR_GRAY);
+        for (auto& b : sBar) b = CalBarCache{};
     }
 
-    // --- Axis bar fills (redrawn each call) ---
-    const int barY[3] = { 42, 68, 94 };
     const uint8_t cov[3] = { pkt.cov_x, pkt.cov_y, pkt.cov_z };
     for (int i = 0; i < 3; i++) {
-        int fillW = (BAR_W - 2) * (int)cov[i] / 100;
-        uint16_t color = (cov[i] >= 80) ? COLOR_GREEN : (cov[i] >= 40) ? COLOR_YELLOW : COLOR_RED;
-        tft.fillRect(BAR_X + 1, barY[i] + 1, BAR_W - 2, BAR_H - 2, COLOR_BLACK);
-        if (fillW > 0) tft.fillRect(BAR_X + 1, barY[i] + 1, fillW, BAR_H - 2, color);
+        const int c = cov[i] > 100 ? 100 : cov[i];
+        const uint16_t color = (c >= 80) ? COLOR_GREEN : (c >= 40) ? COLOR_YELLOW : COLOR_RED;
+        drawCalBar(sBar[i], 24, 34 + i * 28, 292, 22, 290 * c / 100, color);
     }
 
-    // --- Sample count ---
-    tft.fillRect(0, 122, 320, 20, COLOR_BLACK);
-    tft.setTextSize(2);
-    tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
-    tft.setCursor(4, 124);
-    char sbuf[24];
-    snprintf(sbuf, sizeof(sbuf), "Samples: %u", (unsigned)pkt.sample_count);
-    tft.print(sbuf);
-
-    // --- Lock hint ---
-    // This screen is now only the few seconds before the in-session bootstrap
-    // locks and the grid replaces it (docs/baseline-live-grid-plan.md). The
-    // 2-D "Fit:" readout that used to sit here is gone: it settles 20-30 deg
-    // wrong on good data and would read like a grade for the grid. If the
-    // lock never comes (wrong MAG_CAL_EXPECTED_FIELD_UT for this site, or
-    // only spinning about one axis) this stays up, and the session still
-    // uploads for grading exactly as before.
-    tft.fillRect(0, 148, 320, 20, COLOR_BLACK);
-    if (!pkt.complete) {
-        tft.setTextSize(2);
-        tft.setTextColor(COLOR_YELLOW, COLOR_BLACK);
-        tft.setCursor(4, 150);
-        tft.print("Finding north...");
-        tft.setTextSize(1);
-        tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
-        tft.setCursor(4, 170);
-        tft.print("tumble every way, not just one spin");
-    }
-
-    // --- Prompt ---
-    tft.fillRect(0, 205, 320, 30, COLOR_BLACK);
-    tft.setTextSize(1);
-    if (pkt.complete) {
-        tft.setTextColor(COLOR_GREEN, COLOR_BLACK);
-        tft.setCursor(4, 210);
-        if (pkt.max_samples_reached) {
-            tft.print("Max samples reached,");
-            tft.setCursor(4, 222);
-            tft.print("uploading now.");
-        } else {
-            tft.print("Done -- uploading for grading...");
-        }
-    } else if (pkt.sample_count >= MAG_CAL_ROUGH_SCAN_MIN_SAMPLES) {
-        tft.setTextColor(COLOR_WHITE, COLOR_BLACK);
-        tft.setCursor(4, 210);
-        tft.print("BTN2: done, upload for grading");
-    } else {
-        tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
-        tft.setCursor(4, 210);
-        char pbuf[40];
-        snprintf(pbuf, sizeof(pbuf), "Keep going... (%d more samples)",
-                 MAG_CAL_ROUGH_SCAN_MIN_SAMPLES - (int)pkt.sample_count);
-        tft.print(pbuf);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Shown the instant BTN2 requests FINISH_BASELINE_COLLECTION, before nav has
-// confirmed. nav does a synchronous CSV dump (can take real time for a big
-// run) before it even sends the completion packet, so without this screen
-// the diver sees the exact same rough-scan bars/prompt they were already
-// looking at -- indistinguishable from the press not having registered.
-// ---------------------------------------------------------------------------
-void showBaselineFinishing() {
-    tft.fillScreen(COLOR_BLACK);
-    tft.setTextColor(COLOR_CYAN, COLOR_BLACK);
-    tft.setTextSize(2);
-    tft.setCursor(4, 2);
-    tft.print("BASELINE CAL");
-
-    tft.setTextSize(2);
-    tft.setTextColor(COLOR_GREEN, COLOR_BLACK);
-    tft.setCursor(20, 110);
-    tft.print("Finishing up...");
-
-    tft.setTextSize(1);
-    tft.setTextColor(COLOR_GRAY, COLOR_BLACK);
-    tft.setCursor(20, 140);
-    tft.print("Uploading and processing CSV");
+    static const CalText kTumble = { "Tumble the unit randomly", COLOR_YELLOW };
+    drawCollectingFooter(pkt, finishing, kTumble);
 }
 
 }  // namespace display

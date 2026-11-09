@@ -114,23 +114,24 @@ void showUpdateAvailable(const char* version);
 //   isFull         — true = soft-iron data collection, false = quick hard-iron sweep
 void showCal(uint8_t remaining_s, uint8_t coverage_pct, bool isFull);
 
-// Draw the bin-coverage calibration grid screen and flush to display.
-// Shows a color-coded heading × elevation grid (black/red/yellow/green per bin).
-// Gap-fill's screen; mounted has showMountedCal().
-//   pkt     — CalProgressPacket with bin counts and totals
-//   title   — short title string
-void showCalGrid(const struct CalProgressPacket& pkt, const char* title);
-// Mounted cal's dwell-capture screen: the 3 x 12 grid, an attitude indicator,
-// a motion bar and a hold bar. A cell records only once the unit has sat
-// still inside its row's attitude window, and this shows how close that is.
-void showMountedCal(const struct CalProgressPacket& pkt);
-// Baseline pass 1 (ROUGH_SCAN): no grid, axis-range bars + live fit stats + "good enough" prompt.
-void showBaselineRoughScan(const struct CalProgressPacket& pkt);
-// Shown immediately when BTN2 requests FINISH_BASELINE_COLLECTION, before nav
-// has confirmed (which can take a while -- nav does a synchronous CSV dump
-// first). Distinguishes "request sent, waiting" from the rough-scan screen
-// diver would otherwise see redrawn unchanged.
-void showBaselineFinishing();
+// The bin cals' collecting screens, in the cal frame (see setCalKeysOverlay
+// below). Keys: hold BTN1 = QUIT, BTN2 = FINISH. `finishing`: FINISH was
+// pressed and nav hasn't confirmed yet (it does a synchronous CSV dump
+// first); the status says so and both keys go dim. pkt.complete shows the
+// "Done - saving" hold.
+//
+// Baseline before its bootstrap locks (ROUGH_SCAN): per-axis range bars.
+void showBaselineRoughScan(const struct CalProgressPacket& pkt, bool finishing);
+// Baseline after it locks (BASELINE_GRID), and gap-fill: the 5 x 12 coverage
+// grid with the live position dot and the roll widget.
+void showCalGrid(const struct CalProgressPacket& pkt, bool finishing);
+// Mounted: the 3 x 12 grid, an attitude indicator, a motion bar and a hold
+// bar. A cell records only once the unit has sat still inside its row's
+// attitude window, and this shows how close that is.
+void showMountedCal(const struct CalProgressPacket& pkt, bool finishing);
+// Whether FINISH can end this collection yet (the floors nav applies), which
+// decides whether the FINISH key is lit and whether BTN2 sends it.
+bool calCanFinish(const struct CalProgressPacket& pkt);
 
 // Speed calibration screens (all flush to display).
 // Distance selection — user chooses how far they will swim.
@@ -158,9 +159,10 @@ void showSpeedCalResult(uint16_t dist_ft, uint16_t elapsed_s,
                         float k_existing, float k_proposed,
                         uint8_t choice);
 
-// Fourier heading calibration screens.
+// Fourier heading calibration screens, in the cal frame. Keys: hold BTN1 =
+// QUIT, BTN2 = MARK (green once the level gate is ready).
 // Prompt screen: instruct user to align to a target heading and press BTN2.
-//   step         — 0-based step index
+//   step         — 0-based step index, i.e. marks done so far
 //   total        — total number of steps
 //   targetDeg    — target heading the user should align to (0-360)
 //   indicatedDeg — live AHRS heading from NavPacket (pre-correction)
@@ -176,10 +178,11 @@ void showHdgFourierCalPrompt(int step, int total, float targetDeg, float indicat
                               uint8_t holdPct, float pitchDeg, float rollDeg);
 
 // Brief acknowledgment shown immediately on BTN2, before the step advances --
-// held on screen for a fixed beat by the caller. errDeg is this point's own
-// (indicated - target); avgErrDeg is the running average including this point.
-void showHdgFourierCalAck(int step, int total, float targetDeg, float indicatedDeg,
-                           float errDeg, float avgErrDeg);
+// held on screen for a fixed beat by the caller. marksDone includes this one.
+// errDeg is this point's own (indicated - target); avgErrDeg is the running
+// average including this point. nextTargetDeg < 0 = this was the last point.
+void showHdgFourierCalAck(int marksDone, int total, float targetDeg, float indicatedDeg,
+                           float errDeg, float avgErrDeg, float nextTargetDeg);
 
 // Calibration screens share one frame: header (step strip, step name,
 // counter), work area, status line, and two softkeys (BTN1 left, BTN2 right).

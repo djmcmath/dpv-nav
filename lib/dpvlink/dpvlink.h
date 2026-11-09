@@ -479,6 +479,8 @@ enum class DisplayCmd : uint8_t {
     // 44-46 retired (were SET_DATUM / NAV_TO_DATUM / DATUM_WAS — the Nav > Datum
     // search-datum feature, removed unused). Do not reuse: older firmware on the
     // other board may still send or expect them.
+    QUIT_CAL               = 47, // diver held BTN1 on a cal screen: end the bin cal or heading cal
+                                 // in progress with nothing saved or uploaded
 };
 
 // ---------------------------------------------------------------------------

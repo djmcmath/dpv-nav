@@ -165,6 +165,8 @@ static constexpr bool FLOW_LOG_ENABLE     = false;  // set to false to disable f
 //   4 = speed cal — result ready, awaiting display accept/reject
 //   5 = baseline mag cal (bin-aware)
 //   6 = mounted mag cal (bin-aware)
+//   7 = gap-fill mag cal (bin-aware)
+//   8/9 = current hold
 static bool    gInCal    = false;
 static uint8_t gCalMode  = 0;
 
@@ -493,6 +495,7 @@ static nvs_nav::State currentNavNvsState() {
 
 // ---- Forward declarations --------------------------------------------------
 static void loadCalibration();
+static void endBinCal();
 static void finishCurrentHold(bool early);
 static void cancelCurrentHold();
 static void sendNavPacket(float heading, float headingRaw, float pitch, float roll,
@@ -1491,10 +1494,7 @@ void loop() {
                         Serial.printf("[BIN_CAL] ERROR: could not open %s\n", gBinCalCsvPath);
                     }
                 }
-                imu::magBinCalEnd();
-                loadCalibration();  // restore whatever's actually on flash
-                gInCal   = false;
-                sysState = SystemState::READY;
+                endBinCal();
                 Serial.println("[BIN_CAL] Cal complete, returning to READY");
             }
         } else if (gCalMode == 0) {
@@ -1635,6 +1635,17 @@ void loop() {
 // ===========================================================================
 // Helpers
 // ===========================================================================
+
+// End a bin cal (baseline, mounted or gap-fill) and go back to navigating on
+// the cal installed on flash. Shared by completion, after the CSV dump and
+// upload, and by QUIT_CAL, which skips both. loadCalibration() is what keeps
+// a quit baseline from leaving heading on the identity cal it collects under.
+static void endBinCal() {
+    imu::magBinCalEnd();
+    loadCalibration();  // restore whatever's actually on flash
+    gInCal   = false;
+    sysState = SystemState::READY;
+}
 
 static void loadCalibration() {
     // Magnetometer — try two-stage chain (mag_base.json + mag_mount.json),
@@ -2397,9 +2408,32 @@ static void handleDisplayCmd() {
                         break;
                     }
                     case DisplayCmd::FINISH_BASELINE_COLLECTION:
+                        // The name predates it: this finishes any bin cal,
+                        // mounted included (FINISH on the cal screen).
                         Serial.println("CMD: FINISH_BASELINE_COLLECTION (diver declares done)");
-                        if (gInCal && (gCalMode == 5 || gCalMode == 7)) {
+                        if (gInCal && (gCalMode == 5 || gCalMode == 6 || gCalMode == 7)) {
                             imu::magBinCalFinishBaseline();
+                        }
+                        break;
+                    case DisplayCmd::QUIT_CAL:
+                        // Hold BTN1 on a cal screen. Nothing is dumped or
+                        // uploaded: a samples CSV already on flash from an
+                        // earlier session stays as it was, so tern.local's
+                        // retry-upload still finds it.
+                        if (gInCal && (gCalMode == 5 || gCalMode == 6 || gCalMode == 7)) {
+                            Serial.printf("CMD: QUIT_CAL -- bin cal mode %u ended, nothing saved\n",
+                                          (unsigned)gCalMode);
+                            endBinCal();
+                        } else if (gHdgCalActive) {
+                            // Heading samples live only in RAM until
+                            // FINALIZE_HDG_CAL, so there's nothing on flash.
+                            Serial.printf("CMD: QUIT_CAL -- heading cal ended at %d points, nothing saved\n",
+                                          gHdgSampleCount);
+                            gHdgCalActive   = false;
+                            gHdgSampleCount = 0;
+                            gLevelGate.reset();
+                        } else {
+                            Serial.println("CMD: QUIT_CAL -- no bin or heading cal running, ignored");
                         }
                         break;
                     case DisplayCmd::START_SPEED_CAL: {

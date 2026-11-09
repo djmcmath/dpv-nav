@@ -166,9 +166,9 @@ void   magCalNBGetProgress(uint32_t& elapsed_ms, uint32_t& remaining_ms,
 //   magBinCalBegin(BinCalMode::GAP_FILL, targets60);   // -> GAP_FILL (targets required)
 //   // in main loop:
 //   magBinCalTick(pitch_deg, heading_deg, rawMag, accelCal, gyroCal);  // add one sample
-//   magBinCalFinishBaseline();           // baseline/gap-fill: diver declares "done", uploads for grading
-//   if (magBinCalIsComplete()) { ... }   // mounted: rows complete; gap-fill: every target satisfied
-//                                        // (or diver finished); baseline: finish requested
+//   magBinCalFinishBaseline();           // any mode: diver presses FINISH, uploads for grading
+//   if (magBinCalIsComplete()) { ... }   // mounted: rows complete; gap-fill: every target satisfied;
+//                                        // any mode: diver finished
 //   // retrieve:
 //   magBinCalGetProgress(pkt);           // fill CalProgressPacket
 //   magBinCalDumpCSV(file);              // write samples to open LittleFS File
@@ -232,7 +232,8 @@ bool   magBinCalIsActive();
 // (CalPhase::BASELINE_GRID); nav_main uses it to start the 10 Hz orientation
 // packet the grid steers by. False before lock and in every other mode.
 bool   magBinCalBaselineGridLive();
-// Mounted: true when every row is complete. Baseline: true once the diver has called
+// Mounted: true when every row is complete, or the diver has called
+// magBinCalFinishBaseline(). Baseline: true once the diver has called
 // magBinCalFinishBaseline() (no bin/grid concept applies to baseline anymore).
 // Gap-fill: true when every targeted cell has reached its cap, or the diver
 // called magBinCalFinishBaseline() -- whichever comes first. Auto-completion
@@ -240,9 +241,10 @@ bool   magBinCalBaselineGridLive();
 // finite, known list of cells, so "you're done" is a fact the device can
 // actually establish rather than a guess.
 bool   magBinCalIsComplete();
-// Baseline and gap-fill: diver declares "good enough" and ends collection (no
-// phase change -- neither mode ever switches phase). No-op (returns false) if
-// too few samples have been collected yet, or if called for mounted cal.
+// Diver declares "good enough" and ends collection (FINISH on the cal screen).
+// Despite the name, every bin cal mode: baseline and gap-fill need their
+// minimum sample count, mounted at least one filled cell. No-op (returns
+// false) below that.
 bool   magBinCalFinishBaseline();
 // Gap-fill only: how many targeted cells are still short of their cap (and how
 // many there were to begin with). Both zero outside GAP_FILL. Drives the

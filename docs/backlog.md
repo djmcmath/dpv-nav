@@ -180,6 +180,38 @@ Nothing is lost, but something is unverified, unvalidated, or invisible when it 
   pad 8 was always routed (net 4) and only the constant was wrong, so the panel reset line
   had been floating.
 
+- [ ] **`water_temp_c` decoupled from the water for a whole dive, cause unknown**
+
+  On 2026-11-08 (`tools/logs/20261108-001.csv`) the MS5837's temperature sat flat at
+  14.2–14.4 °C for 90 minutes, including a descent to 35 m straight through a thermocline,
+  with two clean exponential excursions (τ 9–23 s, both directions) to 10.47 °C and
+  10.99 °C. **The excursions were the correct readings.** The same unit on the same
+  unchanged firmware read 15.5–16.0 °C at the surface and 9.7 °C mean below 20 m on
+  2026-10-24 and 2026-10-30, crossing the thermocline promptly both times.
+
+  *Ruled out 2026-11-09:* the compensation math (checked against the MS5837-30BA datasheet
+  — dT, OFF/SENS, the second-order branch, C5/C6 indexing), the log path (no filtering,
+  int16 at 0.01 °C), and a firmware change (`git log` shows `ms5837.cpp` untouched between
+  the good dives and this one). The I2C bus was healthy too — depth tracked all dive, so
+  the D1 reads were landing. Depth is unaffected: at 69.1–69.6 min the temperature swung
+  1.3 °C while depth held 34.72–34.79 m, and the compensation wants the die temperature,
+  which is what it measures.
+
+  *Also ruled out:* tracking the housing instead of the water. The reading was flat within
+  0.2 °C while *both* candidate environments moved several degrees (water 14.5 → 10.5,
+  housing via `mag_temp_c` 16.9 → 13.5), so it was following neither. The probe is on the
+  stern of the nav tube and has not moved in many dives, which makes a trapped bubble
+  possible but not obviously likely.
+
+  *Done 2026-11-09, independent of the cause:* failed ADC reads are counted and dropped
+  rather than recompensated as fresh samples, the counters are on `tern.local`'s
+  Diagnostics panel, and conversions are paced at `ms5837::SAMPLE_PERIOD_MS` (500 ms, from
+  100% ADC duty at OSR 8192) so self-heating no longer biases the reading warm.
+
+  *Priority: low.* Nothing on the unit or on Dive Map uses this column. Left here so the
+  next occurrence is recognized rather than re-investigated — and `tern.local` will now
+  say whether the sensor was answering at all.
+
 ---
 
 ## Tier 3 — Build it out

@@ -292,6 +292,14 @@ An optional BlueRobotics Bar30 (MS5837-30BA) connects to the nav board's J3 head
 - **Water density:** SETUP > Water toggles salt (default) vs fresh water, which affects the pressure→depth conversion.
 - **Display:** when present, depth is shown in small text on the bottom row of the nav screen, in the units selected by DISPLAY > Units.
 - **Logging:** depth (m) and water temperature (°C) are recorded at every log level.
+  Water temperature is the sensor's own die temperature and has been seen decoupled
+  from the water -- see [data-logging-guide.md](./data-logging-guide.md) before trusting
+  it. Depth is unaffected.
+- **Health:** `tern.local`'s Diagnostics panel shows the sensor's I2C read counters
+  (good samples, failed reads). The unit is sealed, so that is the only way to tell a
+  depth sensor that has quietly stopped answering from one that is working -- a failed
+  read is dropped, never reported again as a fresh sample. A climbing error count points
+  at the Bar30's cable or connector.
 - **Dive trigger:** see **Automatic depth trigger** under [Op Mode](#op-mode-divesurface).
 
 ## Display Modes

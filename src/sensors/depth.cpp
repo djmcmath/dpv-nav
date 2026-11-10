@@ -53,4 +53,6 @@ void setSaltWater(bool salt) {
 float getDepth_m() { return gDepthM; }
 float getTemp_c()  { return gTempC; }
 
+ms5837::Health health() { return ms5837::health(); }
+
 }  // namespace depth

@@ -28,6 +28,26 @@ uint32_t gRawD2       = 0;
 bool     gNewSample   = false;
 float    gPressureMbar = 0.0f;
 float    gTemperatureC = 0.0f;
+uint32_t gCycleStartMs = 0;
+
+Health   gHealth       = {0, 0, 0, 0};
+
+// A wedged bus would otherwise print every SAMPLE_PERIOD_MS forever. The
+// first error always prints; after that, at most one line per interval.
+constexpr uint32_t ERROR_LOG_INTERVAL_MS = 10000;
+uint32_t gLastErrorLogMs = 0;
+
+void noteError(const char* what) {
+    uint32_t now   = millis();
+    bool     first = gHealth.lastErrorMs == 0;
+    gHealth.lastErrorMs = now;
+    if (first || now - gLastErrorLogMs >= ERROR_LOG_INTERVAL_MS) {
+        gLastErrorLogMs = now;
+        Serial.printf("[MS5837] %s — cycle dropped (adc=%u cmd=%u good=%u)\n",
+                      what, gHealth.adcReadErrors, gHealth.cmdWriteErrors,
+                      gHealth.goodSamples);
+    }
+}
 
 bool writeCmd(uint8_t cmd) {
     Wire.beginTransmission(MS5837_ADDR);
@@ -115,6 +135,11 @@ void compute(uint32_t d1, uint32_t d2) {
 bool init() {
     gPresent = false;
     gState   = State::IDLE;
+    gHealth  = {0, 0, 0, 0};
+    gLastErrorLogMs = 0;
+    // Back-date the pacing clock so the first cycle starts on the next tick
+    // rather than SAMPLE_PERIOD_MS later — the boot surface zero waits on it.
+    gCycleStartMs = millis() - SAMPLE_PERIOD_MS;
 
     if (!writeCmd(CMD_RESET)) return false;
     delay(10);  // one-time boot reset, datasheet-recommended settle time
@@ -146,28 +171,49 @@ void update() {
 
     switch (gState) {
         case State::IDLE:
+            if (now - gCycleStartMs < SAMPLE_PERIOD_MS) break;
             if (writeCmd(CMD_CONVERT_D1_8192)) {
-                gConvStartMs = now;
-                gState       = State::WAIT_D1;
+                gCycleStartMs = now;
+                gConvStartMs  = now;
+                gState        = State::WAIT_D1;
+            } else {
+                gCycleStartMs = now;  // don't retry a dead bus every tick
+                gHealth.cmdWriteErrors++;
+                noteError("D1 convert command failed");
             }
             break;
         case State::WAIT_D1:
             if (now - gConvStartMs >= CONV_TIME_MS) {
-                readAdc24(gRawD1);
-                if (writeCmd(CMD_CONVERT_D2_8192)) {
+                if (!readAdc24(gRawD1)) {
+                    // gRawD1 is untouched on failure, so there is nothing
+                    // valid to compensate — drop the cycle rather than
+                    // recompute the previous reading as if it were new.
+                    gHealth.adcReadErrors++;
+                    noteError("D1 (pressure) ADC read failed");
+                    gState = State::IDLE;
+                } else if (writeCmd(CMD_CONVERT_D2_8192)) {
                     gConvStartMs = now;
                     gState       = State::WAIT_D2;
                 } else {
+                    gHealth.cmdWriteErrors++;
+                    noteError("D2 convert command failed");
                     gState = State::IDLE;
                 }
             }
             break;
         case State::WAIT_D2:
             if (now - gConvStartMs >= CONV_TIME_MS) {
-                readAdc24(gRawD2);
-                compute(gRawD1, gRawD2);
-                gNewSample = true;
-                gState     = State::IDLE;
+                if (!readAdc24(gRawD2)) {
+                    // Same as D1: a stale gRawD2 would compensate as a
+                    // frozen-but-plausible temperature.
+                    gHealth.adcReadErrors++;
+                    noteError("D2 (temperature) ADC read failed");
+                } else {
+                    compute(gRawD1, gRawD2);
+                    gHealth.goodSamples++;
+                    gNewSample = true;
+                }
+                gState = State::IDLE;
             }
             break;
     }
@@ -181,5 +227,7 @@ bool hasNewSample() {
 
 float pressureMbar() { return gPressureMbar; }
 float temperatureC() { return gTemperatureC; }
+
+Health health() { return gHealth; }
 
 }  // namespace ms5837

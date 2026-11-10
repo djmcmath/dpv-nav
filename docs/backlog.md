@@ -111,20 +111,6 @@ Silent loss. The diver gets no error, just bad data later.
 
 Nothing is lost, but something is unverified, unvalidated, or invisible when it goes stale.
 
-- [ ] **Nav-board status LED: built 2026-10-14, bench test owed**
-
-  `util/status_led.h` (legend in `docs/user-guide.md`), host-tested, builds — never flashed.
-  Same change narrowed the log's `'G'` tag to gate-accepted fixes and latched the GPS enable
-  pin (GPIO32) and the NeoPixel rail (GPIO2) low through deep sleep. Owed on hardware:
-  - the red → amber → green-blink → solid-green sequence outside, and in the decoded log no
-    `'G'` row before the gate's first acceptance;
-  - fault (GPS unplugged) and halt (display link unplugged at boot) patterns;
-  - **OFF current before and after**, GPS attached. The GPS latch assumes the breakout pulls
-    EN up when the pad floats; ~20 mA less in OFF confirms it, no change means it was harmless.
-    Check nothing is on STEMMA QT first — GPIO2 powers that port too;
-  - a wake from OFF still boots normally (GPIO0 is left high-Z, never held, for that reason);
-  - brightness through the real housing in daylight (`status_led::LEVEL`, `HEARTBEAT`).
-
 - [ ] **OTA bootloader rollback has never been tested**
 
   The full display + nav OTA path is built and bench-verified to 0.7.4, and a network drop
@@ -158,14 +144,36 @@ Nothing is lost, but something is unverified, unvalidated, or invisible when it 
   COBS framing plus a CRC turns a silent wrong value into a detectable dropped packet, which
   the display can then show rather than trust.
 
-- [ ] **The PCB files don't show the backlight jumper**
+- [ ] **A stale display-board PCB copy still doesn't show the backlight jumper**
 
   The display unit has a hand-run jumper from the EyeSPI `Lite` pad (pad 2) to A5/GPIO4,
   added and bench-tested 2026-09-18, and firmware drives it in `display::setBacklight()` /
-  `sleepForPowerOff()`. Both the current `hardware/schematic/display_board/display_board.kicad_pcb`
-  and "Rev A" still show `unconnected-(U1-Lite-Pad2)` — so reading the PCB alone leads to the
-  conclusion that the backlight can't be controlled from firmware, which was true until the
-  jumper and is now wrong.
+  `sleepForPowerOff()`. **Mostly corrected — audited 2026-11-09:**
+  - `display_board.kicad_pcb` / `.kicad_sch` — **fixed.** Lite pad on net 20
+    `Net-(A1-IO4{slash}A5)`, routed on F.Cu and B.Cu, schematic wire present, committed.
+  - `display_board_Rev_B/display_board_Rev_0_gopro_housing.kicad_pcb` — **fixed.** Same net,
+    5 routed segments.
+  - `display_board_gopro_housing.kicad_pcb` / `.kicad_sch` — **still wrong.** Lite pad on
+    net 37 `unconnected-(U1-Lite-Pad2)`, with `A1-IO4{slash}A5-Pad10` dangling too.
+
+  *It is one circuit, not three.* Net-list comparison: `display_board` and the Rev B file
+  have **identical** net lists, and the *only* electrical difference between `display_board`
+  and the top-level gopro file is this jumper — nothing else diverges anywhere. The housing
+  changes the outline and the retention, not the connections: Rev B drops the two M3
+  mounting holes (hence 9 Edge.Cuts items vs 8), and mounting holes carry no nets, which is
+  why the net lists match. The top-level gopro file has the *same* outline and the same 9
+  footprints as `display_board`, so it is not a housing variant at all — it is a stale copy
+  that missed the fix.
+
+  *Do now, cheap:* sync the jumper into `display_board_gopro_housing.*` so every copy is
+  truthful, regardless of how the housing question lands. A stale file that reads
+  "backlight uncontrollable" is the trap here, and it costs nothing to close.
+
+  *Open, and NOT a file-naming decision:* which housing the display unit ships in. The board
+  is expected to be the same either way — gopro housing or custom-milled Delrin — with the
+  same connections. The gate is building **at least one fully operable milled-Delrin display
+  unit** before committing to that path. Until that unit exists, keep both housing layouts
+  alive; don't consolidate the PCB files on the assumption that one housing won.
 
   *Note:* trust `TFT_BL` in `board_pins.h` over the KiCad netlist for the assembled unit. The
   same session corrected `TFT_RST` 22 → 23, which was **not** a wiring change — IO23 ↔ EyeSPI
@@ -313,6 +321,17 @@ Real, small, not urgent. Good candidates when something above is blocked on hard
   cleared by hand first. Wanted: when a log opens, free what its level could need, deleting
   already-uploaded logs first (`log_sync::isUploaded`), and warn on the display if it can't.
 
+- [ ] **The status LED says nothing useful in dive mode**
+
+  *Low priority.* The LED is tested and works (see Settled). In dive mode it only indicates
+  that it's in dive mode — correct, and arguably enough, since it isn't the primary display
+  or indicator and nothing is lost by it staying quiet. But it's an always-visible channel
+  that's currently idle for the whole dive, and there is probably *something* worth putting
+  on it. Open question is what: candidates are log-write health (the Tier 4 item above fails
+  silently today), remaining log space, battery state, or a cal/sensor fault that the diver
+  would otherwise only find on the display. Pick one that matters without needing to be read
+  as a legend at depth — see the "minimize presses / preserve awareness" principle.
+
 - [ ] **The logging integration example hardcodes roll and pitch to zero**
 
   `docs/logging-integration-example.cpp:122-123` carries two literal TODOs to extract them
@@ -326,13 +345,25 @@ Real, small, not urgent. Good candidates when something above is blocked on hard
 Decisions already made, recorded so they stop costing time. If one of these comes back up,
 the answer is here, not in fresh analysis.
 
+- **Nav-board status LED works as designed** — *bench + in-water tested, closed 2026-11-09.*
+  Built 2026-10-14 (`util/status_led.h`, legend in `docs/user-guide.md`), now fully tested.
+  GPS indication works well, and dive/surface mode reads correctly (indirectly). No rework
+  owed; the only remainder is the open Tier 4 question of what else it could report in dive
+  mode.
+
+- **Mast-mounted GPS indicator board — built, not needed** — *2026-11-09.* A second NeoPixel
+  indicator board was built and works correctly, but reading the NeoPixel on the nav board
+  is easier than looking up into the mast, so it earns nothing in practice. Good build, not
+  worth integrating or maintaining. Don't re-propose remote/mast indicators unless the nav
+  board itself becomes hard to see.
+
 - **Near-vertical roll noise in gap-fill** — *closed 2026-09-18.* "Noise near vertical is just
   a part of the game." Roll credit near vertical is largely noise and stays that way;
   `reconstructRoll`'s 1e-6 g degenerate guard never fires and returns 0.0 = sector 0 =
   UPRIGHT, so at true vertical the device credits "upright" rather than refusing. A gate
   (require cos(pitch) ≥ 0.1) would stop the grid claiming roll diversity it doesn't have, at
   the cost of rejecting samples the diver worked to collect. The mitigation is technique —
-  work the ~65° band edge, not the pole — documented in `docs/calibration-guide.md`.
+  work the ~65° band edge, not the pole — documented in `docs/dev-calibration-guide.md`.
 
 - **TLS CA pinning removed, not made refreshable** — *2026-08-27.* `CLOUD_ROOT_CA_PEM` and
   `rootCaConfigured()` are gone; every `WiFiClientSecure` in `cloud_client.cpp` calls

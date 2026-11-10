@@ -2,7 +2,7 @@
 
 This guide is in three parts:
 
-1. **[Calibration](#calibration)**: done once for a new installation, and again whenever the physical setup changes, or if, for any reason, a calibration check fails.
+1. **[Calibration](#calibration)**: done once for a new installation, and again whenever the physical setup changes, or if, for any reason, a calibration check fails. Summarised here; the full walkthrough is [user-calibration-guide.md](user-calibration-guide.md).
 2. **[Diving with DPV-Nav](#diving-with-dpv-nav)**: the routine from the night before, through the dive, to the surface.
 3. **[Reference](#reference)**: menus, screens, settings and troubleshooting.
 
@@ -10,301 +10,56 @@ This guide is in three parts:
 
 # Calibration
 
-## Recommended Calibration Order (New Installation)
+**The full walkthrough is in
+[user-calibration-guide.md](user-calibration-guide.md)** — why each step exists,
+the per-step procedure and screens, what a good result looks like, and what
+invalidates what. It used to live here; it outgrew a section. This is the
+summary.
 
-Do these in order. Each step relies on the one before it. The numbers match the CAL menu and the step strip across the top of every cal screen.
+Do these in order. Each step is fitted on top of the one before it, which is
+why redoing an early step means redoing the later ones. The numbers match the
+CAL menu and the step strip across the top of every cal screen.
 
-1. **Baseline mag cal** (**CAL > Baseline (1)**): device off the DPV, full sphere coverage. Accepting it on the unit also loads its gap-fill map, and the next screen tells you how many cells need work. Reviewing the coverage on map.terndiving.com is optional.
-1a. **[Gap fill](#gap-fill-cal--fill-gaps-1a)** (**CAL > Fill gaps (1a)**, optional): your baseline calibration will be incomplete, and there's no good way to show that while you're collecting the data. Once a reasonably competent baseline exists, though, it's possible to highlight the gaps and fill them intelligently.
-2. **Mounted mag cal** (**CAL > Mounted (2)**): device installed on the DPV, horizontal rotations, provides an indication of how to adjust the optimal sphere based on the magnetic field of the scooter in orientations relatively similar to what you'll face on a dive.
-3. **Fourier heading cal** (**CAL > Heading (3)**): 12 points on the DPV at 30° intervals, dead level, read against a calibrated compass.
-4. **Speed cal** (**CAL > Speed cal**): 3–6 runs over a known distance to dial in the flow sensor k-factor.
+| # | Step | Where | Solves for |
+|---|---|---|---|
+| 1 | **[Baseline](user-calibration-guide.md#step-1--baseline-cal--baseline-1)** (`CAL > Baseline (1)`) | **off** the DPV, in your hands | The unit's own hard and soft iron, fit over a full sphere |
+| 1a | **[Gap fill](user-calibration-guide.md#step-1a--gap-fill-cal--fill-gaps-1a)** (`CAL > Fill gaps (1a)`, optional) | **off** the DPV | The orientations step 1 missed. Merged into the baseline, not a redo |
+| 2 | **[Mounted](user-calibration-guide.md#step-2--mounted-cal--mounted-2)** (`CAL > Mounted (2)`) | **on** the DPV, on a stand | The scooter's magnetic signature, as a constrained fit on top of the baseline |
+| 3 | **[Heading](user-calibration-guide.md#step-3--heading-cal--heading-3)** (`CAL > Heading (3)`) | on the DPV, against a known-good compass | Whatever heading error survives steps 1–2; also ties the unit to north |
+| 4 | **[Speed](user-calibration-guide.md#step-4--speed-cal--speed-cal)** (`CAL > Speed cal`) | in the water, known distance | The flow sensor's k-factor |
 
-Gyro and accel calibrations are started automatically on first boot if their files are absent.  Note that this calibration process requires the serial port to be connected.  If your unit powers on but never connects with the display, connect the USB and expect to walk through this process.
+Gyro and accel calibration run automatically at first boot if their files are
+absent. That sequence runs over the **USB serial port**, not the display — so if
+a new unit powers on but never connects to the display, plug in USB and expect
+to walk through it.
 
-**Every cal screen works the same way.** Across the top, the step strip (`1 1a 2 3`) marks the step you're on, and the number on the right counts toward whatever ends it: samples, cells or marks. One line near the bottom says what to do now: red means something is blocking you, yellow means adjust, green means good. Under it are two keys, one per button: **BTN1 on the left, BTN2 on the right**, each labelled with what it does right now.
+**Every cal screen works the same way.** Across the top, the step strip
+(`1 1a 2 3`) marks the step you're on, and the number on the right counts toward
+whatever ends it: samples, cells or marks. One line near the bottom says what to
+do now: red means something is blocking you, yellow means adjust, green means
+good. Under it are two keys, one per button: **BTN1 on the left, BTN2 on the
+right**, each labelled with what it does right now.
 
 - **BTN2 keeps going:** FINISH, MARK, ACCEPT, OK.
-- **Hold BTN1 for 2 seconds to throw the work away:** QUIT while collecting, REJECT on a result. The left key fills red while you hold it; let go early and nothing happens. A quick press only shows a reminder, so a stray tap can't cost you a collection.
-- Holding both buttons for 2 seconds still resets the display, and never quits a cal.
-
-**Every step uses the same cloud round trip.** When collection finishes, the unit uploads the samples (if it has WiFi and a linked account), the server fits them, and the display shows **Uploading** followed by the result: one number, with **GOOD**, **OK** or **POOR** beside it. **ACCEPT** (BTN2) installs it immediately, with no reboot, and the next screen says what's next. Holding BTN1 to **REJECT** keeps whatever was active before. With no WiFi, the samples are still saved to the unit, and you can upload them later from `tern.local`, or use the offline Python fit (see each step below and [calibration-guide.md](calibration-guide.md#magnetometer-calibration)).
-
-## Baseline Calibration (CAL > Baseline (1))
-
-Device **off** the DPV, rotated through every orientation. See [calibration-guide.md](calibration-guide.md#running-baseline-calibration) for the full procedure.
-
-Baseline starts on a bars screen that says **Finding north...**. Tumble the unit every way, not just one spin. After about 5–10 seconds of tumbling, the unit has fitted enough of the field to know roughly which way is north, and the screen switches to the same coverage grid and roll widget **Fill gaps** uses. Every cell is a target: red is empty, yellow has some samples, green is done (all four rolls). Steer into the red and yellow cells. When you're done, press **FINISH** (BTN2). A full grid doesn't end it; the only automatic finish is the sample buffer filling at 2160, which the counter in the top right counts toward, and the status line warns you from about 1944. The top and bottom rows are as hard to aim as they are in gap fill, so don't chase them to the last cell. If the grid never appears, keep going: you're on the old bars-only screen, and the upload and grading work exactly as before. See [calibration-guide.md](calibration-guide.md#running-baseline-calibration).
-
-General note: I've found that a best process here looks like:
-- Hold the unit in one hand, by the end, pointed straight down.  Raise it slowly through level to straight up.  Rotate ~15-20deg.  Lower the unit slowly.  Complete a full circle.
-- Rotate the unit 90 deg, so now it's pointed straight down, but when you raise it to horizontal, it'll be lying on one side.  Repeat the circle this way.
-- Rotate 90deg again, one more complete circle of up-and-downs
-- One last rotation, one final complete circle of up and downs.
-- A good target is something like 1400 samples.  Less than 1000 will yield a lot of gaps.  More than 1800 is probably redundant for a baseline -- you're gathering data with no idea whether its good.  Get the gap fill before collecting too many samples.
-
-Offline fallback: run the Python fit and upload `mag_base.json`.
-
-When you **ACCEPT** the result on the unit, it also downloads the gap-fill map for the new baseline, so the unit can tell you where to point it to collect the full sphere. The **Installed** screen says how many cells need work, and what's next: **1a FILL GAPS**, or **2 MOUNTED** if coverage is already complete. If the map couldn't be downloaded, it says why and points you to `tern.local`'s **Check for updates**; the old map is deleted either way, so Fill gaps can never work from the previous baseline's cells.
-
-Optionally, in a browser:
-- map.terndiving.com: Review the collected data.  You should have a mostly tolerable coverage of the sphere at this point, but there'll be some weaknesses.
-[TODO: Screenshot]
-
-## Gap Fill (CAL > Fill gaps (1a))
-
-A second, short baseline pass, still **off** the DPV, that collects only the orientations the first pass missed. After the baseline is fitted, the Dive Map server grades its coverage and flags the cells that came out thin or empty. Gap fill shows you those cells and walks you into them. See [calibration-guide.md](calibration-guide.md#baseline-cal--fill-gaps-1a) for more on how targets are chosen and merged.
-
-**Before you start:**
-- A baseline calibration must already be installed on the unit.
-- The unit needs the server's target map for that baseline. Accepting the baseline on the unit downloads it. If you accepted it on the website instead, merged a gap-fill there, or the Installed screen said the map wasn't updated: on `tern.local`, under **Calibration Cloud Sync**, press **Check for updates**. Every press refreshes the map. If the map can't be synced, the reason shows in the result text on that page.
-
-Without either of these, **Fill gaps** shows **Can't start** with the reason. Nothing was collected, so there's nothing to retry.
-
-### The gap-fill screen
-
-```
- 1 [1a] 2  3  FILL GAPS                     4/7
-     N           E           S           W
- 60° [  ][  ][  ][▓▓][  ][  ][  ][  ][  ][  ][  ][  ]
- 30° [  ][██][  ][  ][  ][  ][  ][  ][  ][  ][  ][  ]
-  0° [  ][  ][  ][  ][  ][  ][  ][  ][  ][  ][  ][  ]
--30° [  ][  ][  ][  ][  ][  ][  ][  ][▓▓][  ][  ][  ]
--60° [  ][  ][  ][  ][  ][  ][  ][  ][▓▓][▓▓][  ][  ]
-3 cells left        284° -37°              [\/]
-──────────────────────────────────────────────────
-Fill red & yellow cells
- ( hold: QUIT )            (    FINISH     )
-```
-
-TODO: Add a screen shot of the gap-fill screen here.
-
-**The grid** is every orientation the sensor can point: 12 heading columns (30° each) across, five elevation rows down (straight up at the top, level in the middle, straight down at the bottom). Only the cells the server flagged are your job:
-
-| Cell color | Meaning |
-|---|---|
-| Dark gray | Not a target. The server is happy with this cell, so leave it alone. |
-| Red | Target, no samples yet. |
-| Yellow | Target, partly filled. The number in the cell is its sample count. |
-| Green | Target finished, including its roll coverage (see below). |
-
-- The **white border** marks the cell the unit is pointing into right now, and the **white dot** shows exactly where inside that cell. Steer the dot into a red or yellow cell and hold it there.
-- **`4/7`** (top right) counts finished targets out of the total targets for this session, not out of the whole grid. **`3 cells left`** under the grid is the same thing the other way round.
-- **`284° -37°`** is the heading and elevation you're pointing at, from the same calculation that places the highlight, so the two always agree.
-
-**The orientation box** (lower right) answers a question the grid can't: how the unit is *rolled* while it points into that cell. A cell needs samples from more than one roll, or the fit sees only one side of the problem. The box is a square split into four triangles:
-
-| Triangle | Roll |
-|---|---|
-| Top | Upright |
-| Right | On its right side |
-| Bottom | Upside-down |
-| Left | On its left side |
-
-Each triangle uses the same colors as the grid, for whichever cell you're pointing into right now:
-- **Green**: that roll is covered for this cell (some may already be covered by your earlier baseline, so they start green).
-- **Yellow**: some samples, not enough yet.
-- **Red**: none yet.
-- **Dark gray**: no live orientation to report.
-
-The **white outline** marks the triangle matching your current roll. A cell only turns green on the grid once all four triangles are green. If the grid says you're in the right cell but the box still shows red or yellow, keep pointing the same way and roll the unit onto the side the box is asking for. Upright needs about 3× the samples of the other three.
-
-**Tips:**
-- **Pause, don't sweep.** While the unit is moving, the accelerometer sees your hand's motion as part of "down", so the grid and box can lag or jump. Get near the target, then hold still.
-- **Top and bottom rows: aim for about 65°, not straight up or down.** Near vertical, a small wobble sweeps you across several heading columns and the roll reading is mostly noise. At 65° you're still in the outer row, with heading and roll roughly 12× steadier. See [calibration-guide.md](calibration-guide.md#baseline-cal--fill-gaps-1a) for the numbers.
-- **FINISH (BTN2) ends it early.** Collection finishes on its own when every target is green, but some cells may be physically unreachable. Press FINISH when you've got what you can.
-
-### After collecting
-
-1. If the unit has WiFi and the device is linked, the patch uploads automatically. The **Uploaded** screen is information only, with no accept/reject: a patch is never installed by itself. Press **OK**.
-2. On Dive Map, open the device's **Calibration History**. Your latest baseline row shows a **"New collection available"** badge. Expand it to see what the patch covers, then combine it. That produces a new pending baseline calibration, which you review and **Accept**.
-3. On `tern.local`, press **Check for updates** to pull the merged baseline onto the unit. Until then the unit is still using the old one.
-4. **Mounted and heading cal are fit on top of the baseline.** In the recommended order you haven't done them yet. If you gap-fill an installation that already has them, redo **Mounted (2)** and then **Heading (3)** afterward.
-
-## Mounted Calibration (CAL > Mounted (2))
-
-Device installed on the DPV in its normal position, with motors, batteries and everything else magnetic in place. This calibrates out the scooter's own magnetic signature. See [calibration-guide.md](calibration-guide.md#running-mounted-calibration) for the full procedure.
-
-Each cell of the grid is filled by **one steady hold**: the unit must sit still at the right attitude for about half a second. Swinging through a cell records nothing. That's deliberate: the fit takes "down" from the accelerometer, so a sample taken while the scooter is moving carries a false tilt and is useless.
-
-### The mounted cal screen
-
-```
- 1  1a [2] 3  MOUNTED                       9/36
-     N           E           S           W
-+30  [  ][██][  ][  ][  ][  ][  ][  ][  ][  ][  ][  ]
-  0  [██][██][██][██][██][██][██][  ][  ][  ][  ][  ]
--30  [  ][  ][  ][  ][  ][  ][  ][  ][  ][  ][  ][  ]
-┌────────┐  MOTION [still                    ]
-│  sky   │  HOLD   [██████████████           ]
-│[--●--] │
-│ ground │  210° P+02 R-01
-└────────┘
-──────────────────────────────────────────────────
-Holding...
- ( hold: QUIT )            (    FINISH     )
-```
-
-TODO: Add a screen shot of the mounted cal screen here.
-
-**The grid** is three rows of 12 heading cells: nose up 30°, level, and nose down 30°. Green cells are recorded; red cells are still open. **`9/36`** (top right) counts recorded cells against all 36: every cell is asked for. **FINISH** (BTN2) ends the collection early whenever you like, once at least one cell is in; the server decides whether what you have is enough to fit, and says so if it isn't.
-
-- The **highlight** marks the cell you're in. It's **white** when your attitude is inside that row's window (a cell can fill), and **yellow** when that row is only the nearest one (it can't fill from there yet).
-- The **white dot** shows where you are inside the cell.
-
-**The artificial horizon** (lower left) works like an aircraft's: it tilts with roll and slides up and down with pitch. It shows your error from the *row you're working on*, exaggerated 2× so it's readable from the far end of the scooter, not your raw attitude. The black mark in the middle is the unit's nose. The **brackets** mark how much error is allowed. Put the white horizon line between the brackets and level it, and the brackets turn from yellow to **green**.
-- Level row: within 10° of level in both pitch and roll.
-- Tilted rows: nose up or down 20–40°, within 15° of roll.
-
-**The MOTION bar** shows how much the unit is moving. It needs to be **empty**. The word inside it says what's moving: `still`, `turning` (gyro), or `pushed` / `shaking` (accelerometer). If it won't empty with the scooter resting on its stand, that sensor's calibration is off, not your hands.
-
-**The HOLD bar** fills (cyan) while the unit settles and then records. When it's full it turns green, the cell turns green, and the line reads `Got it - turn`.
-
-The readout below the bars shows heading, pitch and roll. The status line tells you what to do next:
-
-| Message | What to do |
-|---|---|
-| `Level it` / `Nose up to 30` / `Nose down to 30` | Pitch is outside the row's window. |
-| `Level the roll` | Pitch is fine; roll isn't. |
-| `Turn a bit more` | You're within 3° of the line between two cells. A hold won't start there. |
-| `Hold still` | Attitude is right, but the unit is moving. Watch the MOTION bar. |
-| `Holding...` | Recording. Don't move until the HOLD bar is full. |
-| `Got it - turn` | Cell done. Move on to the next one. |
-| `Row done - tilt` / `Row done` | Row complete. Move to a tilted row. |
-| `Done - saving` | All 36 cells are in (or you pressed FINISH). |
-
-### Procedure
-
-The rhythm for every cell is: **move the dot to the center of the next box, wait until it's stable, then wait until the HOLD bar fills.**
-
-1. Open menu (BTN1) → **CAL > Mounted (2)**.
-2. **Level row first, on the stand: all 12 headings.** Turn about 30°, aiming the dot at the center of the next cell (not its edge). Let go, and wait for the MOTION bar to empty. Then wait for the HOLD bar to fill and the cell to turn green. Repeat.
-3. **Then each tilted row: all 12 headings.** Pitch the nose up (or down) until the brackets go green, then use the same rhythm.
-4. At 36/36, or when you press **FINISH**, the unit saves the samples and, with WiFi, uploads them and shows the result. If the server can't fit the samples, the screen says **Fit rejected** with its reason. The upload itself worked, so collect again rather than retrying.
-
-Offline fallback: run the offline fit and upload `mag_mount.json`.
-
-## Fourier Heading Calibration (CAL > Heading (3))
-
-After magnetometer calibration, systematic heading errors (5–20°) typically remain because of the DPV's magnetic geometry. Heading cal collects 12 data points for a Fourier fit, done in the cloud or offline as a fallback, which brings the residual error down to about 2°.
-
-**When to use:** after completing baseline + mounted mag cal. Run it somewhere magnetically clean, not a garage with a concrete floor.
-
-**First, check your compass.** The heading calibration aligns the IMU to an absolute reference. Most technical divers have some kind of compass mounted on their scooter, but it may or may not be accurate. My compass, for example, was ~12° off, and that led to a long series of confusing calibration results. Before aligning the IMU to your compass, make sure the compass is right. The best way is to point your scooter precisely at a distant object on a known bearing (use the alignment sights to get it as exact as you can), then correct whatever error your compass has. That gives you a single-bearing reference. Assuming your compass is round, you should be able to get a good calibration from there.
-
-**Part 1 — On-device collection:**
-
-1. Select **CAL > Heading (3)** from the menu. The display shows:
-   ```
-    1  1a  2 [3] HEADING                    0/12
-   Align to external compass
-   TARGET                              000°
-   INDICATED HDG                        004°
-   ┌────────┐  HOLD [██████████████        ]
-   │horizon │  P+0.8 R-0.4
-   └────────┘  Avg err --
-   ─────────────────────────────────────────
-   Ready - press MARK
-    ( hold: QUIT )            (     MARK      )
-   ```
-   **TARGET** is the heading to line the DPV up on, by your external compass. **INDICATED HDG** is the unit's own uncorrected reading, smaller and gray on purpose: don't try to make the two numbers match. The difference is what this calibration measures. The HOLD bar shows how stable the unit is, and the artificial horizon shows level. The status line says **Not level** (red) or **Hold still** (yellow) until the unit is level and still, and the **MARK** key turns green once it is.
-
-2. Align the DPV to **0° (North)** as shown on your calibrated compass, which is your objective truth. Let the compass settle, and wait for the heading readout to stop changing.
-
-3. Press **MARK** (BTN2). **MARKED** flashes up with this point's error and the next target, and the counter in the top right advances. Then 030°, 060°, and so on through all 12 at 30° intervals.
-
-4. After the 12th mark, the nav device saves `/hdg_samples.csv`. **If the unit has WiFi** and the account is linked, it uploads the file automatically, gets a fitted result back (~15–20 s), and shows the result right there:
-   ```
-    1  1a  2 [3] HEADING                  RESULT
-   1.8°                                    GOOD
-   likely worst error
-   ─────────────────────────────────────────
-   Press ACCEPT to install
-    ( hold: REJECT )          (    ACCEPT     )
-   ```
-   Press **ACCEPT** (BTN2) to install the new heading correction immediately (no reboot needed). Hold **BTN1** for 2 seconds to **REJECT** it and keep whatever was active before.
-
-   **If the unit has no WiFi**, you'll see **No WiFi** instead. The CSV is still saved, so you can upload it later from `tern.local`, or use the manual fallback below.
-
-5. Press **OK** (BTN2) on the **Installed** screen to return to normal navigation.
-
-**Part 2 — Offline fit and upload (fallback only, for when the unit had no WiFi):**
-
-1. Download `/hdg_samples.csv` from the nav device LittleFS.
-2. Run: `python tools/fourier_fit.py hdg_samples.csv`
-3. Upload the resulting `hdg_fourier.json` to nav device LittleFS root.
-4. Reboot. The correction loads automatically on the next boot.
-
-**If one section of the circle came out thin** (for example, only a few of the 12 points landed within some 90° span), the cloud fit detects it automatically. The Dive Map website will show a "thin sector(s)" flag on that calibration, with suggested headings to fill it. See **[Filling a Thin Heading Sector](#filling-a-thin-heading-sector)** below. This only applies to the cloud path; the offline fallback tool doesn't check for it. A thin sector usually points to an unusually bad mounted or baseline calibration. If the calibration up to this step is good, the heading calibration should only be smoothing 3–4° at the worst heading, so the flag shouldn't ever trigger.
-
-### Filling a Thin Heading Sector
-
-If Dive Map flags a thin sector on your heading calibration, you don't need to redo all 12 points. A small web form fills just the gap:
-
-1. Sign in to Dive Map and open your device's **Calibration History**.
-2. The affected heading (hdg) calibration row shows a "thin sector(s)" badge. Expand it to see the gap(s) and the suggested headings to add.
-3. Set the displayed heading to RAW (**DISPLAY > Heading**). RAW is the magnetic heading before the heading cal and the motor offset (`motor_cal.json`) are applied.
-4. For each suggested heading: aim the DPV at that bearing, using the same calibrated-compass method as the original 12-point collection. Read the **indicated** heading off the unit's display, and type both the target and indicated values into the form.
-5. Submit. The website combines your typed points with the original upload and refits, producing a new calibration that isn't active yet, for you to review.
-6. Review the result and press **Accept** on the website.
-7. **This does not update the device yet.** In a separate browser tab, open the web interface at `tern.local`, find **Calibration Cloud Sync**, and press **Check for updates**. That's the step that actually pulls the accepted result onto the device. If you skip it, the website shows an accepted calibration that the unit still isn't using.
-
-## Speed Calibration (CAL > Speed cal)
-
-Speed cal measures how accurately the flow sensor reports speed: you travel a known distance and the unit times it. The computed k-factor is saved and averaged with up to 5 previous runs.
-
-**Workflow:**
-
-1. Select **CAL > Speed cal** from the menu. The menu closes and a distance-selection screen appears:
-   ```
-   SPEED CAL
-   Set distance:
-       300 ft
-   BTN1: change
-   BTN2: confirm
-   ```
-2. Press **BTN1** to cycle through distances: 150 → 200 → 250 → 300 → 350 → 400 → 450 → 500 → back to 150 ft. Press **BTN2** to confirm.
-
-3. The display switches to a waiting screen. **Start the DPV.** The run begins automatically once the flow sensor detects motion above ~0.3 m/s.
-
-4. Travel the selected distance in a straight line at typical cruising speed. The display shows a large elapsed-time counter:
-   ```
-   SPEED CAL
-   RUNNING
-        47
-   300ft target
-   Stop=slow/turn
-   ```
-
-5. The run ends automatically when either:
-   - **Flow drops** below ~0.08 m/s (DPV stopped), or
-   - **Heading changes more than 90°** after at least 30 seconds of stable heading (cross the finish and swing the scooter to signal you're done)
-
-   Runs shorter than 5 seconds are discarded and the device returns to WAITING.
-
-6. The result screen appears:
-   ```
-   SPEED CAL
-   300ft  87s
-   Cur: 1.000
-   New: 1.156
-   ─────────────
-   > RESET+ACCEPT
-     ACCEPT
-     REJECT
-   ```
-   - **RESET+ACCEPT**: discard measurement history, start fresh with this single run
-   - **ACCEPT**: add this run to the rolling average (up to 6 measurements kept)
-   - **REJECT**: discard this result, return to navigation unchanged
-
-7. Press **BTN1** to cycle choices, **BTN2** to confirm. The active k-factor updates immediately.
-
-**Tips:**
-- A calm, straight stretch of at least 150 ft works best: a pool lane, a wall, a pier.
-- You don't actually need to be mounted on a scooter for this. You can duct tape the unit to a stick and drag it through shallow water while wading along a measured distance.
-- The longer the distance, the more accurate the result.
-- After 3–6 runs the rolling average stabilizes; use ACCEPT each time.
-- Use RESET+ACCEPT when the DPV has been serviced or the impeller changed.
+- **Hold BTN1 for 2 seconds to throw the work away:** QUIT while collecting,
+  REJECT on a result. The left key fills red while you hold it; let go early and
+  nothing happens. A quick press only shows a reminder, so a stray tap can't
+  cost you a collection.
+- Holding both buttons for 2 seconds still resets the display, and never quits a
+  cal.
+
+**Every step uses the same cloud round trip.** When collection finishes, the unit
+uploads the samples (if it has WiFi and a linked account), the server fits them,
+and the display shows **Uploading** followed by the result: one number, with
+**GOOD**, **OK** or **POOR** beside it. **ACCEPT** (BTN2) installs it
+immediately, with no reboot, and the next screen says what's next. Holding BTN1
+to **REJECT** keeps whatever was active before. With no WiFi, the samples are
+still saved to the unit, and you can upload them later from `tern.local`, or use
+the offline Python fit.
+
+**Before a dive, check it.** The 4-point check is in
+[Checking a finished calibration](user-calibration-guide.md#checking-a-finished-calibration),
+and is also step one of [The Night Before](#the-night-before) below.
 
 ---
 
@@ -634,7 +389,7 @@ Units (metric m/m·min⁻¹ vs imperial ft/ft·min⁻¹) are a runtime toggle, D
 - **"NO LINK" on display**: check the Serial1 wiring between devices. The nav device should be sending packets.
 - **Heading off by a constant amount**: run **CAL > Heading (3)** to collect 12-point data. It cloud-fits and shows the result automatically if the unit has WiFi. If errors are large (>10°) or inconsistent, redo mounted mag cal first.
 - **Heading varies by orientation (tilt-dependent)**: soft-iron distortion isn't fully corrected. Redo mounted mag cal (it cloud-fits automatically, same as above).
-- **One part of the compass rose is worse than the rest after the heading cal**: check Dive Map's Calibration History for a "thin sector(s)" flag on that calibration and fill it via the web form rather than redoing all 12 points. See **[Filling a Thin Heading Sector](#filling-a-thin-heading-sector)**.
+- **One part of the compass rose is worse than the rest after the heading cal**: check Dive Map's Calibration History for a "thin sector(s)" flag on that calibration and fill it via the web form rather than redoing all 12 points. See **[If one section of the circle comes out thin](user-calibration-guide.md#if-one-section-of-the-circle-comes-out-thin)**.
 - **Position drifts without moving**: check the gyro calibration (it should be done at rest). The flow sensor may be noisy; increase `FLOW_AVG_PERIOD_S`.
 - **GPS shows speed when stationary**: GPS position jitter creates phantom speed. The SOG deadband + COG coherence filter should reject this. Enable `GPS_DIAG_ENABLE` in nav_main.cpp to see raw SOG/COG and the filter's decisions.
 - **GPS not used for position**: make sure `DEFAULT_USE_GPS_POSITION = true` in config.h. GPS needs a clear view of the sky (not available underwater).

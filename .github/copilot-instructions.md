@@ -86,7 +86,7 @@ Modify `ImuConfig` or `AxisMap` in [main.cpp](firmware/src/main.cpp) before `imu
 - Check WHO_AM_I register (LSM6DS3 = 0x69, LIS3MDL = 0x3D)
 - Verify I2C address (SDA=23, SCL=22 in [board_pins.h](firmware/src/board_pins.h))
 - Serial.print() raw reads to confirm data flow
-- See [calibration-guide.md](docs/calibration-guide.md) for sensor setup
+- See [dev-calibration-guide.md](docs/dev-calibration-guide.md) for sensor setup
 
 ## Critical Files Reference
 - [firmware/src/main.cpp](firmware/src/main.cpp) — App entry point, sensor init, main loop  

@@ -62,8 +62,10 @@ collection was fitted the old all-samples way instead, which is the known-bad fi
 
 ### Complete Workflow
 
-See [../docs/calibration-guide.md](../docs/calibration-guide.md) for the full step-by-step
-procedure including what to expect at each stage and how to verify the result.
+See [../docs/user-calibration-guide.md](../docs/user-calibration-guide.md) for the full
+step-by-step procedure, what to expect at each stage, and how to verify the result.
+[../docs/dev-calibration-guide.md](../docs/dev-calibration-guide.md) is the engineering
+companion: file formats, gate constants, frame conventions and these tools.
 
 ## Track assembly and correction — moved to Divemap
 

@@ -2520,7 +2520,7 @@ static void drawRollWidget(const CalProgressPacket& pkt) {
     // IS reported, not withheld: reconstructRoll()'s degenerate guard never
     // fires in practice and returns 0.0 = upright there, which with only
     // cos(elevation) of gravity across the tracked axis is largely sensor
-    // noise. See docs/calibration-guide.md's "aim for the edge of the band".
+    // noise. See docs/dev-calibration-guide.md's "aim for the edge of the band".
     if (pkt.current_roll_sector >= 0 && pkt.current_roll_sector < MAG_CAL_ROLL_SECTORS) {
         int x0, y0, x1, y1;
         switch (pkt.current_roll_sector) {

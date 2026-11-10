@@ -372,7 +372,7 @@ constexpr int MAG_CAL_GAPFILL_MIN_SAMPLES = 20;
 // ---------------------------------------------------------------------------
 
 // Upright / right-side / upside-down / left-side — reuses the plain-language
-// vocabulary docs/calibration-guide.md's accelerometer-calibration section
+// vocabulary docs/dev-calibration-guide.md's accelerometer-calibration section
 // (and the `accel_orient` serial diagnostic) already established.
 constexpr int MAG_CAL_ROLL_SECTORS = 4;
 

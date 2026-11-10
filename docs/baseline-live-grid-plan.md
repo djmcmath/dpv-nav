@@ -183,7 +183,8 @@ per unit from the last accepted fit is a follow-up.
 
 - `CLAUDE.md`: the Baseline bullet (~209), which says "No live grid", and the gap-fill
   "Unlike baseline cal" bullet (~243).
-- `calibration-guide.md` and `user-guide.md`: the baseline procedure.
+- `user-calibration-guide.md`: the diver-facing baseline procedure.
+- `dev-calibration-guide.md`: the lock gate, end conditions and offline fallback.
 - `mag_cal_orient.h`: the "WHY THIS IS NOT THE SEVENTH FAILED ATTEMPT" block. Its
   precondition, "runs ONLY with a good baseline cal", now has a second form: a locked
   in-session bootstrap.

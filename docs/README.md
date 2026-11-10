@@ -13,7 +13,8 @@ Three volumes, in the order you'd actually use them.
 | **0** | **[System Overview](overview.md)** | Always first. What it is, how dead reckoning works, how accurate it honestly is, the four modules, the design goals. |
 | **1** | **[Manufacturing Guide](manufacturing-guide.md)** | You've decided to build one. Variant choices, BOM, PCBs, 3D printing, milling, potting the flow meter. |
 | **2** | **[Assembly Guide](assembly-guide.md)** | You have a box of parts. Soldering, wiring, mechanical assembly, leak testing, firmware, first boot. |
-| **3** | **[User Guide](user-guide.md)** | You have a working device. First-time setup, calibration, the dive routine, menus, screens, troubleshooting. |
+| **3** | **[User Guide](user-guide.md)** | You have a working device. First-time setup, the dive routine, menus, screens, troubleshooting. |
+| **3a** | **[Calibration Guide](user-calibration-guide.md)** | Before the first dive, and whenever the physical setup changes. Why each step exists, the order and what invalidates what, the per-step procedure and screens, what a good result looks like. Split out of Vol 3 on 2026-11-09. |
 
 > **💡 Note** — volumes 1 and 2 are **drafts**. They carry real, hard-won content in
 > some sections and a **📝 TBD** block in others, which marks a section that is
@@ -29,7 +30,7 @@ rather than building or diving a unit.
 
 | Document | Covers |
 |---|---|
-| [calibration-guide.md](calibration-guide.md) | The full calibration system: file formats, the magnetometer two-stage fit, coverage gap-filling, gyro/accel, the Fourier heading fit, speed cal, serial diagnostics, the storage API. |
+| [dev-calibration-guide.md](dev-calibration-guide.md) | The calibration system from the inside: file formats, the magnetometer two-stage fit, coverage gap-filling, gyro/accel, the Fourier heading fit, speed cal, gate constants, serial diagnostics, the storage API. |
 | [ahrs-orientation.md](ahrs-orientation.md) | The Mahony filter, Euler extraction, update rate, quaternion access. **Read before touching an axis map.** |
 | [mag-temperature-compensation.md](mag-temperature-compensation.md) | Magnetometer thermal drift: what ST publishes, what was measured, why readings are corrected rather than headings, and how to refit the coefficients. |
 | [data-logging-guide.md](data-logging-guide.md) | Log levels, the CSV and binary record formats, `pos_src`, file storage, upload, and how to analyze a dive. |

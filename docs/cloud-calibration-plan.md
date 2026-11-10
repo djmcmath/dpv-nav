@@ -12,7 +12,7 @@ Today: **CAL > Baseline** (or **Mounted**) fills a bin-coverage grid, saves a ra
 LittleFS, and the diver has to carry that CSV to a laptop, run
 `tools/mag_calibration.py`, and upload the resulting `mag_base.json`/`mag_mount.json`
 back through the on-device web file manager (see
-[calibration-guide.md](./calibration-guide.md)).
+[dev-calibration-guide.md](./dev-calibration-guide.md)).
 
 Target: the unit uploads the CSV itself once the bin grid completes, gets a fitted
 result and an RMS-based verdict back over the same connection, and shows the diver
@@ -158,7 +158,7 @@ existing "DONE" screen and CSV save):
   true. Both boards now take firmware updates over WiFi from `tern.local`, so a
   compiled-in constant can be changed without USB.
 - **Where the current bin-aware collector's source lives wasn't pinned down precisely**
-  during this planning pass (CLAUDE.md and calibration-guide.md describe its behavior,
+  during this planning pass (CLAUDE.md and dev-calibration-guide.md describe its behavior,
   but the source file wasn't conclusively located — likely `menu.cpp`/`display_main.cpp`/
   `nav_main.cpp`). Needs a quick grep for `mag_baseline_samples`/`mag_mounted_samples`
   before touching the completion hook in step 1 above.
@@ -223,7 +223,7 @@ existing "DONE" screen and CSV save):
 5. ✅ New display functions and full Serial1 protocol (see Status below).
 6. ✅ Wired accept → copy pending file over active + `loadCalibration()`; reject →
    discard pending file. Both call `cloud::respondToCalibration()`.
-7. Update [calibration-guide.md](./calibration-guide.md) once this ships to real
+7. Update [dev-calibration-guide.md](./dev-calibration-guide.md) once this ships to real
    hardware — done in doc form already (pointer added), full rewrite pending a real
    field test.
 

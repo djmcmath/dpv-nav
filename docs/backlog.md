@@ -80,17 +80,17 @@ Silent loss. The diver gets no error, just bad data later.
   water a while, stop logging?" All three signals are already on the nav board (`depth::`,
   GPS fix quality in `NavPacket`, DR position). Not designed yet.
 
-- [ ] **The cal OFFLINE screen promises nothing is lost, then nothing retries**
+- [ ] **The cal OFFLINE screen promises nothing is lost, then nothing retries** *(half done)*
 
-  `showCloudCalOffline` (~`display.cpp:1362`), shown when there's no WiFi at cal completion,
-  says "Raw samples are saved — nothing is lost" and stops there. There is no auto-retry
-  when WiFi comes back and no pointer to tern.local, where the per-file "Upload to cloud"
-  action actually lives. A diver who believes the screen never uploads the cal.
+  `showCloudCalOffline`, shown when there's no WiFi at cal completion, used to say "Raw
+  samples are saved — nothing is lost" and stop there. Since the unified cal screens
+  (0.7.26) it says the samples are on the unit and "Next: upload at tern.local", where the
+  per-file "Upload to cloud" action lives. **Still open:** there's no auto-retry when WiFi
+  comes back.
 
   *Where:* the retry path already exists — `runCalUploadAndNotify()` in `nav_main.cpp`
-  behind `POST /api/cal/retry-upload`. Two independent fixes: put the tern.local pointer on
-  the screen, and retry orphaned cal CSVs on network join the way `log_sync` already does
-  for dive logs.
+  behind `POST /api/cal/retry-upload`. Retry orphaned cal CSVs on network join the way
+  `log_sync` already does for dive logs.
 
 - [ ] **Thermal compensation has never been tested on the cold side**
 
@@ -110,20 +110,6 @@ Silent loss. The diver gets no error, just bad data later.
 ## Tier 2 — Trust the numbers
 
 Nothing is lost, but something is unverified, unvalidated, or invisible when it goes stale.
-
-- [ ] **Nav-board status LED: built 2026-10-14, bench test owed**
-
-  `util/status_led.h` (legend in `docs/user-guide.md`), host-tested, builds — never flashed.
-  Same change narrowed the log's `'G'` tag to gate-accepted fixes and latched the GPS enable
-  pin (GPIO32) and the NeoPixel rail (GPIO2) low through deep sleep. Owed on hardware:
-  - the red → amber → green-blink → solid-green sequence outside, and in the decoded log no
-    `'G'` row before the gate's first acceptance;
-  - fault (GPS unplugged) and halt (display link unplugged at boot) patterns;
-  - **OFF current before and after**, GPS attached. The GPS latch assumes the breakout pulls
-    EN up when the pad floats; ~20 mA less in OFF confirms it, no change means it was harmless.
-    Check nothing is on STEMMA QT first — GPIO2 powers that port too;
-  - a wake from OFF still boots normally (GPIO0 is left high-Z, never held, for that reason);
-  - brightness through the real housing in daylight (`status_led::LEVEL`, `HEARTBEAT`).
 
 - [ ] **OTA bootloader rollback has never been tested**
 
@@ -158,19 +144,73 @@ Nothing is lost, but something is unverified, unvalidated, or invisible when it 
   COBS framing plus a CRC turns a silent wrong value into a detectable dropped packet, which
   the display can then show rather than trust.
 
-- [ ] **The PCB files don't show the backlight jumper**
+- [ ] **A stale display-board PCB copy still doesn't show the backlight jumper**
 
   The display unit has a hand-run jumper from the EyeSPI `Lite` pad (pad 2) to A5/GPIO4,
   added and bench-tested 2026-09-18, and firmware drives it in `display::setBacklight()` /
-  `sleepForPowerOff()`. Both the current `hardware/schematic/display_board/display_board.kicad_pcb`
-  and "Rev A" still show `unconnected-(U1-Lite-Pad2)` — so reading the PCB alone leads to the
-  conclusion that the backlight can't be controlled from firmware, which was true until the
-  jumper and is now wrong.
+  `sleepForPowerOff()`. **Mostly corrected — audited 2026-11-09:**
+  - `display_board.kicad_pcb` / `.kicad_sch` — **fixed.** Lite pad on net 20
+    `Net-(A1-IO4{slash}A5)`, routed on F.Cu and B.Cu, schematic wire present, committed.
+  - `display_board_Rev_B/display_board_Rev_0_gopro_housing.kicad_pcb` — **fixed.** Same net,
+    5 routed segments.
+  - `display_board_gopro_housing.kicad_pcb` / `.kicad_sch` — **still wrong.** Lite pad on
+    net 37 `unconnected-(U1-Lite-Pad2)`, with `A1-IO4{slash}A5-Pad10` dangling too.
+
+  *It is one circuit, not three.* Net-list comparison: `display_board` and the Rev B file
+  have **identical** net lists, and the *only* electrical difference between `display_board`
+  and the top-level gopro file is this jumper — nothing else diverges anywhere. The housing
+  changes the outline and the retention, not the connections: Rev B drops the two M3
+  mounting holes (hence 9 Edge.Cuts items vs 8), and mounting holes carry no nets, which is
+  why the net lists match. The top-level gopro file has the *same* outline and the same 9
+  footprints as `display_board`, so it is not a housing variant at all — it is a stale copy
+  that missed the fix.
+
+  *Do now, cheap:* sync the jumper into `display_board_gopro_housing.*` so every copy is
+  truthful, regardless of how the housing question lands. A stale file that reads
+  "backlight uncontrollable" is the trap here, and it costs nothing to close.
+
+  *Open, and NOT a file-naming decision:* which housing the display unit ships in. The board
+  is expected to be the same either way — gopro housing or custom-milled Delrin — with the
+  same connections. The gate is building **at least one fully operable milled-Delrin display
+  unit** before committing to that path. Until that unit exists, keep both housing layouts
+  alive; don't consolidate the PCB files on the assumption that one housing won.
 
   *Note:* trust `TFT_BL` in `board_pins.h` over the KiCad netlist for the assembled unit. The
   same session corrected `TFT_RST` 22 → 23, which was **not** a wiring change — IO23 ↔ EyeSPI
   pad 8 was always routed (net 4) and only the constant was wrong, so the panel reset line
   had been floating.
+
+- [ ] **`water_temp_c` decoupled from the water for a whole dive, cause unknown**
+
+  On 2026-11-08 (`tools/logs/20261108-001.csv`) the MS5837's temperature sat flat at
+  14.2–14.4 °C for 90 minutes, including a descent to 35 m straight through a thermocline,
+  with two clean exponential excursions (τ 9–23 s, both directions) to 10.47 °C and
+  10.99 °C. **The excursions were the correct readings.** The same unit on the same
+  unchanged firmware read 15.5–16.0 °C at the surface and 9.7 °C mean below 20 m on
+  2026-10-24 and 2026-10-30, crossing the thermocline promptly both times.
+
+  *Ruled out 2026-11-09:* the compensation math (checked against the MS5837-30BA datasheet
+  — dT, OFF/SENS, the second-order branch, C5/C6 indexing), the log path (no filtering,
+  int16 at 0.01 °C), and a firmware change (`git log` shows `ms5837.cpp` untouched between
+  the good dives and this one). The I2C bus was healthy too — depth tracked all dive, so
+  the D1 reads were landing. Depth is unaffected: at 69.1–69.6 min the temperature swung
+  1.3 °C while depth held 34.72–34.79 m, and the compensation wants the die temperature,
+  which is what it measures.
+
+  *Also ruled out:* tracking the housing instead of the water. The reading was flat within
+  0.2 °C while *both* candidate environments moved several degrees (water 14.5 → 10.5,
+  housing via `mag_temp_c` 16.9 → 13.5), so it was following neither. The probe is on the
+  stern of the nav tube and has not moved in many dives, which makes a trapped bubble
+  possible but not obviously likely.
+
+  *Done 2026-11-09, independent of the cause:* failed ADC reads are counted and dropped
+  rather than recompensated as fresh samples, the counters are on `tern.local`'s
+  Diagnostics panel, and conversions are paced at `ms5837::SAMPLE_PERIOD_MS` (500 ms, from
+  100% ADC duty at OSR 8192) so self-heating no longer biases the reading warm.
+
+  *Priority: low.* Nothing on the unit or on Dive Map uses this column. Left here so the
+  next occurrence is recognized rather than re-investigated — and `tern.local` will now
+  say whether the sensor was answering at all.
 
 ---
 
@@ -267,9 +307,10 @@ Features and UX with a design already thought through.
 - [ ] **Mounted cal: do the tilted rows earn their time?**
 
   Every mounted cal so far has filled the whole +30 and −30 rows, not just the 6 spread
-  cells per tilted row the firmware needs today (`MAG_CAL_SECTORS_MID`, `kNeedTotal` = 24),
-  and the unified cal screens (2026-11-09) raise auto-finish to all 36 cells to keep
-  encouraging that. Nobody has checked whether the extra cells change the result.
+  cells per tilted row the firmware needed until 0.7.26, and the unified cal screens
+  raised auto-finish to all 36 cells (`MAG_CAL_SECTORS_MID` = 12, `kNeedTotal` = 36) to
+  keep encouraging that, with FINISH available at any time. Nobody has checked whether the
+  extra cells change the result.
 
   What the server does with them: the mounted correction is fitted from the **level row
   only** (≥ `MIN_MOUNTED_LEVEL_SAMPLES` = 30 still, level samples, no azimuth gap over
@@ -281,8 +322,9 @@ Features and UX with a design already thought through.
 
   *Analysis:* refit past mounted CSVs with the tilted rows thinned (all 12, the 6-spread
   rule, two dwells per row, none) and compare b_z, its standard error, and the heading
-  residuals at tilt. If thinning changes nothing, drop auto-finish back to 24 or lower in
-  `mounted_dwell.h` and tell divers they can stop early. The analysis runs in dive-map;
+  residuals at tilt. If thinning changes nothing, drop `MAG_CAL_SECTORS_MID` in
+  `config.h` back to 6 or lower (the dwell tests are written in terms of it) and tell
+  divers they can stop early. The analysis runs in dive-map;
   the rule it decides lives here.
 
 - [ ] **Calibration walkthrough in the user guide**
@@ -293,9 +335,9 @@ Features and UX with a design already thought through.
   "done" looks like, and what each result means.
 
   *Images:* `tools/cal_screen_mock/` renders every screen (`node
-  tools/cal_screen_mock/render.js` → `png/`). Those are the 2026-11-09 design mockups, so
-  bring `screens.js` in line with the shipped `display.cpp` and re-render before they go
-  into the guide. Depends on the cal screen redesign shipping first.
+  tools/cal_screen_mock/render.js` → `png/`). `screens.js` was brought in line with
+  `display.cpp` when the redesign was built (0.7.26), so they're ready to use; re-check
+  against the shipped build first. Unblocked once 0.7.26 is out.
 
 ---
 
@@ -311,6 +353,17 @@ Real, small, not urgent. Good candidates when something above is blocked on hard
   cleared by hand first. Wanted: when a log opens, free what its level could need, deleting
   already-uploaded logs first (`log_sync::isUploaded`), and warn on the display if it can't.
 
+- [ ] **The status LED says nothing useful in dive mode**
+
+  *Low priority.* The LED is tested and works (see Settled). In dive mode it only indicates
+  that it's in dive mode — correct, and arguably enough, since it isn't the primary display
+  or indicator and nothing is lost by it staying quiet. But it's an always-visible channel
+  that's currently idle for the whole dive, and there is probably *something* worth putting
+  on it. Open question is what: candidates are log-write health (the Tier 4 item above fails
+  silently today), remaining log space, battery state, or a cal/sensor fault that the diver
+  would otherwise only find on the display. Pick one that matters without needing to be read
+  as a legend at depth — see the "minimize presses / preserve awareness" principle.
+
 - [ ] **The logging integration example hardcodes roll and pitch to zero**
 
   `docs/logging-integration-example.cpp:122-123` carries two literal TODOs to extract them
@@ -324,13 +377,25 @@ Real, small, not urgent. Good candidates when something above is blocked on hard
 Decisions already made, recorded so they stop costing time. If one of these comes back up,
 the answer is here, not in fresh analysis.
 
+- **Nav-board status LED works as designed** — *bench + in-water tested, closed 2026-11-09.*
+  Built 2026-10-14 (`util/status_led.h`, legend in `docs/user-guide.md`), now fully tested.
+  GPS indication works well, and dive/surface mode reads correctly (indirectly). No rework
+  owed; the only remainder is the open Tier 4 question of what else it could report in dive
+  mode.
+
+- **Mast-mounted GPS indicator board — built, not needed** — *2026-11-09.* A second NeoPixel
+  indicator board was built and works correctly, but reading the NeoPixel on the nav board
+  is easier than looking up into the mast, so it earns nothing in practice. Good build, not
+  worth integrating or maintaining. Don't re-propose remote/mast indicators unless the nav
+  board itself becomes hard to see.
+
 - **Near-vertical roll noise in gap-fill** — *closed 2026-09-18.* "Noise near vertical is just
   a part of the game." Roll credit near vertical is largely noise and stays that way;
   `reconstructRoll`'s 1e-6 g degenerate guard never fires and returns 0.0 = sector 0 =
   UPRIGHT, so at true vertical the device credits "upright" rather than refusing. A gate
   (require cos(pitch) ≥ 0.1) would stop the grid claiming roll diversity it doesn't have, at
   the cost of rejecting samples the diver worked to collect. The mitigation is technique —
-  work the ~65° band edge, not the pole — documented in `docs/calibration-guide.md`.
+  work the ~65° band edge, not the pole — documented in `docs/dev-calibration-guide.md`.
 
 - **TLS CA pinning removed, not made refreshable** — *2026-08-27.* `CLOUD_ROOT_CA_PEM` and
   `rootCaConfigured()` are gone; every `WiFiClientSecure` in `cloud_client.cpp` calls

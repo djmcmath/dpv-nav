@@ -6,6 +6,7 @@
 #include "ota.h"
 #include "../util/waypoints.h"
 #include "../util/boot_log.h"
+#include "../sensors/depth.h"
 #include "../util/log_names.h"
 #include "../nav_main.h"
 #include <ArduinoJson.h>
@@ -136,6 +137,11 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
     was still being written when the unit went down was swept regardless -- report that,
     it means the fix below didn't hold.</div>
   <div id="bootlog">Loading...</div>
+  <div class="label" style="margin-top:.6rem">Depth sensor -- I2C reads since boot. A read
+    that fails leaves the chip's previous raw value in place, so the driver drops the cycle
+    rather than reporting it again as a new sample. A climbing error count with the unit
+    sealed means the Bar30's cable or connector, not the water.</div>
+  <div id="depthstatus">Loading...</div>
 </div>
 <table>
   <thead><tr>
@@ -316,6 +322,24 @@ async function loadBootLog() {
     }).join('');
   } catch (e) {
     el.textContent = 'Could not load boot history.';
+  }
+}
+async function loadDepthStatus() {
+  const el = document.getElementById('depthstatus');
+  try {
+    const d = await fetch('/api/depth-status').then(r => r.json());
+    if (!d.present) { el.textContent = 'No depth sensor detected (J3 unpopulated, or it failed its boot CRC check).'; return; }
+    const errs = d.adc_errors + d.cmd_errors;
+    const colour = errs ? '#e63946' : '#8ecae6';
+    let txt = `${d.good_samples} good sample${d.good_samples === 1 ? '' : 's'}, ` +
+              `${d.adc_errors} failed ADC read${d.adc_errors === 1 ? '' : 's'}, ` +
+              `${d.cmd_errors} failed command${d.cmd_errors === 1 ? '' : 's'}`;
+    if (errs) txt += ` -- last ${Math.round(d.since_last_error_ms / 1000)} s ago`;
+    txt += `. Now reading ${d.depth_m.toFixed(2)} m, ${d.temp_c.toFixed(2)} \u00b0C (die temperature,`
+         + ` only water temperature insofar as the probe is coupled to the water).`;
+    el.innerHTML = `<span style="color:${colour}">${txt}</span>`;
+  } catch (e) {
+    el.textContent = 'Could not load depth sensor status.';
   }
 }
 function toggleSelectAll() {
@@ -795,6 +819,7 @@ async function startFirmware() {
 }
 load();
 loadBootLog();
+loadDepthStatus();
 loadWaypoints();
 loadFirmware();
 loadWifi();
@@ -879,6 +904,26 @@ static void handleFsInfo() {
 
 static void handleBootLog() {
     server.send(200, "application/json", boot_log::statusJson());
+}
+
+static void handleDepthStatus() {
+    ms5837::Health h = depth::health();
+    String json = "{\"present\":";
+    json += depth::isPresent() ? "true" : "false";
+    json += ",\"good_samples\":";
+    json += String(h.goodSamples);
+    json += ",\"adc_errors\":";
+    json += String(h.adcReadErrors);
+    json += ",\"cmd_errors\":";
+    json += String(h.cmdWriteErrors);
+    json += ",\"since_last_error_ms\":";
+    json += String(h.lastErrorMs ? millis() - h.lastErrorMs : 0);
+    json += ",\"depth_m\":";
+    json += String(depth::getDepth_m(), 2);
+    json += ",\"temp_c\":";
+    json += String(depth::getTemp_c(), 2);
+    json += "}";
+    server.send(200, "application/json", json);
 }
 
 static void handleDownload() {
@@ -1273,6 +1318,7 @@ void init() {
     server.on("/api/files",   HTTP_GET,  handleFileList);
     server.on("/api/fs-info", HTTP_GET,  handleFsInfo);
     server.on("/api/boot-log", HTTP_GET, handleBootLog);
+    server.on("/api/depth-status", HTTP_GET, handleDepthStatus);
     server.on("/api/download",HTTP_GET,  handleDownload);
     server.on("/api/delete",  HTTP_GET,  handleDelete);
     server.on("/api/upload",     HTTP_POST, handleUploadComplete, handleUpload);

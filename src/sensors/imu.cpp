@@ -606,9 +606,6 @@ static bool magFit2DSolve() {
 // Once a bin reaches the green threshold, further samples are rejected for that bin.
 // This prevents oversampling of easy orientations and produces a more balanced fit.
 
-// Maximum total samples we ever store across all bins
-static constexpr int BIN_CAL_MAX_SAMPLES = 60 * MAG_CAL_BIN_GREEN_THRESHOLD * 2;  // 2160
-
 // Accel and gyro are stored as scaled int16, not float: 24 bytes a sample
 // against 34, which is 21 KB less of the heap this buffer has starved before
 // (see magBinCalFreeSamples). The steps are 0.12 mg and 0.057 deg/s, both
@@ -824,13 +821,14 @@ static baseline_boot::Session  g_boot;
 static BinCalSample g_baselineLast{};
 static bool         g_hasBaselineLast = false;
 
-// Baseline only: set by magBinCalFinishBaseline() when the diver declares the
-// session done, or auto-set by magBinCalTick() when the sample buffer fills
-// up first. Baseline has no bin/grid completion concept anymore, so this is
-// the only source of truth for magBinCalIsComplete() in that mode.
-static bool g_baselineUserDone = false;
+// Set by magBinCalFinishBaseline() when the diver presses FINISH, in any bin
+// cal mode, or by magBinCalTick() when baseline's sample buffer fills first.
+// Baseline has no bin/grid completion concept, so this is the only source of
+// truth for magBinCalIsComplete() in that mode; gap-fill and mounted also
+// complete on their own once every cell they need is filled.
+static bool g_userDone = false;
 
-// Set alongside g_baselineUserDone only on the buffer-full path, so the
+// Set alongside g_userDone only on the buffer-full path, so the
 // display can say *why* the session ended instead of just "Done".
 static bool g_baselineMaxSamplesReached = false;
 
@@ -890,12 +888,12 @@ bool magBinCalBegin(BinCalMode mode, const uint8_t* targets60,
     g_roughMin[0] = g_roughMin[1] = g_roughMin[2] = INT16_MAX;
     g_roughMax[0] = g_roughMax[1] = g_roughMax[2] = INT16_MIN;
     g_roughScanSampleCount = 0;
-    g_baselineUserDone = false;
+    g_userDone = false;
     g_baselineMaxSamplesReached = false;
     g_boot.reset();
     g_hasBaselineLast = false;
 
-    g_binSamples = (BinCalSample*)malloc(BIN_CAL_MAX_SAMPLES * sizeof(BinCalSample));
+    g_binSamples = (BinCalSample*)malloc(MAG_CAL_BIN_MAX_SAMPLES * sizeof(BinCalSample));
     if (!g_binSamples) {
         Serial.println("[BIN_CAL] ERROR: malloc failed for sample buffer");
         return false;
@@ -913,7 +911,7 @@ bool magBinCalBegin(BinCalMode mode, const uint8_t* targets60,
         int remaining = 0, total = 0;
         magBinCalGapFillProgress(remaining, total);
         Serial.printf("[BIN_CAL] Started %s cal (%s), %d bins, %d targeted cells, max %d samples\n",
-                      modeName, phaseName, g_binCalBinCount, total, BIN_CAL_MAX_SAMPLES);
+                      modeName, phaseName, g_binCalBinCount, total, MAG_CAL_BIN_MAX_SAMPLES);
         if (total == 0) {
             // Targets synced, but the server says nothing needs work. Still a
             // valid session (the diver may know better than a stale map), just
@@ -922,7 +920,7 @@ bool magBinCalBegin(BinCalMode mode, const uint8_t* targets60,
         }
     } else {
         Serial.printf("[BIN_CAL] Started %s cal (%s), %d bins, max %d samples\n",
-                      modeName, phaseName, g_binCalBinCount, BIN_CAL_MAX_SAMPLES);
+                      modeName, phaseName, g_binCalBinCount, MAG_CAL_BIN_MAX_SAMPLES);
     }
     return true;
 }
@@ -980,12 +978,12 @@ static bool baselineTick(const Vec3i16& rawMagSensor, const Vec3f& accelCal, con
         g_baselineLast.z == s.z) {
         return false;
     }
-    if (g_binSampleCount >= BIN_CAL_MAX_SAMPLES) {
+    if (g_binSampleCount >= MAG_CAL_BIN_MAX_SAMPLES) {
         // Buffer's full and the diver hasn't pressed BTN2 -- auto-finish
         // rather than silently discarding samples forever. Without this,
         // the sample count just stops climbing with no indication why.
-        if (!g_baselineUserDone) {
-            g_baselineUserDone          = true;
+        if (!g_userDone) {
+            g_userDone                  = true;
             g_baselineMaxSamplesReached = true;
             Serial.println("[BIN_CAL] Sample buffer full -- auto-finishing baseline collection");
         }
@@ -1117,7 +1115,7 @@ bool magBinCalTick(float pitch_deg, float heading_deg, const Vec3i16& rawMagSens
             }
         }
 
-        if (g_binSampleCount >= BIN_CAL_MAX_SAMPLES) return false;
+        if (g_binSampleCount >= MAG_CAL_BIN_MAX_SAMPLES) return false;
 
         BinCalSample s = makeBinCalSample(rawMagSensor, accelCal, gyroCal, 0);
         s.dev_bin  = (int8_t)gbin;
@@ -1162,7 +1160,7 @@ bool magBinCalTick(float pitch_deg, float heading_deg, const Vec3i16& rawMagSens
     // end, but a full buffer must fail closed rather than write past it.
     const bool commit = (action == mounted_dwell::Action::COMMIT);
     const int  slot   = commit ? MAG_CAL_BIN_GREEN_THRESHOLD - 1 : g_mountedDwell.captured() - 1;
-    if (g_binSampleCount + MAG_CAL_BIN_GREEN_THRESHOLD > BIN_CAL_MAX_SAMPLES) return false;
+    if (g_binSampleCount + MAG_CAL_BIN_GREEN_THRESHOLD > MAG_CAL_BIN_MAX_SAMPLES) return false;
     g_binSamples[g_binSampleCount + slot] =
         makeBinCalSample(rawMagSensor, accelCal, gyroCal, (uint8_t)g_mountedDwell.dwellNumber());
     if (commit) {
@@ -1182,7 +1180,24 @@ bool magBinCalBaselineGridLive() {
 }
 
 bool magBinCalFinishBaseline() {
-    if (!g_binCalActive || binCalIsMounted()) return false;
+    if (!g_binCalActive) return false;
+
+    // Mounted: any time after the first cell. g_binSampleCount only ever
+    // grows by a whole committed dwell (a dwell in progress sits past it), so
+    // nonzero means at least one cell is filled, and the CSV holds only
+    // finished dwells. Too few cells to fit is the server's call: it refuses
+    // under its own floor, and the display shows that reason.
+    if (binCalIsMounted()) {
+        if (g_binSampleCount == 0) {
+            Serial.println("[BIN_CAL] Finish ignored: no mounted cell filled yet");
+            return false;
+        }
+        g_userDone = true;
+        Serial.printf("[BIN_CAL] Mounted collection finished by diver: %d cells, "
+                      "uploading for server-side grading\n",
+                      g_binSampleCount / MAG_CAL_BIN_GREEN_THRESHOLD);
+        return true;
+    }
 
     // Gap-fill has a lower floor: it patches a handful of cells, so a
     // legitimately complete session is small. Both count every stored sample
@@ -1197,7 +1212,7 @@ bool magBinCalFinishBaseline() {
         return false;
     }
 
-    g_baselineUserDone = true;
+    g_userDone = true;
     Serial.printf("[BIN_CAL] %s collection finished by diver: %d samples, "
                   "uploading for server-side grading\n",
                   isGapFill ? "Gap-fill" : "Baseline", have);
@@ -1225,7 +1240,7 @@ bool magBinCalIsComplete() {
         // every one of them is either at its cap or not. The diver can still
         // stop early (magBinCalFinishBaseline) -- a cell may simply not be
         // reachable in the water.
-        if (g_baselineUserDone) return true;
+        if (g_userDone) return true;
         int remaining = 0, total = 0;
         magBinCalGapFillProgress(remaining, total);
         // total == 0 means the target map flags nothing. That must not read as
@@ -1237,12 +1252,12 @@ bool magBinCalIsComplete() {
     if (!binCalIsMounted()) {
         // Baseline has no bin/grid completion concept anymore -- it's a diver
         // decision (magBinCalFinishBaseline), not auto-detected coverage.
-        return g_baselineUserDone;
+        return g_userDone;
     }
 
-    // Mounted: the whole level row, and enough of each tilted row spread
-    // around the circle (mounted_dwell::rowComplete).
-    return g_mountedDwell.complete();
+    // Mounted: the diver pressed FINISH, or the whole level row and enough of
+    // each tilted row spread around the circle (mounted_dwell::rowComplete).
+    return g_userDone || g_mountedDwell.complete();
 }
 
 // Fills the attitude-varying fields that CalProgressPacket and
@@ -1337,9 +1352,10 @@ void magBinCalGetProgress(CalProgressPacket& pkt) {
             green++;
         }
     }
-    // Mounted counts toward what the diver has to fill (24 cells), not the 36
-    // on the grid, and never reads full while a tilted row is still bunched
-    // on one side. The display's denominator is mounted_dwell::kNeedTotal.
+    // Mounted counts toward what the diver has to fill (kNeedTotal cells, all
+    // 36 since 2026-11-09), and never reads full while a tilted row is still
+    // bunched on one side. The display's denominator is
+    // mounted_dwell::kNeedTotal.
     if (binCalIsMounted()) green = (uint8_t)mounted_dwell::progressCount(g_binCounts);
     // Zero-fill remaining slots (for baseline → 60, mounted → 36, rest = 0)
     for (int i = g_binCalBinCount; i < 60; i++) {
@@ -1435,7 +1451,7 @@ void magBinCalFreeSamples() {
         free(g_binSamples);
         g_binSamples = nullptr;
         Serial.printf("[BIN_CAL] Freed sample buffer (%u bytes); heap_free=%u largest=%u\n",
-                      (unsigned)(BIN_CAL_MAX_SAMPLES * sizeof(BinCalSample)),
+                      (unsigned)(MAG_CAL_BIN_MAX_SAMPLES * sizeof(BinCalSample)),
                       (unsigned)ESP.getFreeHeap(),
                       (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     }
@@ -1455,7 +1471,7 @@ void magBinCalEnd() {
     g_binSampleCount  = 0;
     g_binCalBinCount  = 0;
     g_roughScanSampleCount = 0;
-    g_baselineUserDone = false;
+    g_userDone = false;
     g_baselineMaxSamplesReached = false;
     g_boot.reset();
     g_hasBaselineLast = false;

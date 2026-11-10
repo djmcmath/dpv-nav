@@ -13,6 +13,7 @@
 #include "drivers/display.h"
 #include "menu/menu.h"
 #include "nav/state.h"
+#include "util/cal_keys.h"
 #include "util/ota_confirm.h"
 #include "version.h"
 #include <dpvlink.h>
@@ -40,16 +41,17 @@ static constexpr uint32_t CAL_COMPLETE_HOLD_MS = 3000;  // show "DONE" for 3 s t
 static uint32_t calCompleteShownMs = 0;
 static bool calCompleteHolding = false;
 
-// Baseline BTN2 gives no visible change until nav's completion packet arrives
+// FINISH gives no visible change until nav's completion packet arrives
 // (which can take a while for a big run -- nav does a synchronous CSV dump
 // before it even sends that packet). Without this, the screen just redraws
 // the same bars/prompt, indistinguishable from "not pressed yet", so the
-// diver presses again. Set immediately on press; cleared once the real
-// completion packet lands (entering calCompleteHolding) or after a timeout
-// in case the command was dropped over serial.
-static bool gBaselineFinishPending = false;
-static uint32_t gBaselineFinishPendingMs = 0;
-static constexpr uint32_t BASELINE_FINISH_PENDING_TIMEOUT_MS = 8000;
+// diver presses again. Set immediately on press, which puts "Finishing..." on
+// the collecting screen and dims its keys; cleared once the real completion
+// packet lands (entering calCompleteHolding) or after a timeout in case the
+// command was dropped over serial, or nav refused it.
+static bool gCalFinishPending = false;
+static uint32_t gCalFinishPendingMs = 0;
+static constexpr uint32_t CAL_FINISH_PENDING_TIMEOUT_MS = 8000;
 
 // ---- Link transmit buffer --------------------------------------------------
 // 96, not 64: ACCEPT_CLOUD_CAL/REJECT_CLOUD_CAL carry a 36-char UUID ("cid")
@@ -151,7 +153,7 @@ static float gHdgCalErrSum   = 0.0f;
 static int   gHdgCalErrCount = 0;
 
 // BTN2 gives no visible feedback until the next render tick happens to redraw
-// the incremented step -- same class of gap gBaselineFinishPending closes for
+// the incremented step -- same class of gap gCalFinishPending closes for
 // baseline cal. 0 = not showing; otherwise the millis() deadline to advance.
 static uint32_t gHdgCalAckUntilMs = 0;
 static constexpr uint32_t HDG_CAL_ACK_HOLD_MS = 450;
@@ -200,31 +202,70 @@ static uint32_t         gCurrentHoldCountdown = 0;
 // gCloudCalPhase overrides the normal link-timeout ("NO LINK") check for that
 // window rather than reporting a false dead link -- see linkAlive below.
 enum class CloudCalUiPhase : uint8_t {
-    NONE,     // not in cloud-cal UI
-    WAITING,  // upload/fit in progress on the nav device (blocking there)
-    OFFLINE,  // no WiFi -- upload was skipped
-    FAILED,   // upload/fit failed, or nav device never responded
-    RESULT,   // fit succeeded -- accept/reject
+    NONE,       // not in cloud-cal UI
+    WAITING,    // upload/fit in progress on the nav device (blocking there)
+    OFFLINE,    // no WiFi -- upload was skipped
+    FAILED,     // upload/fit failed, or nav device never responded
+    RESULT,     // fit succeeded -- accept/reject
+    SAVING,     // ACCEPT or REJECT sent; nav is handling it (blocking there)
+                // until its CAL_RESPONDED packet
+    INSTALLED,  // ACCEPT handled and installed: what's next
 };
 
 static CloudCalUiPhase   gCloudCalPhase          = CloudCalUiPhase::NONE;
 static uint32_t          gCloudCalWaitStartMs    = 0;
 static constexpr uint32_t CLOUD_CAL_WAIT_TIMEOUT_MS = 40000;  // > nav's ~30s worst case
-static uint8_t           gCloudCalChoice         = 0;  // 0=ACCEPT, 1=REJECT
 // False for a gap-fill result: that fit covers only the cells just patched
 // and must never be offered as a standalone install (see nav_main.cpp's
-// ACCEPT_CLOUD_CAL comment). The RESULT screen shows no ACCEPT/REJECT toggle
+// ACCEPT_CLOUD_CAL comment). The RESULT screen shows no ACCEPT/REJECT
 // when this is false -- just an acknowledgement.
 static bool              gCloudCalInstallable    = true;
 static uint8_t           gCloudCalQuality        = 0;
-static uint8_t           gCloudCalType           = 0;  // CalType enum -- selects % vs deg label
 static float             gCloudCalRmsPct         = 0.0f;
 static int16_t           gCloudCalCoverageGaps   = -1;  // baseline only; -1 = n/a
-static char              gCloudCalRecommendation[96] = "";
 static char              gCloudCalError[64]          = "";
-// The server refused to fit the samples, as opposed to never receiving them.
-static bool              gCloudCalRejected           = false;
+static display::CalFailKind gCloudCalFailKind        = display::CalFailKind::TRANSPORT;
 static char              gCloudCalId[40]             = "";
+// SAVING: which one was sent, and since when (CLOUD_CAL_WAIT_TIMEOUT_MS
+// covers nav's worst case of two blocking HTTPS calls on a baseline accept).
+static bool              gCloudCalSavingAccept       = false;
+static uint32_t          gCloudCalSavingStartMs      = 0;
+// INSTALLED: the baseline's gap-fill map, from CAL_RESPONDED. -1 = not
+// downloaded (gCloudCalError says why) or not a baseline.
+static int16_t           gCalInstalledTargets        = -1;
+
+// ---- Unified cal screens (docs/cal-screens-unified-plan.md) ----------------
+// The step every cal screen's header marks. Set when a cal starts (the start
+// command, then each CalProgressPacket) and from every CalCloudResultPacket,
+// so a tern.local retry-upload with no session behind it still names the
+// right step.
+static display::CalStep gCalStep = display::CalStep::BASELINE;
+
+// Set when START_GAPFILL_CAL goes out, cleared by the first GAP_FILL progress
+// packet, any result packet, or GAPFILL_START_TIMEOUT_MS. A FAILED result
+// while it's set is nav refusing to start (no baseline, no target map):
+// nothing was collected or uploaded, so it must not read "Upload failed".
+static bool     gGapFillStarting   = false;
+static uint32_t gGapFillStartingMs = 0;
+static constexpr uint32_t GAPFILL_START_TIMEOUT_MS = 5000;
+
+// Softkeys (util/cal_keys.h): BTN2 keeps going, holding BTN1 throws the work
+// away. The hold fill and the hint go to display::setCalKeysOverlay().
+static cal_keys::Tracker gCalKeys;
+static uint8_t  gCalHoldPct     = 0;
+static uint32_t gCalHintUntilMs = 0;   // 0 = no hint
+static constexpr uint32_t CAL_HINT_MS = 1500;
+
+// After QUIT_CAL: ignore CAL_PROGRESS and CAL_ORIENT until a NavPacket says
+// nav has left CALIBRATION, or CAL_QUIT_GUARD_MS at most.
+static bool     gCalQuitPending   = false;
+static uint32_t gCalQuitPendingMs = 0;
+static constexpr uint32_t CAL_QUIT_GUARD_MS = 3000;
+
+// "Quit" / "Rejected", shown for CAL_DISCARD_SHOW_MS after a hold. 0 = not up.
+static uint32_t gCalDiscardUntilMs  = 0;
+static bool     gCalDiscardRejected = false;
+static constexpr uint32_t CAL_DISCARD_SHOW_MS = 1500;
 
 // ---- Cloud account-link UI state (device-auth bootstrap, RFC 8628) --------
 // Entered when the diver selects "Link acct" from the Config menu. The nav
@@ -275,7 +316,7 @@ static char            gWpPrevName[20]  = "";
 
 // ---- Button debounce -------------------------------------------------------
 static constexpr uint32_t DEBOUNCE_MS   = 50;
-static constexpr uint32_t LONG_PRESS_MS = 2000;
+// LONG_PRESS_MS lives in config.h: util/cal_keys.h needs it too.
 
 struct ButtonState {
     uint8_t  pin;
@@ -333,15 +374,11 @@ static void renderWaypointUi();
 // end up staring at a blank grid wondering whether the cal worked.
 static void renderCalProgress(const CalProgressPacket& pkt) {
     if (pkt.phase == (uint8_t)CalPhase::ROUGH_SCAN) {
-        display::showBaselineRoughScan(pkt);   // baseline before the bootstrap locks
-    } else if (pkt.phase == (uint8_t)CalPhase::BASELINE_GRID) {
-        display::showCalGrid(pkt, "BASELINE CAL");  // baseline after it locks
-    } else if (pkt.phase == (uint8_t)CalPhase::GAP_FILL) {
-        display::showCalGrid(pkt, "FILL GAPS");
+        display::showBaselineRoughScan(pkt, gCalFinishPending);  // baseline before the bootstrap locks
     } else if (pkt.cal_type == (uint8_t)CalType::MOUNTED) {
-        display::showMountedCal(pkt);          // mounted: dwell capture
+        display::showMountedCal(pkt, gCalFinishPending);         // mounted: dwell capture
     } else {
-        display::showCalGrid(pkt, "BASELINE CAL");
+        display::showCalGrid(pkt, gCalFinishPending);  // baseline after it locks, and gap-fill
     }
 }
 
@@ -630,10 +667,10 @@ void loop() {
             // heading samples -- hand off to the same wait/result UI
             // baseline/mounted's bin-grid completion already uses, rather
             // than a separate local "done" screen. See
-            // docs/architecture/heading-cal-cloud-plan.md.
+            // docs/architecture/heading-cal-cloud-plan.md. No clear(): the
+            // frame stays and only what changed redraws.
             gCloudCalPhase       = CloudCalUiPhase::WAITING;
             gCloudCalWaitStartMs = millis();
-            display::clear();
         }
         // else: the next periodic render naturally draws the new step's prompt
     }
@@ -693,7 +730,7 @@ void loop() {
     // run flashes "NO LINK" for a few seconds even though nothing is wrong.
     bool awaitingCloudCal  = (gCloudCalPhase != CloudCalUiPhase::NONE);
     bool awaitingCloudLink = (gCloudLinkPhase != CloudLinkUiPhase::NONE);
-    // gBaselineFinishPending covers the gap between BTN2 requesting
+    // gCalFinishPending covers the gap between BTN2 requesting
     // FINISH_BASELINE_COLLECTION and nav's completion packet actually
     // arriving -- nav may already be mid CSV-dump by the time it gets to
     // sending that packet. Same reasoning as calCompleteHolding below.
@@ -709,8 +746,9 @@ void loop() {
     // after which a genuinely wedged nav device still reports NO LINK.
     bool uploadingLogs = navValid && (lastNav.flags2 & FLAG2_UPLOADING) &&
                          (now - lastNavMs < LOG_UPLOAD_TIMEOUT_MS);
-    bool linkAlive = calCompleteHolding || gBaselineFinishPending ||
-                     awaitingCloudCal || awaitingCloudLink || awaitingWifi ||
+    bool linkAlive = calCompleteHolding || gCalFinishPending ||
+                     awaitingCloudCal || gCalDiscardUntilMs != 0 ||
+                     awaitingCloudLink || awaitingWifi ||
                      uploadingLogs ||
                      (navValid && (now - lastNavMs < NAV_TIMEOUT_MS));
 
@@ -720,25 +758,49 @@ void loop() {
             display::clear();
         }
         // Live data — render at 4 Hz, or at the 10 Hz NavPacket rate while a
-        // heading cal collects: the diver levels against that screen's
-        // horizon, and it redraws only what changed.
+        // heading cal collects (the diver levels against that screen's
+        // horizon) or while BTN1's hold fills a softkey (20 steps over the
+        // hold, not 8). Both screens redraw only what changed.
         const uint32_t renderIntervalMs =
-            (gHdgFourierCalPhase == HdgFourierCalPhase::COLLECTING) ? HDG_CAL_RENDER_INTERVAL_MS
-                                                                    : DISPLAY_INTERVAL_MS;
+            (gHdgFourierCalPhase == HdgFourierCalPhase::COLLECTING || gCalHoldPct > 0)
+                ? HDG_CAL_RENDER_INTERVAL_MS
+                : DISPLAY_INTERVAL_MS;
+        if (gGapFillStarting && now - gGapFillStartingMs >= GAPFILL_START_TIMEOUT_MS) {
+            gGapFillStarting = false;
+        }
         if (now - lastDisplayMs >= renderIntervalMs) {
             lastDisplayMs = now;
+            display::setCalKeysOverlay(gCalHoldPct, gCalHintUntilMs != 0 && now < gCalHintUntilMs);
 
-            // Baseline: BTN2 was pressed, waiting for nav to confirm completion.
-            // Times out (command likely dropped) back to the normal rough-scan
-            // screen so the diver can just press BTN2 again.
-            if (gBaselineFinishPending) {
-                if (now - gBaselineFinishPendingMs >= BASELINE_FINISH_PENDING_TIMEOUT_MS) {
-                    gBaselineFinishPending = false;
-                    Serial.println("[BIN_CAL] Finish-baseline request timed out, retry available");
-                } else {
-                    display::showBaselineFinishing();
+            // Nav never reported back on an ACCEPT or REJECT: give up, as the
+            // display did before CAL_RESPONDED existed.
+            if (gCloudCalPhase == CloudCalUiPhase::SAVING &&
+                now - gCloudCalSavingStartMs >= CLOUD_CAL_WAIT_TIMEOUT_MS) {
+                Serial.println("[CLOUD_CAL] no CAL_RESPONDED -- back to the nav screen");
+                gCloudCalPhase = CloudCalUiPhase::NONE;
+                if (gCalDiscardUntilMs == 0) display::clear();
+            }
+
+            // "Quit" / "Rejected" after a hold, then back to the nav screen.
+            // Rejected stays up until nav has reported back as well, since
+            // nav is blocked on the server until then.
+            const bool rejectSaving = gCloudCalPhase == CloudCalUiPhase::SAVING &&
+                                      !gCloudCalSavingAccept;
+            if (gCalDiscardUntilMs != 0) {
+                if (now < gCalDiscardUntilMs || rejectSaving) {
+                    display::showCalDiscarded(gCalStep, gCalDiscardRejected);
                     return;
                 }
+                gCalDiscardUntilMs = 0;
+                display::clear();
+            }
+
+            // FINISH was pressed, waiting for nav to confirm completion. The
+            // collecting screen shows it; this times it out (command dropped,
+            // or nav refused) so the diver can just press FINISH again.
+            if (gCalFinishPending && now - gCalFinishPendingMs >= CAL_FINISH_PENDING_TIMEOUT_MS) {
+                gCalFinishPending = false;
+                Serial.println("[BIN_CAL] Finish request timed out, retry available");
             }
 
             // Bin cal complete: hold DONE screen for CAL_COMPLETE_HOLD_MS then return.
@@ -750,9 +812,9 @@ void loop() {
                     calProgressValid   = false;
                     // The nav device uploads the CSV next (blocking there) --
                     // show the waiting screen until a CalCloudResultPacket lands.
+                    // No clear(): the frame stays and only what changed redraws.
                     gCloudCalPhase       = CloudCalUiPhase::WAITING;
                     gCloudCalWaitStartMs = now;
-                    display::clear();
                 }
                 return;
             }
@@ -763,27 +825,33 @@ void loop() {
                 switch (gCloudCalPhase) {
                     case CloudCalUiPhase::WAITING:
                         if (now - gCloudCalWaitStartMs >= CLOUD_CAL_WAIT_TIMEOUT_MS) {
-                            gCloudCalPhase = CloudCalUiPhase::FAILED;
-                            gCloudCalRejected = false;
+                            gCloudCalPhase    = CloudCalUiPhase::FAILED;
+                            gCloudCalFailKind = display::CalFailKind::TRANSPORT;
                             strncpy(gCloudCalError, "No response from nav device",
                                     sizeof(gCloudCalError) - 1);
                             gCloudCalError[sizeof(gCloudCalError) - 1] = '\0';
-                            display::showCloudCalFailed(gCloudCalError, gCloudCalRejected);
+                            display::showCloudCalFailed(gCalStep, gCloudCalFailKind, gCloudCalError);
                         } else {
-                            display::showCloudCalWaiting((now - gCloudCalWaitStartMs) / 1000);
+                            display::showCloudCalWaiting(gCalStep, (now - gCloudCalWaitStartMs) / 1000);
                         }
                         break;
                     case CloudCalUiPhase::OFFLINE:
-                        display::showCloudCalOffline();
+                        display::showCloudCalOffline(gCalStep);
                         break;
                     case CloudCalUiPhase::FAILED:
-                        display::showCloudCalFailed(gCloudCalError, gCloudCalRejected);
+                        display::showCloudCalFailed(gCalStep, gCloudCalFailKind, gCloudCalError);
+                        break;
+                    case CloudCalUiPhase::SAVING:   // ACCEPT; REJECT returned above
+                        display::showCloudCalResult(gCalStep, gCloudCalQuality, gCloudCalRmsPct,
+                                                    gCloudCalCoverageGaps, true);
+                        break;
+                    case CloudCalUiPhase::INSTALLED:
+                        display::showCalInstalled(gCalStep, gCalInstalledTargets, gCloudCalError);
                         break;
                     case CloudCalUiPhase::RESULT:
                         if (gCloudCalInstallable) {
-                            display::showCloudCalResult(gCloudCalQuality, gCloudCalRmsPct,
-                                                        gCloudCalRecommendation, gCloudCalCoverageGaps,
-                                                        gCloudCalChoice, gCloudCalType);
+                            display::showCloudCalResult(gCalStep, gCloudCalQuality, gCloudCalRmsPct,
+                                                        gCloudCalCoverageGaps);
                         } else {
                             // Gap-fill: informational only, no accept/reject
                             // choice to make on-device -- this fit is a merge
@@ -792,8 +860,7 @@ void loop() {
                             // accepted=null is exactly its correct resting
                             // state until the diver resolves it on the website
                             // (by merging it in, or ignoring it).
-                            display::showGapFillUploaded(gCloudCalRmsPct, gCloudCalRecommendation,
-                                                         gCloudCalCoverageGaps);
+                            display::showGapFillUploaded(gCloudCalRmsPct, gCloudCalCoverageGaps);
                         }
                         break;
                     default:
@@ -1065,6 +1132,8 @@ static void processNavLine() {
                     Serial.println("[CURRENT] measurement ready");
                 }
             }
+            // Nav has left the cal that was quit: its packets can't be in flight now.
+            if (ns != SystemState::CALIBRATION) gCalQuitPending = false;
             // If nav device returns to READY after bin cal, clear our cal state
             if (ns != SystemState::CALIBRATION && calProgressValid) {
                 if (!calCompleteHolding) {
@@ -1080,7 +1149,12 @@ static void processNavLine() {
         }
 #endif
     } else if (ptype == PacketType::CAL_PROGRESS) {
-        if (bytesToCalProgressPacket(rxBuf, rxPos, lastCalProgress)) {
+        if (gCalQuitPending && millis() - gCalQuitPendingMs >= CAL_QUIT_GUARD_MS) {
+            gCalQuitPending = false;
+        }
+        if (gCalQuitPending) {
+            // A packet from the session just quit, already on the wire.
+        } else if (bytesToCalProgressPacket(rxBuf, rxPos, lastCalProgress)) {
             // First packet of a session: wipe the screen and the cal screens'
             // "static layout already drawn" flags. A session that was
             // abandoned (rather than completed) never cleared them, so the
@@ -1088,12 +1162,20 @@ static void processNavLine() {
             // screen came between.
             if (!calProgressValid) display::clear();
             calProgressValid   = true;
+            if (lastCalProgress.phase == (uint8_t)CalPhase::GAP_FILL) {
+                gCalStep         = display::CalStep::FILL_GAPS;
+                gGapFillStarting = false;
+            } else if (lastCalProgress.cal_type == (uint8_t)CalType::MOUNTED) {
+                gCalStep = display::CalStep::MOUNTED;
+            } else {
+                gCalStep = display::CalStep::BASELINE;
+            }
             lastCalProgressMs  = millis();
             lastNavMs          = millis();  // keep link-alive timer refreshed
             if (lastCalProgress.complete && !calCompleteHolding) {
                 calCompleteHolding  = true;
                 calCompleteShownMs  = millis();
-                gBaselineFinishPending = false;
+                gCalFinishPending = false;
                 Serial.println("[CAL_GRID] Complete — holding DONE screen");
             }
         }
@@ -1110,7 +1192,7 @@ static void processNavLine() {
         // calCompleteHolding -- "the grid data is fresh" and "the session
         // finished" are both statements only the full packet can make.
         CalOrientPacket opkt{};
-        if (calProgressValid && bytesToCalOrientPacket(rxBuf, rxPos, opkt)) {
+        if (calProgressValid && !gCalQuitPending && bytesToCalOrientPacket(rxBuf, rxPos, opkt)) {
             lastCalProgress.current_bin   = opkt.current_bin;
             lastCalProgress.cur_pitch_deg = opkt.cur_pitch_deg;
             lastCalProgress.cur_hdg_deg   = opkt.cur_hdg_deg;
@@ -1149,27 +1231,57 @@ static void processNavLine() {
         CalCloudResultPacket pkt{};
         if (bytesToCalCloudResultPacket(rxBuf, rxPos, pkt)) {
             lastNavMs = millis();  // keep link-alive timer refreshed
+            // The packet says which step it belongs to: a gap-fill is a
+            // baseline collection that can't be installed. That holds for a
+            // live session and for a tern.local retry-upload alike.
+            gCalStep = pkt.cal_type == (uint8_t)CalType::MOUNTED ? display::CalStep::MOUNTED
+                     : pkt.cal_type == (uint8_t)CalType::HDG     ? display::CalStep::HEADING
+                     : pkt.installable                           ? display::CalStep::BASELINE
+                                                                 : display::CalStep::FILL_GAPS;
+            const bool refused = gGapFillStarting;
+            if (refused) gCalStep = display::CalStep::FILL_GAPS;
+            gGapFillStarting = false;
+            gCalHintUntilMs  = 0;
             if (pkt.stage == (uint8_t)CalCloudStage::OFFLINE) {
                 gCloudCalPhase = CloudCalUiPhase::OFFLINE;
             } else if (pkt.stage == (uint8_t)CalCloudStage::FAILED) {
-                gCloudCalPhase = CloudCalUiPhase::FAILED;
-                gCloudCalRejected = pkt.rejected;
+                gCloudCalPhase    = CloudCalUiPhase::FAILED;
+                gCloudCalFailKind = pkt.rejected ? display::CalFailKind::REJECTED
+                                  : refused      ? display::CalFailKind::REFUSED
+                                                 : display::CalFailKind::TRANSPORT;
                 strncpy(gCloudCalError, pkt.error, sizeof(gCloudCalError) - 1);
                 gCloudCalError[sizeof(gCloudCalError) - 1] = '\0';
             } else {
                 gCloudCalPhase   = CloudCalUiPhase::RESULT;
                 gCloudCalQuality = pkt.quality;
-                gCloudCalType    = pkt.cal_type;
                 gCloudCalRmsPct  = pkt.rms_pct;
                 gCloudCalCoverageGaps = pkt.coverage_gaps;
                 gCloudCalInstallable  = pkt.installable;
-                gCloudCalChoice  = 0;
-                strncpy(gCloudCalRecommendation, pkt.recommendation, sizeof(gCloudCalRecommendation) - 1);
-                gCloudCalRecommendation[sizeof(gCloudCalRecommendation) - 1] = '\0';
                 strncpy(gCloudCalId, pkt.calibration_id, sizeof(gCloudCalId) - 1);
                 gCloudCalId[sizeof(gCloudCalId) - 1] = '\0';
             }
             Serial.printf("[CLOUD_CAL] result stage=%u\n", pkt.stage);
+        }
+    } else if (ptype == PacketType::CAL_RESPONDED) {
+        CalRespondedPacket pkt{};
+        if (bytesToCalRespondedPacket(rxBuf, rxPos, pkt)) {
+            lastNavMs = millis();  // keep link-alive timer refreshed
+            Serial.printf("[CLOUD_CAL] responded: accepted=%d installed=%d targets=%d %s\n",
+                          pkt.accepted, pkt.installed, pkt.target_count, pkt.error);
+            // Late (the Saving timeout already gave up): nothing to update.
+            if (gCloudCalPhase == CloudCalUiPhase::SAVING) {
+                strncpy(gCloudCalError, pkt.error, sizeof(gCloudCalError) - 1);
+                gCloudCalError[sizeof(gCloudCalError) - 1] = '\0';
+                if (!gCloudCalSavingAccept) {
+                    gCloudCalPhase = CloudCalUiPhase::NONE;   // Rejected ends on its own timer
+                } else if (pkt.installed) {
+                    gCloudCalPhase       = CloudCalUiPhase::INSTALLED;
+                    gCalInstalledTargets = pkt.target_count;
+                } else {
+                    gCloudCalPhase    = CloudCalUiPhase::FAILED;
+                    gCloudCalFailKind = display::CalFailKind::NOT_INSTALLED;
+                }
+            }
         }
     } else if (ptype == PacketType::CLOUD_LINK_RESULT) {
         CloudLinkResultPacket pkt{};
@@ -1259,6 +1371,19 @@ static void sendCmd(DisplayCmd cmd) {
     size_t n = displayCmdToBytes(cmd, txBuf, sizeof(txBuf));
     if (n > 0) {
         Serial1.write(txBuf, n);
+    }
+    // The menu starts cals from menu.cpp through this callback, so this is
+    // the one place the display learns a cal is starting.
+    switch (cmd) {
+        case DisplayCmd::START_BASELINE_CAL: gCalStep = display::CalStep::BASELINE; break;
+        case DisplayCmd::START_MOUNTED_CAL:  gCalStep = display::CalStep::MOUNTED;  break;
+        case DisplayCmd::START_GAPFILL_CAL:
+            gCalStep           = display::CalStep::FILL_GAPS;
+            gGapFillStarting   = true;
+            gGapFillStartingMs = millis();
+            break;
+        case DisplayCmd::START_HDG_FOURIER_CAL: gCalStep = display::CalStep::HEADING; break;
+        default: break;
     }
 }
 
@@ -1372,10 +1497,55 @@ static void consumePendingReleases() {
     if (!btn2.pressed && btn2.pressStartMs > 0) btn2.fired = true;
 }
 
+// The cal screens' softkeys (util/cal_keys.h), run once per pass on any cal
+// screen. Marks whichever button it acted on as fired and keeps the hold fill
+// and the hint for the next render. leftIsHold: the left key is QUIT or
+// REJECT here; otherwise a BTN1 hold or tap does nothing, and the caller
+// ignores `discard`.
+static cal_keys::Result calKeys(bool leftIsHold) {
+    const uint32_t now = millis();
+    const cal_keys::Result r =
+        gCalKeys.update({ btn1.pressed, btn1.pressStartMs, btn1.fired },
+                        { btn2.pressed, btn2.pressStartMs, btn2.fired }, now);
+    if (r.discard || r.shortPress) btn1.fired = true;
+    if (r.advance) btn2.fired = true;
+    gCalHoldPct = (leftIsHold && !r.discard) ? r.holdPct : 0;
+    if (r.shortPress && leftIsHold) gCalHintUntilMs = now + CAL_HINT_MS;
+    if (gCalHoldPct > 0) gCalHintUntilMs = 0;   // the fill says it better
+    return r;
+}
+
+// Leave whatever cal screen is up for the "Quit" / "Rejected" screen.
+static void showCalDiscardedFor(bool rejected) {
+    gCalDiscardUntilMs  = millis() + CAL_DISCARD_SHOW_MS;
+    gCalDiscardRejected = rejected;
+    gCalHoldPct         = 0;
+    gCalHintUntilMs     = 0;
+}
+
+// BTN1 held on a collecting screen: nav ends the cal with nothing saved or
+// uploaded. A progress packet already on the wire would bring the cal screen
+// back for a moment, so they're ignored until nav reports it's left
+// CALIBRATION (gCalQuitPending).
+static void quitCal() {
+    sendCmd(DisplayCmd::QUIT_CAL);
+    Serial.println("[CAL] QUIT (BTN1 held)");
+    if (calProgressValid) {
+        calProgressValid  = false;
+        gCalQuitPending   = true;
+        gCalQuitPendingMs = millis();
+    }
+    gCalFinishPending   = false;
+    gHdgFourierCalPhase = HdgFourierCalPhase::NONE;
+    gHdgCalAckUntilMs   = 0;
+    showCalDiscardedFor(false);
+}
+
 // Full-screen modes that own the buttons. Returns true if one of them handled
 // (or deliberately ignored) this pass, in which case the menu must not see it.
 static bool handleModalButtons() {
     uint32_t now = millis();
+    gCalHoldPct = 0;   // calKeys() sets it again on any cal screen with a hold key
 
     // --- Both buttons held 2s → reset display --------------------------------
     if (btn1.pressed && btn2.pressed && !btn1.fired && !btn2.fired) {
@@ -1391,52 +1561,63 @@ static bool handleModalButtons() {
         }
     }
 
-    // --- Baseline / gap-fill: BTN2 declares collection done, ends the session ---
-    // Gap-fill needs this as much as baseline does: a targeted cell can simply
-    // be unreachable in the water (a ceiling, a wall, a scooter you can't
-    // invert), and without a manual finish the session would never end. It also
-    // auto-completes when every target is satisfied -- this is the escape
-    // hatch, not the only exit.
-    if (calProgressValid &&
-        (lastCalProgress.phase == (uint8_t)CalPhase::ROUGH_SCAN ||
-         lastCalProgress.phase == (uint8_t)CalPhase::BASELINE_GRID ||
-         lastCalProgress.phase == (uint8_t)CalPhase::GAP_FILL)) {
-        if (gBaselineFinishPending) {
-            // Already requested -- ignore repeat presses until nav confirms
-            // (complete=true) or the pending screen times out.
+    // --- "Quit" / "Rejected": both buttons claimed and inert ---------------
+    if (gCalDiscardUntilMs != 0) {
+        calKeys(false);
+        return true;
+    }
+
+    // --- Collecting screens: every bin cal, mounted included, and heading ---
+    // BTN2 = FINISH (MARK on heading), hold BTN1 = QUIT, a tap = the hint.
+    // Mounted was missing from this until 2026-11: its presses fell through
+    // to the menu, which its screen kept hidden (menu invariant 4, CLAUDE.md).
+    // FINISH matters on every step: a cell can simply be unreachable (a
+    // ceiling, a wall, a scooter you can't invert), and baseline has no
+    // completion of its own short of a full buffer.
+    if (calProgressValid) {
+        // "Done - saving" (keys blank) and "Finishing..." (keys dim): nothing
+        // to press until nav confirms or the pending state times out.
+        if (calCompleteHolding || gCalFinishPending) {
+            calKeys(false);
             return true;
         }
-        if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
-            btn2.fired = true;
+        const cal_keys::Result r = calKeys(true);
+        if (r.discard) {
+            quitCal();
+        } else if (r.advance && display::calCanFinish(lastCalProgress)) {
             sendCmd(DisplayCmd::FINISH_BASELINE_COLLECTION);
-            // nav may still ignore this (too few samples); the pending screen
-            // times out below if no completion packet ever arrives.
-            gBaselineFinishPending   = true;
-            gBaselineFinishPendingMs = millis();
-            display::clear();
-            Serial.println("[BIN_CAL] BTN2: requested finish baseline collection");
+            // nav may still refuse it; the pending state times out in loop()
+            // if no completion packet ever arrives.
+            gCalFinishPending   = true;
+            gCalFinishPendingMs = millis();
+            Serial.println("[BIN_CAL] BTN2: requested finish");
         }
         return true;
     }
 
-    // --- Fourier heading calibration -----------------------------------------
     if (gHdgFourierCalPhase == HdgFourierCalPhase::COLLECTING) {
-        // While the "MARKED" ack is showing, ignore BTN2 rather than queue it --
-        // the step/finalize advance happens in loop()'s ack-expiry check, not here.
+        // While the "MARKED" ack is showing (keys dim), ignore BTN2 rather
+        // than queue it -- the step/finalize advance happens in loop()'s
+        // ack-expiry check, not here.
         if (gHdgCalAckUntilMs != 0) {
+            calKeys(false);
             return true;
         }
-        // BTN2 short press: send CAPTURE_HDG_POINT with current target; nav device
-        // records its live gCurrentHeadingRawDeg alongside the target. Then show
-        // an immediate "MARKED" ack (held for HDG_CAL_ACK_HOLD_MS) instead of
+        const cal_keys::Result r = calKeys(true);
+        if (r.discard) {
+            quitCal();
+            return true;
+        }
+        // MARK: send CAPTURE_HDG_POINT with current target; nav device records
+        // its live gCurrentHeadingRawDeg alongside the target. Then show an
+        // immediate "MARKED" ack (held for HDG_CAL_ACK_HOLD_MS) instead of
         // silently incrementing the step and waiting for the next render tick --
-        // same gap gBaselineFinishPending closes for baseline cal.
-        if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
-            btn2.fired = true;
+        // same gap gCalFinishPending closes for the bin cals.
+        if (r.advance) {
             // Level gate (util/level_gate.h): mark only a level, still, settled
-            // unit. The prompt already says why not (NOT LEVEL / HOLD STILL),
-            // so a refused press just does nothing. INACTIVE = a nav build too
-            // old to run the gate, which must not lock the cal up.
+            // unit. The key is dim and the status says why not, so a refused
+            // press just does nothing. INACTIVE = a nav build too old to run
+            // the gate, which must not lock the cal up.
             const uint8_t gate = navValid ? lastNav.level_state : (uint8_t)LevelGateState::INACTIVE;
             if (HDG_CAL_LEVEL_GATE && gate != (uint8_t)LevelGateState::READY &&
                 gate != (uint8_t)LevelGateState::INACTIVE) {
@@ -1455,8 +1636,9 @@ static bool handleModalButtons() {
             gHdgCalErrCount++;
             float avg = gHdgCalErrSum / gHdgCalErrCount;
 
-            display::showHdgFourierCalAck(gHdgFourierCalStep + 1, kHdgCalNPoints,
-                                          target, indicated, err, avg);
+            const int marks = gHdgFourierCalStep + 1;
+            display::showHdgFourierCalAck(marks, kHdgCalNPoints, target, indicated, err, avg,
+                                          marks < kHdgCalNPoints ? kHdgCalTargets[marks] : -1.0f);
             gHdgCalAckUntilMs = millis() + HDG_CAL_ACK_HOLD_MS;
         }
         return true;
@@ -1571,47 +1753,40 @@ static bool handleModalButtons() {
     }
 
     // --- Cloud calibration result UI -----------------------------------------
-    if (gCloudCalPhase == CloudCalUiPhase::OFFLINE || gCloudCalPhase == CloudCalUiPhase::FAILED) {
-        // BTN2: dismiss
-        if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
-            btn2.fired = true;
+    // OFFLINE, FAILED, and gap-fill's "sent" (a result that can't be
+    // installed): BTN2 is OK. Gap-fill sends no ACCEPT/REJECT ever -- the
+    // uploaded fit stays parked at accepted=null on the server, its correct
+    // resting state until the website resolves it.
+    if (gCloudCalPhase == CloudCalUiPhase::OFFLINE || gCloudCalPhase == CloudCalUiPhase::FAILED ||
+        gCloudCalPhase == CloudCalUiPhase::INSTALLED ||
+        (gCloudCalPhase == CloudCalUiPhase::RESULT && !gCloudCalInstallable)) {
+        if (calKeys(false).advance) {
             gCloudCalPhase = CloudCalUiPhase::NONE;
             display::clear();
         }
         return true;
     }
+    // RESULT: BTN2 accepts in one press; holding BTN1 rejects, slower on
+    // purpose, and a tap only shows the hint.
     if (gCloudCalPhase == CloudCalUiPhase::RESULT) {
-        if (!gCloudCalInstallable) {
-            // Gap-fill: single dismiss, no ACCEPT/REJECT command ever sent.
-            // The uploaded fit stays parked at accepted=null on the server --
-            // its correct resting state until the website resolves it.
-            if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
-                btn2.fired = true;
-                gCloudCalPhase = CloudCalUiPhase::NONE;
-                display::clear();
-            }
-            return true;
-        }
-        // BTN1: cycle ACCEPT/REJECT
-        if (!btn1.pressed && !btn1.fired && btn1.pressStartMs > 0) {
-            btn1.fired = true;
-            gCloudCalChoice = (gCloudCalChoice + 1) % 2;
-        }
-        // BTN2: confirm choice
-        if (!btn2.pressed && !btn2.fired && btn2.pressStartMs > 0) {
-            btn2.fired = true;
-            DisplayCmd cmd = (gCloudCalChoice == 0) ? DisplayCmd::ACCEPT_CLOUD_CAL
-                                                     : DisplayCmd::REJECT_CLOUD_CAL;
-            sendCloudCalRespond(cmd, gCloudCalId);
-            Serial.printf("[CLOUD_CAL] choice: %s\n", gCloudCalChoice == 0 ? "ACCEPT" : "REJECT");
-            gCloudCalPhase = CloudCalUiPhase::NONE;
-            display::clear();
+        const cal_keys::Result r = calKeys(true);
+        if (r.advance || r.discard) {
+            // Either way nav now blocks on the server (and on a baseline's
+            // gap-fill map): hold Saving or Rejected until CAL_RESPONDED.
+            gCloudCalSavingAccept  = r.advance;
+            gCloudCalSavingStartMs = millis();
+            gCloudCalPhase         = CloudCalUiPhase::SAVING;
+            sendCloudCalRespond(r.advance ? DisplayCmd::ACCEPT_CLOUD_CAL : DisplayCmd::REJECT_CLOUD_CAL,
+                                gCloudCalId);
+            Serial.println(r.advance ? "[CLOUD_CAL] ACCEPT" : "[CLOUD_CAL] REJECT (BTN1 held)");
+            if (r.discard) showCalDiscardedFor(true);
         }
         return true;
     }
-    // WAITING: no button action -- the nav device is mid-upload and won't see
-    // anything sent right now anyway (it's blocked on the network call).
-    if (gCloudCalPhase == CloudCalUiPhase::WAITING) {
+    // WAITING and SAVING: no button action -- the nav device is blocked on the
+    // network and won't see anything sent right now anyway.
+    if (gCloudCalPhase == CloudCalUiPhase::WAITING || gCloudCalPhase == CloudCalUiPhase::SAVING) {
+        calKeys(false);
         return true;
     }
 

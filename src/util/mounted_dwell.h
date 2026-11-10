@@ -119,8 +119,9 @@ inline bool allComplete(const uint8_t* cells) {
 }
 
 // Cells counted toward kNeedTotal. A tilted row with enough cells bunched on
-// one side counts one short, so the number cannot read "24/24" while the
-// collection is still open.
+// one side counts one short, so the number cannot read full while the
+// collection is still open. (That can only happen while MAG_CAL_SECTORS_MID is
+// under 12.)
 inline int progressCount(const uint8_t* cells) {
     int n = 0;
     for (int r = 0; r < kRows; r++) {

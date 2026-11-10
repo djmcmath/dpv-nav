@@ -13,7 +13,9 @@ namespace menu {
 constexpr int MAX_SUBMENUS    = 8;    // max number of submenus (including root)
 constexpr int MAX_ITEMS       = 10;   // max items per submenu (including auto back item)
 constexpr int MAX_MENU_DEPTH  = 3;    // max nesting depth (root + 2 levels)
-constexpr int MENU_LABEL_LEN  = 12;   // max chars for item label
+// Max chars for an item label. 14 for "Fill gaps (1a)"; the size-3 item row
+// holds 16 (menu.cpp's render()).
+constexpr int MENU_LABEL_LEN  = 14;
 
 constexpr uint32_t MENU_TIMEOUT_MS = 15000;  // auto-close after 15 s idle
 

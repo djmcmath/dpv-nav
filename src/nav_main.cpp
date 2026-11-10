@@ -165,6 +165,8 @@ static constexpr bool FLOW_LOG_ENABLE     = false;  // set to false to disable f
 //   4 = speed cal — result ready, awaiting display accept/reject
 //   5 = baseline mag cal (bin-aware)
 //   6 = mounted mag cal (bin-aware)
+//   7 = gap-fill mag cal (bin-aware)
+//   8/9 = current hold
 static bool    gInCal    = false;
 static uint8_t gCalMode  = 0;
 
@@ -192,6 +194,7 @@ static const char* gBinCalCsvPath = nullptr;
 static char gCloudCalId[40]          = "";
 static char gCloudCalPendingPath[40] = "";
 static char gCloudCalActivePath[24]  = "";
+static CalType gCloudCalType         = CalType::BASELINE;
 
 // Result of runCalUploadAndNotify() -- a caller-facing summary of what a
 // cloud upload+fit round trip did, independent of the CalCloudResultPacket
@@ -267,6 +270,7 @@ static CloudCalOutcome runCalUploadAndNotify(CalType calType, const char* mode,
 
             strncpy(gCloudCalId, cr.calibrationId.c_str(), sizeof(gCloudCalId) - 1);
             gCloudCalId[sizeof(gCloudCalId) - 1] = '\0';
+            gCloudCalType = calType;
             // Defense in depth, in case a mismatched display build (old
             // firmware, unaware of `installable`) ever sends
             // ACCEPT_CLOUD_CAL for a non-installable result anyway: leaving
@@ -493,6 +497,7 @@ static nvs_nav::State currentNavNvsState() {
 
 // ---- Forward declarations --------------------------------------------------
 static void loadCalibration();
+static void endBinCal();
 static void finishCurrentHold(bool early);
 static void cancelCurrentHold();
 static void sendNavPacket(float heading, float headingRaw, float pitch, float roll,
@@ -1491,10 +1496,7 @@ void loop() {
                         Serial.printf("[BIN_CAL] ERROR: could not open %s\n", gBinCalCsvPath);
                     }
                 }
-                imu::magBinCalEnd();
-                loadCalibration();  // restore whatever's actually on flash
-                gInCal   = false;
-                sysState = SystemState::READY;
+                endBinCal();
                 Serial.println("[BIN_CAL] Cal complete, returning to READY");
             }
         } else if (gCalMode == 0) {
@@ -1635,6 +1637,17 @@ void loop() {
 // ===========================================================================
 // Helpers
 // ===========================================================================
+
+// End a bin cal (baseline, mounted or gap-fill) and go back to navigating on
+// the cal installed on flash. Shared by completion, after the CSV dump and
+// upload, and by QUIT_CAL, which skips both. loadCalibration() is what keeps
+// a quit baseline from leaving heading on the identity cal it collects under.
+static void endBinCal() {
+    imu::magBinCalEnd();
+    loadCalibration();  // restore whatever's actually on flash
+    gInCal   = false;
+    sysState = SystemState::READY;
+}
 
 static void loadCalibration() {
     // Magnetometer — try two-stage chain (mag_base.json + mag_mount.json),
@@ -2191,8 +2204,9 @@ static void setDiveMode(bool dive) {
 // device stays in whatever state it was in, so this is purely informational.
 static void sendGapFillRefusal(const char* why) {
     CalCloudResultPacket rpkt{};
-    rpkt.cal_type = (uint8_t)CalType::BASELINE;
-    rpkt.stage    = (uint8_t)CalCloudStage::FAILED;
+    rpkt.cal_type    = (uint8_t)CalType::BASELINE;
+    rpkt.stage       = (uint8_t)CalCloudStage::FAILED;
+    rpkt.installable = false;   // a gap-fill: the display names step 1a
     strncpy(rpkt.error, why, sizeof(rpkt.error) - 1);
     rpkt.error[sizeof(rpkt.error) - 1] = '\0';
 
@@ -2397,9 +2411,32 @@ static void handleDisplayCmd() {
                         break;
                     }
                     case DisplayCmd::FINISH_BASELINE_COLLECTION:
+                        // The name predates it: this finishes any bin cal,
+                        // mounted included (FINISH on the cal screen).
                         Serial.println("CMD: FINISH_BASELINE_COLLECTION (diver declares done)");
-                        if (gInCal && (gCalMode == 5 || gCalMode == 7)) {
+                        if (gInCal && (gCalMode == 5 || gCalMode == 6 || gCalMode == 7)) {
                             imu::magBinCalFinishBaseline();
+                        }
+                        break;
+                    case DisplayCmd::QUIT_CAL:
+                        // Hold BTN1 on a cal screen. Nothing is dumped or
+                        // uploaded: a samples CSV already on flash from an
+                        // earlier session stays as it was, so tern.local's
+                        // retry-upload still finds it.
+                        if (gInCal && (gCalMode == 5 || gCalMode == 6 || gCalMode == 7)) {
+                            Serial.printf("CMD: QUIT_CAL -- bin cal mode %u ended, nothing saved\n",
+                                          (unsigned)gCalMode);
+                            endBinCal();
+                        } else if (gHdgCalActive) {
+                            // Heading samples live only in RAM until
+                            // FINALIZE_HDG_CAL, so there's nothing on flash.
+                            Serial.printf("CMD: QUIT_CAL -- heading cal ended at %d points, nothing saved\n",
+                                          gHdgSampleCount);
+                            gHdgCalActive   = false;
+                            gHdgSampleCount = 0;
+                            gLevelGate.reset();
+                        } else {
+                            Serial.println("CMD: QUIT_CAL -- no bin or heading cal running, ignored");
                         }
                         break;
                     case DisplayCmd::START_SPEED_CAL: {
@@ -2626,53 +2663,114 @@ static void handleDisplayCmd() {
                     case DisplayCmd::ACCEPT_CLOUD_CAL: {
                         char cid[40];
                         parseCloudCalId(cmdBuf, cmdPos, cid, sizeof(cid));
+                        // Whatever happens, the display hears back once it's
+                        // all done (CAL_RESPONDED): it holds its Saving
+                        // screen until then, because this can block for two
+                        // HTTPS round trips and NO LINK would otherwise flash.
+                        CalRespondedPacket rp{};
+                        rp.cal_type = (uint8_t)gCloudCalType;
+                        rp.accepted = true;
                         if (strlen(gCloudCalId) > 0 && strcmp(cid, gCloudCalId) == 0 &&
                             strlen(gCloudCalPendingPath) > 0) {
                             // Copy the staged result over the active cal file, then
                             // reload -- same effect as the web file-manager's existing
                             // "Reload Cal Files" action, just triggered from here.
+                            bool copied = false;
                             File src = LittleFS.open(gCloudCalPendingPath, FILE_READ);
                             if (src) {
                                 File dst = LittleFS.open(gCloudCalActivePath, FILE_WRITE);
                                 if (dst) {
+                                    copied = true;
                                     uint8_t copyBuf[256];
                                     size_t n;
                                     while ((n = src.read(copyBuf, sizeof(copyBuf))) > 0) {
-                                        dst.write(copyBuf, n);
+                                        if (dst.write(copyBuf, n) != n) { copied = false; break; }
                                     }
                                     dst.close();
-                                    Serial.printf("[CLOUD_CAL] Accepted -- %s -> %s\n",
-                                                  gCloudCalPendingPath, gCloudCalActivePath);
-                                    loadCalibration();
+                                    if (!copied) {
+                                        Serial.printf("[CLOUD_CAL] ERROR: short write to %s\n",
+                                                      gCloudCalActivePath);
+                                        snprintf(rp.error, sizeof(rp.error), "Could not write %s",
+                                                 gCloudCalActivePath);
+                                    }
                                 } else {
                                     Serial.printf("[CLOUD_CAL] ERROR: could not open %s for write\n",
                                                   gCloudCalActivePath);
+                                    snprintf(rp.error, sizeof(rp.error), "Could not open %s",
+                                             gCloudCalActivePath);
                                 }
                                 src.close();
                             } else {
                                 Serial.printf("[CLOUD_CAL] ERROR: could not open %s\n",
                                               gCloudCalPendingPath);
+                                snprintf(rp.error, sizeof(rp.error), "Staged result is missing");
                             }
-                            cloud::respondToCalibration(String(gCloudCalId), true);
+
+                            // Tell the server only what really happened: an
+                            // accept the unit didn't install would make the
+                            // server and the unit disagree about the current cal.
+                            if (copied) {
+                                Serial.printf("[CLOUD_CAL] Accepted -- %s -> %s\n",
+                                              gCloudCalPendingPath, gCloudCalActivePath);
+                                loadCalibration();
+                                rp.installed = true;
+                                const bool responded =
+                                    cloud::respondToCalibration(String(gCloudCalId), true);
+
+                                // A new baseline brings its own gap-fill map, so
+                                // Fill gaps can start straight away. The server
+                                // serves the map of whichever baseline is current,
+                                // and accepting is what makes this one current: if
+                                // the server didn't take the accept, it would hand
+                                // back the previous baseline's map. So no download
+                                // then, and no stale map either -- gap-fill refuses
+                                // with the sync instruction instead of sending the
+                                // diver to the old baseline's cells.
+                                if (strcmp(gCloudCalActivePath, storage::MAG_BASE_FILE) == 0) {
+                                    int targets = 0;
+                                    bool degraded = false;
+                                    String err;
+                                    if (!responded) {
+                                        cal_sync::clearTargets();
+                                        snprintf(rp.error, sizeof(rp.error), "server didn't confirm");
+                                    } else if (cal_sync::refreshGapFillTargets(targets, degraded, err)) {
+                                        rp.target_count = (int16_t)targets;
+                                    } else {
+                                        cal_sync::clearTargets();
+                                        copyForDisplay(rp.error, sizeof(rp.error), err.c_str());
+                                    }
+                                }
+                            }
                         } else {
                             Serial.println("[CLOUD_CAL] ACCEPT with no matching pending result -- ignored");
+                            snprintf(rp.error, sizeof(rp.error), "Nothing pending to install");
                         }
                         gCloudCalId[0]          = '\0';
                         gCloudCalPendingPath[0] = '\0';
+                        char rbuf[160];
+                        size_t rn = calRespondedPacketToBytes(rp, rbuf, sizeof(rbuf));
+                        if (rn > 0) Serial1.write(rbuf, rn);
                         break;
                     }
                     case DisplayCmd::REJECT_CLOUD_CAL: {
                         char cid[40];
                         parseCloudCalId(cmdBuf, cmdPos, cid, sizeof(cid));
+                        CalRespondedPacket rp{};
+                        rp.cal_type = (uint8_t)gCloudCalType;
+                        rp.accepted = false;
                         if (strlen(gCloudCalId) > 0 && strcmp(cid, gCloudCalId) == 0) {
                             if (strlen(gCloudCalPendingPath) > 0) LittleFS.remove(gCloudCalPendingPath);
                             cloud::respondToCalibration(String(gCloudCalId), false);
                             Serial.println("[CLOUD_CAL] Rejected -- discarding pending result");
                         } else {
                             Serial.println("[CLOUD_CAL] REJECT with no matching pending result -- ignored");
+                            snprintf(rp.error, sizeof(rp.error), "Nothing pending to reject");
                         }
                         gCloudCalId[0]          = '\0';
                         gCloudCalPendingPath[0] = '\0';
+                        char rbuf[160];
+                        size_t rn = calRespondedPacketToBytes(rp, rbuf, sizeof(rbuf));
+                        if (rn > 0) Serial1.write(rbuf, rn);
                         break;
                     }
                     case DisplayCmd::LINK_ACCOUNT: {

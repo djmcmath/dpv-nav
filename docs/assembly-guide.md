@@ -327,7 +327,7 @@ Build-time problems only. For calibration and in-water behavior, see the
 | Sensor not found at boot | I²C address, wiring, or a cold joint | WHO_AM_I values and bus continuity |
 | 3.3 V rail sags on WiFi connect | Power wiring / supply headroom | See [§9.6](#96-power-wiring-notes) |
 | Heading error concentrated in one compass sector | Declination or an axis-convention error | Not a wiring fault; see the User Guide |
-| Clean RMS but bad real-world heading | Calibration pass criteria, not assembly | See [calibration-guide.md](calibration-guide.md) |
+| Clean RMS but bad real-world heading | Calibration pass criteria, not assembly | See [user-calibration-guide.md](user-calibration-guide.md#what-good-looks-like) |
 | Flow meter reads zero or erratic | Potting void, wrong lead identified, or mounting orientation | Bench-ID the leads; re-read [Manufacturing §9](manufacturing-guide.md#9-potting-the-flow-meter) |
 | Moisture card triggered after a dive | Seal | [§10.2](#102-o-rings-and-closing-up), [§11](#11-sealing-and-leak-testing) |
 | Online but a feature seems missing | Unflashed build | Read the boot log and check the reported version |

@@ -87,11 +87,42 @@ magnetometer's offset moves with it — ~0.68 µT/°C horizontally on this unit 
 and the firmware compensates the mag readings with it when `/mag_temp.json` is
 installed (see [mag-temperature-compensation.md](./mag-temperature-compensation.md)).
 So logs recorded with compensation active hold **compensated** `mag_*_raw` and
-`mag_*_cal`. `water_temp_c` comes from the MS5837 in the nose, which barely sees a
-board-local temperature change; never use it for magnetometer thermal work. The
+`mag_*_cal`. `water_temp_c` comes from the MS5837 on the stern of the nav tube, which barely
+sees a board-local temperature change; never use it for magnetometer thermal work. The
 die temperature's absolute value is not factory-trimmed, so use it for change,
 not as a room thermometer. It logs as `nan` until a plausible reading has been
 captured, and on MARK and CURRENT rows, whose sensor columns aren't sampled.
+
+## `water_temp_c` is a die temperature, not a thermometer
+
+The column is the MS5837's own die temperature. That is exactly what the chip's
+pressure compensation needs, so depth is unaffected by anything below -- but it
+is water temperature only insofar as the probe is coupled to the water, and it
+has been seen decoupled.
+
+On **2026-11-08** (`tools/logs/20261108-001.csv`) it sat flat at 14.2-14.4 °C for
+the whole dive, including a descent to 35 m through a thermocline, with two
+exponential excursions to 10.47 °C and 10.99 °C. The excursions were the correct
+readings. The same unit on the same unchanged firmware read 15.5-16.0 °C at the
+surface and 9.7 °C mean below 20 m on 2026-10-24 and 2026-10-30, crossing the
+thermocline cleanly both times. The driver's compensation math was checked
+against the datasheet and the I2C bus was demonstrably healthy (depth tracked
+all dive), so this was physical, at the probe, and the mechanism is still
+unidentified.
+
+**Before using `water_temp_c` from a dive, check that it moved on the descent.**
+If it is flat through a thermocline crossing, discard it for that dive. Nothing
+in the firmware or on Dive Map depends on this column.
+
+The driver paces its conversions at `ms5837::SAMPLE_PERIOD_MS` (500 ms) rather
+than running the ADC flat out, because continuous OSR-8192 conversions self-heat
+the die and bias the reading warm. Dive logs before 2026-11-09 were recorded at
+~25 Hz, 100% ADC duty, so their water temperatures likely read somewhat high.
+
+`tern.local`'s Diagnostics panel reports the sensor's I2C read counters, which is
+the only way to tell a sealed unit's silently-failing depth sensor from a working
+one: a failed read leaves the chip's previous raw value in the driver, so the
+driver drops that cycle rather than reporting the same numbers as a fresh sample.
 
 ## Headings in logs are TRUE
 

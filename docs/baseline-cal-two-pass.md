@@ -19,7 +19,7 @@
 > gap-fill bins, is planned in [baseline-live-grid-plan.md](./baseline-live-grid-plan.md).
 > See Status below.
 
-Companion to [calibration-guide.md](./calibration-guide.md) (the on-device procedure) and
+Companion to [dev-calibration-guide.md](./dev-calibration-guide.md) (the on-device procedure) and
 [cloud-calibration-plan.md](./cloud-calibration-plan.md) (the WiFi upload/fit round-trip).
 This note is about what happens *during* Baseline collection, on the device, before any
 CSV is ever uploaded — specifically, how the live bin-coverage grid decides what to show
@@ -169,7 +169,7 @@ is baseline-only.
   and it stopped being acceptable once a tilted-ring mounted fit was traced to it. Roll
   sectors, the 4-triangle roll widget, `binRollSatisfied()` as the single
   cell-is-finished predicate, and the server-side coverage sync all shipped; see
-  `docs/calibration-guide.md` and dive-map's
+  `docs/dev-calibration-guide.md` and dive-map's
   `docs/architecture/calibration-grid-conventions.md`. What remains open is **steering**,
   not tracking: heading gain is `tan(pitch)`, so cells at |pitch| > 60° are not aimable,
   and near-vertical roll credit is largely noise — accepted as-is 2026-09-18, with the

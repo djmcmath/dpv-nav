@@ -66,7 +66,7 @@ why the frame matters.
 - **It is close to linear.** Quadratic terms are small and change sign between logs.
 - **The heat gun's own field doesn't show.** Nothing steps when the gun switches off.
   Field and die temperature peak together.
-- **The nose sensor adds nothing.** A second term on `water_temp_c` (MS5837 in the nose)
+- **The depth sensor adds nothing.** A second term on `water_temp_c` (MS5837 on the nav tube's stern)
   changes sign from log to log over its 1–3 °C range, so there's no evidence of a separate
   "bulk" effect. **Never use `water_temp_c` for magnetometer thermal work.** It barely sees a
   board-local event (0.45 °C vs the die's 6 °C in an earlier test), and regressing against it

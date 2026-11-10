@@ -64,6 +64,11 @@ constexpr float MAG_CAL_EXPECTED_FIELD_UT = 50.1f;
 #define DISPLAY_MODE 0
 #endif
 
+// Display buttons: how long a hold must last to count as a long press. The
+// two-button display reinit and speed cal's manual start use it, and every cal
+// screen's hold-BTN1-to-discard (QUIT, REJECT; util/cal_keys.h) does too.
+constexpr uint32_t LONG_PRESS_MS = 2000;
+
 // How often the LIS3MDL die temperature is re-read (a separate I2C read; the
 // field is read every loop pass). Temperature moves over seconds.
 constexpr uint32_t MAG_TEMP_READ_INTERVAL_MS = 250;
@@ -120,6 +125,10 @@ constexpr uint32_t LOG_COMMIT_DELAY_MS  = 5000;   // 5 s settle before a file op
 constexpr uint8_t MAG_CAL_BIN_GREEN_THRESHOLD  = 18;  // samples for "green" (fully covered)
 constexpr uint8_t MAG_CAL_BIN_YELLOW_THRESHOLD = 7;   // samples for "yellow" (partial)
 
+// The bin-cal sample buffer (baseline, gap-fill and mounted share it). Baseline
+// ends when it fills, so the display counts toward it in the cal header.
+constexpr int MAG_CAL_BIN_MAX_SAMPLES = 60 * MAG_CAL_BIN_GREEN_THRESHOLD * 2;  // 2160
+
 // Baseline cal: 12 heading sectors × 5 elevation bands = 60 bins
 // Elevation bands (degrees pitch): <-60, -60..-30, -30..+30 (level), +30..+60, >+60
 constexpr int MAG_CAL_BASELINE_HDG_SECTORS = 12;
@@ -153,11 +162,17 @@ constexpr float MAG_CAL_MOUNTED_OOR_WEIGHT = 0.25f;
 // still improves fit quality; requiring 100% is unnecessary.
 //
 //   Level (0°):     12/12 = 100%  — must be fully covered for reliable horizontal heading
-//   ±30° rows:       6/12 =  50%  — with no gap over MAG_CAL_DWELL_TILT_MAX_GAP_SECTORS;
-//                                   see "Mounted dwell capture" below for why six is enough
-//   ±60° rows:       9/12 = 75%  — three missed sectors at extreme tilt is acceptable
+//   ±30° rows:      12/12 = 100%  — mounted only; see below
+//   ±60° rows:       3/12 =  25%  — baseline only
+//
+// The ±30° rows were 6/12 (no gap over MAG_CAL_DWELL_TILT_MAX_GAP_SECTORS) until
+// 2026-11-09, when the unified cal screens made every empty mounted cell red and
+// added FINISH, so the diver can stop at any time. Whether the tilted rows earn
+// their time is an open analysis (backlog: "Mounted cal: do the tilted rows earn
+// their time?"); until it is done, fill them. Dropping this back needs no other
+// change: mounted_dwell.h and its tests are written in terms of it.
 constexpr int MAG_CAL_SECTORS_LEVEL   = 12;  // 100% — level row
-constexpr int MAG_CAL_SECTORS_MID     =  6;  //  50% — ±30° rows
+constexpr int MAG_CAL_SECTORS_MID     = 12;  // 100% — ±30° rows (mounted)
 constexpr int MAG_CAL_SECTORS_EXTREME =  3;  //  25% — ±60° rows (baseline only)
 // Note: extreme rows need only 3/12 sectors because DPV operation rarely exceeds ±45°
 // pitch.  A handful of extreme-tilt samples is enough to constrain the Z-axis of the
@@ -207,7 +222,9 @@ constexpr float MAG_CAL_DWELL_TILT_ROLL_TOL_DEG  = 15.0f;
 constexpr float MAG_CAL_DWELL_HDG_GUARD_DEG = 3.0f;
 
 // A tilted row is complete at MAG_CAL_SECTORS_MID cells with no run of empty
-// headings wider than this between filled ones: 3 sectors = 90°.
+// headings wider than this between filled ones: 3 sectors = 90°. With
+// MAG_CAL_SECTORS_MID at 12 every cell is filled, so the gap rule cannot bite;
+// it matters again only if the analysis brings the cell count back down.
 constexpr int MAG_CAL_DWELL_TILT_MAX_GAP_SECTORS = 3;
 
 // The on-screen motion bar holds its peak this long so it does not flicker.
@@ -355,7 +372,7 @@ constexpr int MAG_CAL_GAPFILL_MIN_SAMPLES = 20;
 // ---------------------------------------------------------------------------
 
 // Upright / right-side / upside-down / left-side — reuses the plain-language
-// vocabulary docs/calibration-guide.md's accelerometer-calibration section
+// vocabulary docs/dev-calibration-guide.md's accelerometer-calibration section
 // (and the `accel_orient` serial diagnostic) already established.
 constexpr int MAG_CAL_ROLL_SECTORS = 4;
 

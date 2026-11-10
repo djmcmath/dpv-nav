@@ -223,7 +223,8 @@ number to accept or reject. An offline Python fit exists as a WiFi-less fallback
 > scratch**, never gap-filled. Nothing enforces this yet; see
 > [backlog.md](backlog.md) Tier 1.
 
-Depth: [calibration-guide.md](calibration-guide.md).
+Depth: [user-calibration-guide.md](user-calibration-guide.md) for the procedure,
+[dev-calibration-guide.md](dev-calibration-guide.md) for the internals.
 
 ### Other subsystems
 

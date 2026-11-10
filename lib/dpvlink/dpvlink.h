@@ -373,15 +373,42 @@ struct CalCloudResultPacket {
     int16_t coverage_gaps;        // stage == DONE only; baseline only. -1 = not
                                    // applicable (mounted, or pre-9-axis-firmware CSV).
                                    // See divemap's baseline-cal-coverage-feedback-plan.md.
-    // stage == DONE only. False for a gap-fill upload: that fit is computed
+    // Every stage. False for a gap-fill upload: that fit is computed
     // from ONLY the cells the diver just patched (a handful out of 60), and
     // is a merge candidate on the website, never something to install
     // standalone. True (the default) preserves old wire behaviour for
     // baseline/mounted, where accepting IS the intended action. The display
     // must not offer ACCEPT/REJECT when this is false -- see
     // divemap/docs/architecture/baseline-cal-coverage-feedback-plan.md,
-    // "gap-fill never overwrites the active baseline on its own."
+    // "gap-fill never overwrites the active baseline on its own." Also false
+    // on nav's refusal to start a gap-fill, so the display names step 1a.
     bool    installable = true;
+};
+
+// ---------------------------------------------------------------------------
+// Cal responded packet  (nav -> display), "A"
+//
+// Sent once nav has fully handled an ACCEPT_CLOUD_CAL or REJECT_CLOUD_CAL:
+// the file copy, the server round trip and, for a baseline accept, the
+// gap-fill map download. The display holds its Saving (or Rejected) screen
+// until it arrives, instead of dropping to the nav screen while nav is still
+// blocked in HTTPS and flashing NO LINK. Sent on every path, including an
+// ACCEPT or REJECT nav ignored because nothing pending matched it, so the
+// display never has to wait out its timeout. See
+// docs/cal-screens-unified-plan.md.
+//
+// Its own packet type rather than a stage of CalCloudResultPacket: no field
+// is repurposed, and a display too old to know it ignores it instead of
+// reading it as a fit result.
+// ---------------------------------------------------------------------------
+struct CalRespondedPacket {
+    uint8_t cal_type     = 0;      // CalType of the cal accepted or rejected
+    bool    accepted     = false;  // what the display asked for
+    bool    installed    = false;  // ACCEPT only: the staged file was copied in and loaded
+    int16_t target_count = -1;     // baseline ACCEPT only: thin + empty cells in the gap-fill
+                                   // map just downloaded; -1 = not downloaded, or n/a
+    char    error[64]    = "";     // why it wasn't installed, or why the map wasn't
+                                   // downloaded; "" = nothing went wrong
 };
 
 // ---------------------------------------------------------------------------
@@ -427,7 +454,8 @@ struct WaypointListPacket {
 enum class PacketType : uint8_t { UNKNOWN = 0, NAV, DEBUG, CAL_PROGRESS, WAYPOINT_LIST, CAL_CLOUD_RESULT, CLOUD_LINK_RESULT, BOOT_PING,
                                   OTA_BEGIN,     // "U": start a display firmware transfer (see ota_link.h)
                                   UPDATE_HINT,   // "V": a firmware update is available
-                                  CAL_ORIENT };  // "O": live orientation between CAL_PROGRESS frames
+                                  CAL_ORIENT,    // "O": live orientation between CAL_PROGRESS frames
+                                  CAL_RESPONDED };  // "A": an ACCEPT/REJECT of a cloud cal is fully handled
 
 PacketType identifyPacket(const char* buf, size_t len);
 
@@ -479,6 +507,8 @@ enum class DisplayCmd : uint8_t {
     // 44-46 retired (were SET_DATUM / NAV_TO_DATUM / DATUM_WAS — the Nav > Datum
     // search-datum feature, removed unused). Do not reuse: older firmware on the
     // other board may still send or expect them.
+    QUIT_CAL               = 47, // diver held BTN1 on a cal screen: end the bin cal or heading cal
+                                 // in progress with nothing saved or uploaded
 };
 
 // ---------------------------------------------------------------------------
@@ -537,6 +567,9 @@ bool   bytesToCalOrientPacket(const char* buf, size_t len, CalOrientPacket& out)
 
 size_t calCloudResultPacketToBytes(const CalCloudResultPacket& pkt, char* buf, size_t bufLen);
 bool   bytesToCalCloudResultPacket(const char* buf, size_t len, CalCloudResultPacket& out);
+
+size_t calRespondedPacketToBytes(const CalRespondedPacket& pkt, char* buf, size_t bufLen);
+bool   bytesToCalRespondedPacket(const char* buf, size_t len, CalRespondedPacket& out);
 
 size_t cloudLinkResultPacketToBytes(const CloudLinkResultPacket& pkt, char* buf, size_t bufLen);
 bool   bytesToCloudLinkResultPacket(const char* buf, size_t len, CloudLinkResultPacket& out);

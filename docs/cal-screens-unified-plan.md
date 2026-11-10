@@ -379,10 +379,12 @@ Values: Baseline and Mounted print `rms_pct` as `%.0f%%`. Heading prints the lea
   frame, holding to quit or reject, FINISH on Mounted, the counters, INDICATED HDG, and the
   gap-fill map arriving with the accept (drop the "run Check for updates first" step from
   the gap-fill instructions). The illustrated walkthrough is a separate backlog item.
-- **Menu paths:** about 50 places in `user-guide.md`, `calibration-guide.md` and CLAUDE.md
+- **Menu paths:** about 50 places in `user-calibration-guide.md`, `dev-calibration-guide.md` and CLAUDE.md
   say "CAL > Baseline", "CAL > Hdg cal" and so on. Switch them to the new labels, and update
   CLAUDE.md's Menu Structure tree.
-- **`calibration-guide.md`:** anywhere it describes these screens or buttons.
+- **`user-calibration-guide.md`:** anywhere it describes these screens or buttons.
+  (`dev-calibration-guide.md` no longer describes them: the diver-facing procedures
+  moved out of it when the calibration docs were split by audience.)
 - **`backlog.md`:** mark the OFFLINE item half done, with auto-retry still open. The
   walkthrough item is unblocked.
 - **`tools/cal_screen_mock/screens.js`:** match anything the build changed.
@@ -492,6 +494,10 @@ included; dive-map's `fit.py` comment is on its own `feature/cal-screens-unified
 branch). Host tests and both board builds pass. **Not yet bench-tested:** the hardware
 test above is owed, on a `0.7.26-dev.N` OTA build. The bench checks after step 3 and
 after each collecting screen were folded into that one session, to save OTA rounds.
+
+**Bench, 2026-11-09 evening:** the user ran Baseline (1) and Fill gaps (1a) on
+`0.7.26-dev.1` and called them a significant improvement, much cleaner than before.
+Mounted, Heading and the rest of the checklist are still owed.
 
 Where the build differs from the plan:
 - `cal_keys.h` also reports BTN2, and any press made with both buttons down does
